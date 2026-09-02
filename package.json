@@ -1,0 +1,22 @@
+{
+    "$schema": "https://www.schemastore.org/package.json",
+    "name": "@buildbridge/workspace",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev:frontend": "vp dev",
+        "dev:desktop": "vp run --filter @buildbridge/desktop tauri dev",
+        "build": "vp run -r build",
+        "build:web": "vp run --filter @buildbridge/web build",
+        "build:desktop": "vp run --filter @buildbridge/desktop tauri build",
+        "check": "vp check && vp run -r typecheck && cargo check --workspace",
+        "test": "cargo test --workspace",
+        "test:rust": "cargo test --workspace",
+        "prepare": "vp config"
+    },
+    "devDependencies": {
+        "vite": "catalog:",
+        "vite-plus": "catalog:"
+    },
+    "packageManager": "pnpm@11.1.2"
+}

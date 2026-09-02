@@ -1,0 +1,31 @@
+[workspace]
+members = [
+    "crates/buildbridge-docker-osx",
+    "apps/desktop/src-tauri",
+    "crates/buildbridge-contract",
+    "crates/buildbridge-runner",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+buildbridge-contract = { path = "crates/buildbridge-contract" }
+buildbridge-docker-osx = { path = "crates/buildbridge-docker-osx" }
+buildbridge-runner = { path = "crates/buildbridge-runner" }
+jsonwebtoken = { version = "11", default-features = false, features = [
+    "rust_crypto",
+    "use_pem",
+] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "charset",
+    "http2",
+    "json",
+    "rustls-tls",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

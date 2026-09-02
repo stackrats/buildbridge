@@ -1,0 +1,13 @@
+[package]
+name = "buildbridge-docker-osx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Typed Docker-OSX host provider for BuildBridge"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

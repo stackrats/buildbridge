@@ -1,0 +1,14 @@
+*.log
+.DS_Store
+**/.env
+**/.env.backup
+**/.env.production
+/.codex
+/.cursor/
+/.idea
+/.nova
+/.vscode
+/.zed
+**/node_modules
+/target
+Thumbs.db
