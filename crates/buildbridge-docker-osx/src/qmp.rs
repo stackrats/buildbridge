@@ -289,10 +289,38 @@ pub(crate) fn parse_peripheral_ids(value: &Value) -> Vec<String> {
 
 /// `info usb` lists an attached device as `Device 0.2, Port 1, …, Product iPhone, ID: <id>`
 /// only once QEMU has opened the host device and the guest has enumerated it.
-pub(crate) fn usb_summary_mentions(text: &str, id: &str) -> bool {
-    let marker = format!("ID: {id}");
+/// How QEMU is holding the passed-through device.
+///
+/// QEMU lists the device id as soon as it owns the host port, whether or not it could read the
+/// phone. A phone that was reset mid-handover comes back as a low-speed `USB Host Device` with
+/// no readable descriptors: QEMU still names it, the guest never enumerates it, and only a
+/// physical replug recovers it. Treating that as attached is what made the interface claim a
+/// phone was ready while macOS had nothing, so the two cases are told apart here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UsbAttachment {
+    /// QEMU does not hold the port.
+    Absent,
+    /// QEMU holds the port but could not read the device.
+    Unreadable,
+    /// QEMU read the device's own descriptors.
+    Live,
+}
 
-    text.lines().any(|line| line.contains(&marker))
+/// QEMU's placeholder product name for a device whose descriptors it could not read.
+const UNREADABLE_PRODUCT: &str = "Product USB Host Device";
+/// The speed a reset phone falls back to; a real iPhone runs at high speed or better.
+const UNREADABLE_SPEED: &str = "Speed 1.5 Mb/s";
+
+pub(crate) fn usb_attachment(text: &str, id: &str) -> UsbAttachment {
+    let marker = format!("ID: {id}");
+    let Some(line) = text.lines().find(|line| line.contains(&marker)) else {
+        return UsbAttachment::Absent;
+    };
+    if line.contains(UNREADABLE_PRODUCT) || line.contains(UNREADABLE_SPEED) {
+        return UsbAttachment::Unreadable;
+    }
+
+    UsbAttachment::Live
 }
 
 pub(crate) fn map_qmp_failure(operation: &'static str, error: QmpError) -> ProviderError {
@@ -409,11 +437,36 @@ mod tests {
     fn x_query_usb_text_reveals_the_enumerated_iphone() {
         let text = "  Device 0.2, Port 1, Speed 480 Mb/s, Product QEMU USB Keyboard\n  Device 0.3, Port 2, Speed 5000 Mb/s, Product iPhone, ID: buildbridge-iphone\n";
 
-        assert!(usb_summary_mentions(text, "buildbridge-iphone"));
-        assert!(!usb_summary_mentions(
-            "  Device 0.2, Port 1, Speed 480 Mb/s, Product QEMU USB Tablet\n",
-            "buildbridge-iphone"
-        ));
+        assert_eq!(
+            usb_attachment(text, "buildbridge-iphone"),
+            UsbAttachment::Live
+        );
+        assert_eq!(
+            usb_attachment(
+                "  Device 0.2, Port 1, Speed 480 Mb/s, Product QEMU USB Tablet\n",
+                "buildbridge-iphone"
+            ),
+            UsbAttachment::Absent
+        );
+    }
+
+    #[test]
+    fn a_phone_reset_during_handover_is_not_reported_as_attached() {
+        // Observed on a real phone after QEMU reset it: named, but no readable descriptors.
+        let degraded = "  Device 0.2, Port 1, Speed 480 Mb/s, Product QEMU USB Keyboard\n  Device 0.0, Port 4, Speed 1.5 Mb/s, Product USB Host Device, ID: buildbridge-iphone\n";
+
+        assert_eq!(
+            usb_attachment(degraded, "buildbridge-iphone"),
+            UsbAttachment::Unreadable
+        );
+        // A high-speed line that merely lacks a product name is still a real claim.
+        assert_eq!(
+            usb_attachment(
+                "  Device 0.3, Port 3, Speed 480 Mb/s, Product iPhone, ID: buildbridge-iphone\n",
+                "buildbridge-iphone"
+            ),
+            UsbAttachment::Live
+        );
     }
 
     #[test]

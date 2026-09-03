@@ -402,11 +402,17 @@ const checks = computed(() => {
                 : (usb.value.containerIssue ?? 'needs USB access'),
         },
         {
+            // QEMU owning the port is not the same as the guest having the phone: a phone reset
+            // during the handover is still listed by QEMU, so this waits for the real thing.
             label: 'Attached',
-            ok: rung(['host-rule', 'container', 'plug-in', 'attach', 'unplugged']),
-            detail: r.hostDevice
-                ? `${r.hostDevice.product ?? 'phone'} on bus ${r.hostDevice.bus} port ${r.hostDevice.port}`
-                : 'plug the phone into this host',
+            ok:
+                rung(['host-rule', 'container', 'plug-in', 'attach', 'unplugged']) &&
+                (usb.value.attached?.enumerated ?? false),
+            detail: !r.hostDevice
+                ? 'plug the phone into this host'
+                : usb.value.attached && !usb.value.attached.enumerated
+                  ? 'held by QEMU, not yet seen by the guest'
+                  : `${r.hostDevice.product ?? 'phone'} on bus ${r.hostDevice.bus} port ${r.hostDevice.port}`,
         },
         {
             label: 'Trusted',

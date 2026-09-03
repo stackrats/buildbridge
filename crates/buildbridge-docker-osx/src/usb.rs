@@ -14,18 +14,24 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::disk::inspect_container_layout;
-use crate::qmp::{IPHONE_QMP_DEVICE_ID, QmpClient, usb_summary_mentions};
+use crate::qmp::{IPHONE_QMP_DEVICE_ID, QmpClient, UsbAttachment, usb_attachment};
 use crate::{ContainerState, ProviderError, TrackedCommand, clean_output, recent_logs};
 
 /// Sorted after `39-usbmuxd.rules`, whose ownership and systemd activation it overrides, and
 /// before the `80-`/`99-` rules that do not touch phones.
 pub const USB_UDEV_RULE_PATH: &str = "/etc/udev/rules.d/40-buildbridge-iphone.rules";
-/// The rule. usbmuxd's own rule still runs first and parks the phone in configuration 0,
-/// which keeps the kernel's tethering and camera drivers off it; this one then stops usbmuxd
-/// from being started for it and hands the node to `plugdev`, the group the container's QEMU
-/// user is added to.
+/// The rule. It stops usbmuxd from being started for the phone, hands the node to `plugdev` —
+/// the group the container's QEMU user is added to — and puts the phone back into a configured
+/// state.
+///
+/// That last part matters. usbmuxd's own rule runs first and parks the phone in configuration 0
+/// (`ATTR{bConfigurationValue}="0"`) so that usbmuxd can choose a configuration itself. With
+/// usbmuxd disabled nothing ever does, and an unconfigured device cannot be enumerated by the
+/// guest at all: QEMU hands it over, and macOS never sees a usable device. Because this file
+/// sorts after `39-usbmuxd.rules`, assigning the attribute here runs last and wins, leaving the
+/// phone on its first configuration the way the kernel would have picked by default.
 pub const USB_UDEV_RULE: &str = "# Written by BuildBridge; remove this file to restore usbmuxd handling of iPhones.\n\
-SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ENV{PRODUCT}==\"5ac/12[9a][0-9a-f]/*\", ENV{USBMUX_SUPPORTED}=\"0\", ENV{SYSTEMD_WANTS}=\"\", TAG-=\"systemd\", GROUP=\"plugdev\", MODE=\"0660\"\n";
+SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ENV{PRODUCT}==\"5ac/12[9a][0-9a-f]/*\", ENV{USBMUX_SUPPORTED}=\"0\", ENV{SYSTEMD_WANTS}=\"\", TAG-=\"systemd\", GROUP=\"plugdev\", MODE=\"0660\", ATTR{bConfigurationValue}=\"1\"\n";
 /// The character-device major of `/dev/bus/usb`, for the container's device cgroup rule.
 pub const USB_BUS_MAJOR: u32 = 189;
 pub const APPLE_VENDOR_ID: &str = "05ac";
@@ -439,31 +445,41 @@ pub fn attach_usb_device(
     client.add_usb_host(device.bus, &device.port)?;
 
     let started = Instant::now();
-    let mut enumerated = false;
+    let mut attachment = UsbAttachment::Absent;
     while started.elapsed() < ATTACH_TIMEOUT {
-        if client
-            .usb_summary()?
-            .is_some_and(|text| usb_summary_mentions(&text, IPHONE_QMP_DEVICE_ID))
-        {
-            enumerated = true;
+        attachment = match client.usb_summary()? {
+            Some(text) => usb_attachment(&text, IPHONE_QMP_DEVICE_ID),
+            None => UsbAttachment::Absent,
+        };
+        if attachment == UsbAttachment::Live {
             break;
         }
         thread::sleep(ATTACH_POLL);
     }
-    let issue = (!enumerated).then(|| {
-        recent_logs(container_name)
-            .ok()
-            .and_then(|lines| {
-                lines.into_iter().rev().find(|line| {
-                    let lowered = line.to_ascii_lowercase();
-                    lowered.contains("usb-host") || lowered.contains("libusb")
+    let enumerated = attachment == UsbAttachment::Live;
+    // A phone QEMU holds but cannot read is its own state: no log line explains it, and only
+    // a physical replug clears it, so say that rather than showing an unrelated libusb line.
+    let issue = match attachment {
+        UsbAttachment::Live => None,
+        UsbAttachment::Unreadable => Some(
+            "The phone was reset while it was being handed over, so macOS cannot enumerate it. Unplug it, plug it in again, and attach once."
+                .to_string(),
+        ),
+        UsbAttachment::Absent => Some(
+            recent_logs(container_name)
+                .ok()
+                .and_then(|lines| {
+                    lines.into_iter().rev().find(|line| {
+                        let lowered = line.to_ascii_lowercase();
+                        lowered.contains("usb-host") || lowered.contains("libusb")
+                    })
                 })
-            })
-            .unwrap_or_else(|| {
-                "The guest has not enumerated the phone yet; unplug it and plug it in again."
-                    .to_string()
-            })
-    });
+                .unwrap_or_else(|| {
+                    "The guest has not enumerated the phone yet; unplug it and plug it in again."
+                        .to_string()
+                }),
+        ),
+    };
 
     Ok(AttachedUsbDevice {
         bus: device.bus,
@@ -507,19 +523,23 @@ fn probe_qmp(qmp_socket: &Path) -> (bool, Option<AttachedUsbDevice>) {
     let (Some(bus), Some(port)) = (bus, port) else {
         return (true, None);
     };
-    let enumerated = client
+    let attachment = client
         .usb_summary()
         .ok()
         .flatten()
-        .is_some_and(|text| usb_summary_mentions(&text, IPHONE_QMP_DEVICE_ID));
+        .map(|text| usb_attachment(&text, IPHONE_QMP_DEVICE_ID))
+        .unwrap_or(UsbAttachment::Absent);
 
     (
         true,
         Some(AttachedUsbDevice {
             bus,
             port,
-            enumerated,
-            issue: None,
+            enumerated: attachment == UsbAttachment::Live,
+            issue: (attachment == UsbAttachment::Unreadable).then(|| {
+                "The phone was reset while it was being handed over, so macOS cannot enumerate it. Unplug it, plug it in again, and attach once."
+                    .to_string()
+            }),
         }),
     )
 }
@@ -714,9 +734,16 @@ mod tests {
             "TAG-=\"systemd\"",
             "GROUP=\"plugdev\"",
             "MODE=\"0660\"",
+            // Undoes usbmuxd's configuration-0 parking; an unconfigured phone never
+            // enumerates in the guest.
+            "ATTR{bConfigurationValue}=\"1\"",
         ] {
             assert!(rule.contains(fragment), "{fragment}");
         }
+        assert!(
+            !rule.contains("ATTR{bConfigurationValue}=\"0\""),
+            "parking the phone unconfigured is what this rule exists to undo"
+        );
         assert!(USB_UDEV_RULE.ends_with('\n'));
     }
 

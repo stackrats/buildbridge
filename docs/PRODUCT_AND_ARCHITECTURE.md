@@ -997,6 +997,19 @@ ladder is shown as a readiness grid and every rung has one primary action:
    `devicectl device process launch --console --terminate-existing`. Stop ends the console and
    keeps the run; every line reaches the drawer's **Device console** tab.
 
+Two things learned from the first real phone on this host, both now handled. usbmuxd's own udev
+rule parks an iPhone in USB configuration 0 so that usbmuxd can choose a configuration itself;
+with usbmuxd disabled nothing ever does, and an unconfigured device cannot be enumerated by the
+guest at all. BuildBridge's rule therefore assigns a configuration back, and because it sorts
+after usbmuxd's it wins. Separately, QEMU lists the passed-through device id as soon as it owns
+the host port, whether or not it could read the phone: a phone reset during the handover comes
+back as a low-speed device with no readable descriptors, which only a physical replug clears.
+Attachment is therefore judged by whether QEMU read the phone's own descriptors, not by the id
+being present, so the step no longer reports a phone as attached while macOS has nothing.
+
+Hot-plugging an iPhone into a running macOS guest remains the fragile part, and the experimental
+label is there for it: repeated attach and detach cycles degrade the phone until it is replugged.
+
 A team's kit may hold only a development identity. Such a kit provisions and carries a machine
 through this step, but the signed archive stays locked until a distribution identity and an App
 Store profile are added, and every place the kit appears says so.
