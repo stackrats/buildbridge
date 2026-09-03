@@ -1,0 +1,199 @@
+// Signing kits: named sets of Apple material held once in this host's operating-system vault.
+//
+// A kit is host-level so the files and passwords are entered once. Each machine is attached to
+// one kit, and provisioning imports that kit's identity into that machine's guest keychain — so
+// the same kit can serve several machines, and one host can hold a kit per developer team.
+
+import { computed, reactive } from 'vue';
+
+import { useBackend } from '../lib/backend';
+import { describeError } from '../lib/utils';
+import type {
+    AppleTeamVerification,
+    CreateAppleProfileResult,
+    SigningKitInput,
+    SigningKitSummary,
+} from '../types/backend';
+
+const state = reactive({
+    kits: [] as SigningKitSummary[],
+    loaded: false,
+    loading: false,
+    saving: false,
+    deleting: false,
+    error: null as string | null,
+    notice: null as string | null,
+    verification: null as AppleTeamVerification | null,
+    verificationMachineId: null as string | null,
+    verifying: false,
+    verificationError: null as string | null,
+    creatingProfile: false,
+    creatingCertificateKitId: null as string | null,
+    downloadingProfileId: null as string | null,
+    createdProfile: null as CreateAppleProfileResult | null,
+    profileError: null as string | null,
+});
+
+/** A kit can provision only when it holds an identity, a profile, and a keychain password. */
+export function kitIsProvisionable(kit: SigningKitSummary | null | undefined): boolean {
+    return (
+        kit !== null &&
+        kit !== undefined &&
+        kit.signingCertificateConfigured &&
+        kit.provisioningProfileNames.length > 0 &&
+        kit.guestKeychainConfigured
+    );
+}
+
+export function useSigningStore() {
+    return {
+        state,
+        kits: computed(() => state.kits),
+        kitById: (id: string | null | undefined) =>
+            id ? (state.kits.find((kit) => kit.id === id) ?? null) : null,
+
+        async load(): Promise<void> {
+            state.loading = !state.loaded;
+            try {
+                state.kits = await useBackend().listSigningKits();
+                state.loaded = true;
+                state.error = null;
+            } catch (error) {
+                state.error = describeError(error);
+            } finally {
+                state.loading = false;
+            }
+        },
+
+        async save(input: SigningKitInput): Promise<boolean> {
+            state.saving = true;
+            state.error = null;
+            state.notice = null;
+            try {
+                state.kits = await useBackend().saveSigningKit(input);
+                state.notice = input.kitId
+                    ? 'Signing kit updated. Secret values are not shown again.'
+                    : 'Signing kit stored in the operating-system vault.';
+                state.verification = null;
+                return true;
+            } catch (error) {
+                state.error = describeError(error);
+                return false;
+            } finally {
+                state.saving = false;
+            }
+        },
+
+        async remove(kitId: string): Promise<boolean> {
+            state.deleting = true;
+            state.error = null;
+            state.notice = null;
+            try {
+                state.kits = await useBackend().deleteSigningKit(kitId);
+                state.verification = null;
+                state.createdProfile = null;
+                state.notice =
+                    'Signing kit removed from the vault. Machines using it are now unattached.';
+                return true;
+            } catch (error) {
+                state.error = describeError(error);
+                return false;
+            } finally {
+                state.deleting = false;
+            }
+        },
+
+        async verify(machineId: string): Promise<void> {
+            state.verifying = true;
+            state.verificationError = null;
+            state.profileError = null;
+            try {
+                state.verification = await useBackend().verifyAppleTeam(machineId);
+                state.verificationMachineId = machineId;
+            } catch (error) {
+                state.verificationError = describeError(error);
+            } finally {
+                state.verifying = false;
+            }
+        },
+
+        async createReplacementProfile(machineId: string, certificateId: string): Promise<boolean> {
+            state.creatingProfile = true;
+            state.profileError = null;
+            try {
+                const result = await useBackend().createAppleProfile(machineId, certificateId);
+                state.createdProfile = result;
+                const index = state.kits.findIndex((kit) => kit.id === result.kit.id);
+                if (index >= 0) {
+                    state.kits[index] = {
+                        ...result.kit,
+                        attachedMachines: state.kits[index].attachedMachines,
+                    };
+                }
+                if (state.verification) {
+                    state.verification.profiles = [result.profile, ...state.verification.profiles];
+                }
+                return true;
+            } catch (error) {
+                state.profileError = describeError(error);
+                return false;
+            } finally {
+                state.creatingProfile = false;
+            }
+        },
+
+        /**
+         * Creates an Apple Distribution identity for a kit with no Mac: the key is generated on
+         * this host, Apple signs it through the kit's Team key, and the .p12 lands in the kit.
+         */
+        async createCertificate(kitId: string): Promise<boolean> {
+            state.creatingCertificateKitId = kitId;
+            state.error = null;
+            try {
+                const result = await useBackend().createAppleCertificate(kitId);
+                const index = state.kits.findIndex((kit) => kit.id === result.kit.id);
+                if (index >= 0) {
+                    state.kits[index] = {
+                        ...result.kit,
+                        attachedMachines: state.kits[index].attachedMachines,
+                    };
+                }
+                state.notice = `${result.certificate.name} created at Apple and stored in ${result.kit.name}. Next, create or download an App Store profile for it.`;
+                return true;
+            } catch (error) {
+                state.error = describeError(error);
+                return false;
+            } finally {
+                state.creatingCertificateKitId = null;
+            }
+        },
+
+        /** Pulls an existing Apple profile back into the machine's attached kit. */
+        async downloadProfile(machineId: string, profileId: string): Promise<boolean> {
+            state.downloadingProfileId = profileId;
+            state.profileError = null;
+            try {
+                const result = await useBackend().downloadAppleProfile(machineId, profileId);
+                const index = state.kits.findIndex((kit) => kit.id === result.kit.id);
+                if (index >= 0) {
+                    state.kits[index] = {
+                        ...result.kit,
+                        attachedMachines: state.kits[index].attachedMachines,
+                    };
+                }
+                state.notice = `Added ${result.profile.name} to the kit.`;
+                return true;
+            } catch (error) {
+                state.profileError = describeError(error);
+                return false;
+            } finally {
+                state.downloadingProfileId = null;
+            }
+        },
+
+        clearMessages(): void {
+            state.error = null;
+            state.notice = null;
+        },
+    };
+}

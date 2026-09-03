@@ -1,0 +1,105 @@
+@import 'tailwindcss';
+
+/* Class-based dark mode: lib/prefs.ts toggles `.dark` on <html>, either forced or live
+   following the system preference. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * BuildBridge uses stock Tailwind utilities everywhere — no custom colour classes — so any
+ * Tailwind developer can read a template and know exactly what it renders.
+ *
+ * The palette is fixed by convention rather than by configuration:
+ *
+ *   page        bg-zinc-50      / dark:bg-zinc-950
+ *   surface     bg-white        / dark:bg-zinc-900
+ *   well        bg-zinc-100     / dark:bg-zinc-950
+ *   hairline    border-zinc-200 / dark:border-zinc-800
+ *   text        text-zinc-900   / dark:text-zinc-50   (soft 600/300, muted 500/400)
+ *   action      bg-zinc-900     / dark:bg-zinc-100    (ink, not a hue)
+ *
+ * The grey ramp is zinc, which is neutral. Tailwind's slate carries a blue cast that reads as a
+ * brand colour on large surfaces, which is the opposite of what this palette is for.
+ *   success emerald · warning amber · failure red
+ *
+ * There is deliberately no accent hue. Colour is spent only on status, so an emerald, amber or
+ * red anywhere on screen always means done, needs attention, or failed — and an action is
+ * recognised by its weight rather than by competing for the same attention.
+ *
+ * Standing rules: sentence case, no uppercase styling, no gradients, one glyph per row, and
+ * colour never carries meaning on its own.
+ *
+ * Controls come from components/ui and nowhere else, and none of them is a native form control
+ * wearing a border. The browser draws a select's popup, a number's spinner and a checkbox's tick
+ * itself, in its own font and its own colours, ignoring dark mode; so Select is a listbox built
+ * from the same parts as everything else, NumberField has its own steppers, and Checkbox draws
+ * its own tick. Field owns the label, the action beside a control and the hint below it, which is
+ * what keeps a control and its button on one baseline.
+ */
+@theme {
+    --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@layer base {
+    html,
+    body {
+        height: 100%;
+        /* The window is an application, not a document: panes scroll, the page never does. */
+        overflow: hidden;
+        overscroll-behavior: none;
+    }
+
+    body {
+        background: var(--color-zinc-50);
+        color: var(--color-zinc-900);
+        font-size: 13px;
+    }
+
+    .dark body {
+        background: var(--color-zinc-950);
+        color: var(--color-zinc-50);
+    }
+
+    button {
+        cursor: pointer;
+    }
+
+    button:disabled {
+        cursor: not-allowed;
+    }
+}
+
+/* Slim, theme-following scrollbars on every engine the webview may use. */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-zinc-300) transparent;
+}
+.dark * {
+    scrollbar-color: var(--color-zinc-700) transparent;
+}
+::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background: var(--color-zinc-300);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--color-zinc-400);
+    background-clip: content-box;
+}
+.dark ::-webkit-scrollbar-thumb {
+    background: var(--color-zinc-700);
+    background-clip: content-box;
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-zinc-600);
+    background-clip: content-box;
+}

@@ -3,8 +3,28 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <meta name="theme-color" content="#07111f" />
-        <title>BuildBridge Runner</title>
+        <meta name="theme-color" content="#09090b" />
+        <title>BuildBridge</title>
+        <script>
+            // Apply the persisted theme before first paint so the window never flashes the
+            // wrong background (mirrors src/lib/prefs.ts).
+            try {
+                var theme = localStorage.getItem('buildbridge.theme');
+                var dark =
+                    theme === 'dark' ||
+                    (theme !== 'light' &&
+                        window.matchMedia('(prefers-color-scheme: dark)').matches);
+                if (dark) document.documentElement.classList.add('dark');
+            } catch (_) {}
+        </script>
+        <style>
+            html {
+                background: #fafafa;
+            }
+            html.dark {
+                background: #09090b;
+            }
+        </style>
     </head>
 
     <body>

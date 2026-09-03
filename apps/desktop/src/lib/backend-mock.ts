@@ -1,0 +1,1190 @@
+// Development-only stand-in for the native layer. It reproduces the shapes and timing of the
+// real commands closely enough to develop every screen in a browser: one machine that has
+// completed the whole golden path and one that was just created. Long operations emit the
+// same progress events the Rust side does.
+//
+// Never imported in production builds; see loadBackend() in ./backend.ts.
+
+import type { Backend, DragDropEvent, Unlisten } from './backend';
+import type * as T from '../types/backend';
+
+type Handler<P> = (payload: P) => void;
+
+class Emitter {
+    private handlers = new Map<string, Set<Handler<unknown>>>();
+
+    on<P>(event: string, handler: Handler<P>): Unlisten {
+        const set = this.handlers.get(event) ?? new Set();
+        set.add(handler as Handler<unknown>);
+        this.handlers.set(event, set);
+        return () => set.delete(handler as Handler<unknown>);
+    }
+
+    emit<P>(event: string, payload: P): void {
+        for (const handler of this.handlers.get(event) ?? []) {
+            handler(payload);
+        }
+    }
+}
+
+const sleep = (milliseconds: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+
+const hostReady: T.HostPrerequisites = {
+    supportedHost: true,
+    dockerCli: true,
+    dockerDaemon: true,
+    dockerVersion: 'Docker version 28.3.2, build 578ccf6',
+    kvmAccess: true,
+    displayAccess: true,
+    display: ':1',
+    ready: true,
+    issues: [],
+};
+
+interface MockMachine {
+    id: string;
+    config: T.MacBuilderConfig;
+    createdAt: number;
+    state: T.ContainerState;
+    containerId: string | null;
+    startedAt: string | null;
+    username: string | null;
+    publicKey: string | null;
+    portOpen: boolean;
+    reachable: boolean;
+    pinned: boolean;
+    fingerprint: string | null;
+    authenticated: boolean;
+    macosVersion: string | null;
+    xcodeVersion: string | null;
+    xcodeSelected: boolean;
+    workspace: T.StoredAppleWorkspace | null;
+    signing: T.SigningProvisioningResult | null;
+    archive: T.AppleArchiveResult | null;
+    archiveError: string | null;
+    archiveEnvSet?: string | null;
+    busy: string | null;
+    logs: string[];
+}
+
+function readyMachine(): MockMachine {
+    return {
+        id: 'default',
+        config: {
+            name: 'Local macOS builder',
+            macosRelease: 'sequoia',
+            memoryGib: 16,
+            cpuCores: 8,
+            sshPort: 50922,
+        },
+        createdAt: 1_756_700_000,
+        state: 'running',
+        containerId: 'c9f4d1e2a7b3c9f4d1e2a7b3c9f4d1e2a7b3',
+        startedAt: new Date(Date.now() - 3 * 3600 * 1000 - 12 * 60 * 1000).toISOString(),
+        username: 'builder',
+        publicKey:
+            'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBuildBridgeGuestAccess buildbridge-guest',
+        portOpen: true,
+        reachable: true,
+        pinned: true,
+        fingerprint: 'SHA256:Qm9vdFN0cmFwR3Vlc3RGaW5nZXJwcmludEV4YW1wbGU',
+        authenticated: true,
+        macosVersion: '26.6.2',
+        xcodeVersion: '26.6',
+        xcodeSelected: true,
+        workspace: {
+            localPath: '/home/you/projects/example-app',
+            name: 'com.example.app',
+            iosWorkspace: 'ios/App/App.xcworkspace',
+            scheme: 'App',
+            developmentTeam: 'TEAM123456',
+            bundleIdentifier: 'com.example.app',
+            lastSnapshotSha256: '9999cccc8888dddd7777eeee6666ffff5555aaaa4444bbbb3333cccc2222dddd',
+            lastSource: {
+                kind: 'git',
+                gitRef: 'release/1.4',
+                commit: '3f9c2ab7d1e04c6b9a8f5e2d1c0b9a8f7e6d5c4b',
+            },
+            lastSyncFileCount: 1_842,
+            lastSyncBytes: 48_213_770,
+            lastBuildSucceeded: true,
+            lastXcodeVersion: '26.6',
+            lastNativeLockUpdated: false,
+        },
+        signing: {
+            keychainPath: '/Users/builder/Library/Keychains/buildbridge-signing.keychain-db',
+            identityName: 'iPhone Distribution: Example Developer (TEAM123456)',
+            identitySha1: '1111222233334444555566667777888899990000',
+            certificateSha256: 'aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888',
+            certificateExpiresAt: '2027-09-02T10:14:00Z',
+            developmentTeam: 'TEAM123456',
+            bundleIdentifier: 'com.example.app',
+            profiles: [
+                {
+                    uuid: '11111111-2222-3333-4444-555555555555',
+                    teamIdentifier: 'TEAM123456',
+                    applicationIdentifier: 'TEAM123456.com.example.app',
+                    expiresAt: '2027-09-02T10:14:00Z',
+                    developerCertificateSha256: [
+                        'aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888',
+                    ],
+                },
+            ],
+        },
+        archive: {
+            scheme: 'App',
+            configuration: 'Release',
+            exportMethod: 'app-store-connect',
+            bundleIdentifier: 'com.example.app',
+            developmentTeam: 'TEAM123456',
+            marketingVersion: '3.2.0',
+            buildNumber: '15',
+            provisioningProfileUuid: '11111111-2222-3333-4444-555555555555',
+            ipa: {
+                path: '/home/you/.local/share/dev.buildbridge.desktop/macos-builder/artifacts/archive-1756800000000-4242/App-AppStore.ipa',
+                bytes: 7_096_076,
+                sha256: 'AAAA1111BBBB2222CCCC3333DDDD4444EEEE5555FFFF6666AAAA7777BBBB8888',
+            },
+            archive: {
+                path: '/home/you/.local/share/dev.buildbridge.desktop/macos-builder/artifacts/archive-1756800000000-4242/App.xcarchive.zip',
+                bytes: 28_268_787,
+                sha256: '9999CCCC8888DDDD7777EEEE6666FFFF5555AAAA4444BBBB3333CCCC2222DDDD',
+            },
+            outputTail: ['** ARCHIVE SUCCEEDED **', '** EXPORT SUCCEEDED **'],
+        },
+        archiveError: null,
+        busy: null,
+        logs: [
+            'Docker-OSX: booting OpenCore with generated serial C02X1234ABCD',
+            'qemu-system-x86_64: -display gtk,zoom-to-fit=on',
+            'Forwarding host port 50922 to guest port 22',
+            'Guest SSH available',
+        ],
+    };
+}
+
+function freshMachine(): MockMachine {
+    return {
+        id: 'team-mac',
+        config: {
+            name: 'Team Mac',
+            macosRelease: 'sequoia',
+            memoryGib: 8,
+            cpuCores: 4,
+            sshPort: 50923,
+        },
+        createdAt: Math.floor(Date.now() / 1000) - 600,
+        state: 'missing',
+        containerId: null,
+        startedAt: null,
+        username: null,
+        publicKey: null,
+        portOpen: false,
+        reachable: false,
+        pinned: false,
+        fingerprint: null,
+        authenticated: false,
+        macosVersion: null,
+        xcodeVersion: null,
+        xcodeSelected: false,
+        workspace: null,
+        signing: null,
+        archive: null,
+        archiveError: null,
+        busy: null,
+        logs: [],
+    };
+}
+
+function slug(name: string): string {
+    return (
+        name
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-|-$/g, '')
+            .slice(0, 32) || 'machine'
+    );
+}
+
+export function createMockBackend(): Backend {
+    const emitter = new Emitter();
+    // A few optimizer items so the section can be previewed; the real catalogue lives in Rust.
+    const appliedOptimizations = new Set<string>(['default:reduce-motion']);
+    const optimizationCatalogue: Omit<T.GuestOptimization, 'applied'>[] = [
+        {
+            id: 'disable-spotlight',
+            title: 'Disable Spotlight indexing',
+            summary:
+                'Stops the indexer that otherwise churns through every synchronized project and every Xcode install. The single biggest win for a virtual machine.',
+            tier: 'recommended',
+            warning:
+                'Spotlight stops finding apps and files; `sudo mdutil -i on -a` turns it back on.',
+            needsAdmin: true,
+        },
+        {
+            id: 'reduce-motion',
+            title: 'Reduce motion and transparency',
+            summary:
+                'Turns off the animations and blur the console window otherwise has to render through QEMU.',
+            tier: 'recommended',
+            warning: null,
+            needsAdmin: false,
+        },
+        {
+            id: 'disable-updates',
+            title: 'Disable software updates',
+            summary:
+                'Stops macOS downloading multi-gigabyte updates in the background, which is what makes a virtual disk grow out of proportion.',
+            tier: 'at_your_own_risk',
+            warning:
+                'At your own risk: the guest stops receiving security updates. Update it deliberately instead.',
+            needsAdmin: true,
+        },
+        {
+            id: 'disable-passwords',
+            title: 'Disable passwords globally',
+            summary:
+                'Rewrites every PAM policy so no password is ever required: everyone is root, sudo never asks, and SSH password login accepts an empty password.',
+            tier: 'extremely_insecure',
+            warning:
+                'These macOS optimizations should only be used in CI/CD, behind a VPN, and with no external connectivity. This is not a warning, it is absolutely essential, or anyone can just SSH into the remote mac.',
+            needsAdmin: true,
+        },
+    ];
+    const optimizationsFor = (machineId: string): T.GuestOptimizationsView => {
+        const machine = machines.find((entry) => entry.id === machineId);
+        const available = machine?.state === 'running';
+        return {
+            available,
+            reason: available
+                ? null
+                : 'Start the machine, pin its identity and authorize the access key first.',
+            items: optimizationCatalogue.map((item) => ({
+                ...item,
+                applied: available ? appliedOptimizations.has(`${machineId}:${item.id}`) : null,
+            })),
+        };
+    };
+    const machines: MockMachine[] = [readyMachine(), freshMachine()];
+    // `?unpaired=1` previews the desktop with no control plane at all.
+    let paired = !(
+        typeof location !== 'undefined' && new URLSearchParams(location.search).has('unpaired')
+    );
+    const kits: T.SigningKitSummary[] = [
+        {
+            id: 'example-team',
+            name: 'Example team',
+            appStoreConnectConfigured: true,
+            appStoreConnectKeyId: 'KEYID12345',
+            signingCertificateConfigured: true,
+            signingCertificateName: 'iphone dist cert.p12',
+            signingCertificatePasswordStored: true,
+            provisioningProfileNames: ['11111111-2222-3333-4444-555555555555.mobileprovision'],
+            guestKeychainConfigured: true,
+            createdAtEpochSeconds: 1_756_700_000,
+            attachedMachines: ['Local macOS builder'],
+        },
+        {
+            id: 'client-app',
+            name: 'Second team',
+            appStoreConnectConfigured: false,
+            appStoreConnectKeyId: null,
+            signingCertificateConfigured: true,
+            signingCertificateName: 'client-dist.p12',
+            signingCertificatePasswordStored: true,
+            provisioningProfileNames: [],
+            guestKeychainConfigured: false,
+            createdAtEpochSeconds: 1_756_900_000,
+            attachedMachines: [],
+        },
+    ];
+    const attachments: Record<string, string | null> = {
+        default: 'example-team',
+        'team-mac': null,
+    };
+    const envSets: T.EnvSetSummary[] = [
+        {
+            id: 'production',
+            name: 'production',
+            variables: [{ key: 'VITE_API_URL', value: 'https://api.example.com/v1' }],
+            secretKeys: ['VITE_SENTRY_DSN'],
+            createdAtEpochSeconds: 1_756_700_000,
+            attachedMachines: ['Local macOS builder'],
+        },
+    ];
+    // Secret values sit beside the summaries, as the vault holds them and the summary omits them.
+    const envSecretValues: Record<string, Record<string, string>> = {
+        production: { VITE_SENTRY_DSN: 'https://examplePublicKey@o0.ingest.sentry.io/0' },
+    };
+    const envAttachments: Record<string, string | null> = {
+        default: 'production',
+        'team-mac': null,
+    };
+    const envSetFor = (machineId: string): T.EnvSetSummary | null =>
+        envSets.find((set) => set.id === envAttachments[machineId]) ?? null;
+    const refreshEnvAttachments = (): void => {
+        for (const set of envSets) {
+            set.attachedMachines = machines
+                .filter((machine) => envAttachments[machine.id] === set.id)
+                .map((machine) => machine.config.name);
+        }
+    };
+    // `?vaultCleared=1` reproduces the state an operating-system keyring reset leaves behind.
+    const vaultCleared =
+        typeof location !== 'undefined' && new URLSearchParams(location.search).has('vaultCleared');
+    const storedKits = () => (vaultCleared ? [] : kits);
+    const kitComplete = (kit: T.SigningKitSummary) =>
+        kit.signingCertificateConfigured &&
+        kit.provisioningProfileNames.length > 0 &&
+        kit.guestKeychainConfigured;
+
+    const find = (machineId: string): MockMachine => {
+        const machine = machines.find((entry) => entry.id === machineId);
+        if (!machine) {
+            throw new Error('This machine is no longer registered.');
+        }
+        return machine;
+    };
+
+    const changed = (machineId: string | null) => {
+        emitter.emit<T.MachineChangedEvent>('machine-changed', { machineId });
+    };
+
+    const busy = async <R>(
+        machine: MockMachine,
+        label: string,
+        work: () => Promise<R>,
+    ): Promise<R> => {
+        if (machine.busy) {
+            throw new Error(
+                `${machine.busy} is already running on this machine. Wait for it to finish.`,
+            );
+        }
+        machine.busy = label;
+        changed(machine.id);
+        try {
+            return await work();
+        } finally {
+            machine.busy = null;
+            changed(machine.id);
+        }
+    };
+
+    const view = (machine: MockMachine): T.MacBuilderView => {
+        const running = machine.state === 'running';
+        const trust: T.GuestTrustState =
+            !running || !machine.reachable
+                ? 'unavailable'
+                : machine.pinned
+                  ? 'trusted'
+                  : 'untrusted';
+        return {
+            machineId: machine.id,
+            profile: { ...machine.config },
+            busyOperation: machine.busy,
+            runtime: {
+                prerequisites: hostReady,
+                state: machine.state,
+                containerId: machine.containerId,
+                startedAt: machine.startedAt,
+            },
+            signingKit: storedKits().find((kit) => kit.id === attachments[machine.id]) ?? null,
+            envSet: envSetFor(machine.id),
+            signingHealth: (() => {
+                const attached = storedKits().find((kit) => kit.id === attachments[machine.id]);
+                if (!attached) {
+                    return machine.signing ? 'kit_missing' : 'unconfigured';
+                }
+                return kitComplete(attached) ? 'ready' : 'incomplete';
+            })(),
+            vaultIssue: null,
+            guest: {
+                username: machine.username,
+                publicKey: machine.publicKey,
+                ssh: {
+                    portOpen: running && machine.portOpen,
+                    reachable: running && machine.reachable,
+                    trust,
+                    fingerprint: running && machine.reachable ? machine.fingerprint : null,
+                    pinnedFingerprint: machine.pinned ? machine.fingerprint : null,
+                    issue: !running
+                        ? 'Start the macOS machine to probe guest SSH.'
+                        : !machine.portOpen
+                          ? 'Guest SSH is not reachable yet. Finish macOS setup and enable Remote Login.'
+                          : null,
+                },
+                diagnostics: {
+                    authenticated: trust === 'trusted' && machine.authenticated,
+                    macosVersion:
+                        trust === 'trusted' && machine.authenticated ? machine.macosVersion : null,
+                    xcodeVersion:
+                        trust === 'trusted' && machine.authenticated ? machine.xcodeVersion : null,
+                    xcodePath:
+                        trust === 'trusted' && machine.xcodeVersion
+                            ? `/Users/${machine.username}/Applications/Xcode.app`
+                            : null,
+                    xcodeSelected:
+                        trust === 'trusted' && machine.authenticated && machine.xcodeSelected,
+                    issue:
+                        trust === 'trusted' && machine.username && !machine.authenticated
+                            ? 'SSH authentication failed; add the BuildBridge public key to the guest user'
+                            : null,
+                },
+            },
+            appleWorkspace: machine.workspace ? { ...machine.workspace } : null,
+            signing: machine.signing ? { ...machine.signing } : null,
+            archive: machine.archive ? { ...machine.archive } : null,
+            archiveEnvSet: machine.archiveEnvSet ?? null,
+            archiveError: machine.archiveError,
+            logs: [...machine.logs],
+        };
+    };
+
+    const list = (): T.MachineListView => ({
+        host: hostReady,
+        machines: machines.map((machine) => ({
+            id: machine.id,
+            config: { ...machine.config },
+            createdAtEpochSeconds: machine.createdAt,
+            state: machine.state,
+            containerId: machine.containerId,
+            busyOperation: machine.busy,
+            guestConfigured: machine.username !== null,
+            trustPinned: machine.pinned,
+            workspaceName: machine.workspace?.name ?? null,
+            envSetName: envSetFor(machine.id)?.name ?? null,
+            signingKitName:
+                storedKits().find((kit) => kit.id === attachments[machine.id])?.name ?? null,
+            signingProvisioned: machine.signing !== null,
+            signingIdentity: machine.signing?.identityName ?? null,
+            archiveRetained: machine.archive !== null,
+        })),
+    });
+
+    const projectPhases: T.AppleProjectPhase[] = [
+        'preparing_tools',
+        'installing_dependencies',
+        'building_web_assets',
+        'syncing_ios',
+        'resolving_pods',
+        'building',
+        'completed',
+    ];
+
+    return {
+        async getRunnerStatus() {
+            await sleep(150);
+            return {
+                paired,
+                credentialsMissing: false,
+                serverUrl: paired ? 'https://buildbridge.test' : null,
+                runnerId: paired ? '9c1f2a3b-4d5e-4f60-8a7b-1c2d3e4f5a6b' : null,
+                runnerName: paired ? 'linux-builder' : null,
+                platform: 'linux',
+                architecture: 'x86_64',
+                version: '0.1.0',
+            };
+        },
+        async pairRunner() {
+            await sleep(600);
+            paired = true;
+            return this.getRunnerStatus();
+        },
+        async unpairRunner() {
+            paired = false;
+        },
+        async getRealtimeConfiguration() {
+            throw new Error('Realtime is unavailable in the browser preview.');
+        },
+        async authorizeRealtime() {
+            throw new Error('Realtime is unavailable in the browser preview.');
+        },
+        async heartbeatRunner() {
+            return { queuedBuilds: 0 };
+        },
+        async runOnce() {
+            await sleep(300);
+            return { state: 'idle', buildId: null, message: 'No queued builds.' };
+        },
+
+        async listMachines() {
+            await sleep(120);
+            return list();
+        },
+        async createMachine(profile) {
+            await sleep(200);
+            if (machines.some((machine) => machine.config.sshPort === profile.sshPort)) {
+                throw new Error(
+                    `SSH port ${profile.sshPort} is already used by another machine. Choose a different port.`,
+                );
+            }
+            const machine = freshMachine();
+            machine.id = slug(profile.name);
+            machine.config = { ...profile };
+            machine.createdAt = Math.floor(Date.now() / 1000);
+            machines.push(machine);
+            changed(null);
+            return list();
+        },
+        async deleteMachine(machineId) {
+            const machine = find(machineId);
+            if (machine.state === 'running') {
+                throw new Error('Stop the machine before deleting it.');
+            }
+            machines.splice(machines.indexOf(machine), 1);
+            changed(null);
+            return list();
+        },
+        async discardMachineContainer(machineId) {
+            const machine = find(machineId);
+            if (machine.state === 'running') {
+                throw new Error('Stop the machine before discarding its container.');
+            }
+            Object.assign(machine, {
+                state: 'missing',
+                containerId: null,
+                startedAt: null,
+                pinned: false,
+                signing: null,
+                logs: [],
+            });
+            return view(machine);
+        },
+        async getMachine(machineId) {
+            await sleep(180);
+            return view(find(machineId));
+        },
+        async configureMachine(machineId, profile) {
+            const machine = find(machineId);
+            machine.config = { ...profile };
+            return view(machine);
+        },
+        async launchMachine(machineId) {
+            const machine = find(machineId);
+            return busy(machine, 'Starting the machine', async () => {
+                const phases: Array<[T.LaunchPhase, string]> = [
+                    ['preparing', 'Checking the host and Docker'],
+                    [
+                        'pulling_image',
+                        'Pulling the Docker-OSX image; the first pull downloads several gigabytes',
+                    ],
+                    ['generating_identity', 'Generating a stable machine identity'],
+                    ['creating_container', 'Creating the managed container'],
+                    ['starting', 'Starting the macOS machine'],
+                    ['completed', 'The macOS machine is running'],
+                ];
+                let elapsed = 0;
+                for (const [phase, detail] of phases) {
+                    emitter.emit<T.MachineEvent<T.LaunchProgress>>('machine-launch-progress', {
+                        machineId,
+                        phase,
+                        elapsedSeconds: elapsed,
+                        detail,
+                    });
+                    await sleep(phase === 'pulling_image' ? 1500 : 500);
+                    elapsed += 2;
+                }
+                machine.state = 'running';
+                machine.containerId ??= `${machine.id}-${Date.now().toString(16)}`;
+                machine.startedAt = new Date().toISOString();
+                machine.logs = [
+                    'Docker-OSX: booting OpenCore with generated serial',
+                    'qemu-system-x86_64: -display gtk,zoom-to-fit=on',
+                ];
+                return view(machine);
+            });
+        },
+        async stopMachine(machineId) {
+            const machine = find(machineId);
+            return busy(machine, 'Stopping the machine', async () => {
+                await sleep(800);
+                machine.state = 'exited';
+                machine.startedAt = null;
+                return view(machine);
+            });
+        },
+        async configureGuestAccess(machineId, username) {
+            const machine = find(machineId);
+            machine.username = username;
+            machine.publicKey ??=
+                'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBuildBridgeGuestAccess buildbridge-guest';
+            return view(machine);
+        },
+        async authorizeGuestKey(machineId, username, password) {
+            const machine = find(machineId);
+            machine.username = username;
+            machine.publicKey ??=
+                'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBuildBridgeGuestAccess buildbridge-guest';
+            await sleep(900);
+            if (!machine.pinned) {
+                throw new Error(
+                    'Pin the guest identity first, so the password only ever goes to the machine you verified.',
+                );
+            }
+            // The preview accepts any password except the one that demonstrates a rejection.
+            if (password === 'wrong') {
+                throw new Error(
+                    `macOS guest bridge failed: macOS did not accept the password for ${username}. Check the short username and the local macOS login password, or add the key from the guest Terminal instead.`,
+                );
+            }
+            machine.authenticated = true;
+            return view(machine);
+        },
+        async trustGuest(machineId) {
+            const machine = find(machineId);
+            machine.pinned = true;
+            return view(machine);
+        },
+        async forgetGuestTrust(machineId) {
+            const machine = find(machineId);
+            machine.pinned = false;
+            return view(machine);
+        },
+        async importXcode(machineId, path) {
+            const machine = find(machineId);
+            return busy(machine, 'Importing Xcode', async () => {
+                const total = 8_500_000_000;
+                for (let step = 0; step <= 6; step += 1) {
+                    emitter.emit<T.MachineEvent<T.XcodeImportProgress>>('machine-xcode-progress', {
+                        machineId,
+                        phase:
+                            step < 5
+                                ? 'transferring'
+                                : step === 5
+                                  ? 'expanding'
+                                  : 'awaiting_activation',
+                        transferredBytes: Math.min(total, (total / 5) * step),
+                        totalBytes: total,
+                        elapsedSeconds: step * 40,
+                        detail:
+                            step < 5
+                                ? `Transferring ${path.split('/').pop()}`
+                                : step === 5
+                                  ? 'Expanding the signed archive in the guest'
+                                  : 'Xcode is installed; activate it to finish',
+                    });
+                    await sleep(500);
+                }
+                machine.xcodeVersion = '26.6';
+                return {
+                    view: view(machine),
+                    installedPath: `/Users/${machine.username}/Applications/Xcode.app`,
+                    activationCommands: [
+                        `sudo xcode-select --switch /Users/${machine.username}/Applications/Xcode.app`,
+                        'sudo xcodebuild -license accept',
+                        'sudo xcodebuild -runFirstLaunch',
+                        'xcodebuild -version',
+                    ],
+                };
+            });
+        },
+        async activateXcode(machineId) {
+            const machine = find(machineId);
+            return busy(machine, 'Activating Xcode', async () => {
+                for (let second = 0; second < 4; second += 1) {
+                    emitter.emit<T.MachineEvent<T.XcodeImportProgress>>('machine-xcode-progress', {
+                        machineId,
+                        phase: 'awaiting_authorization',
+                        transferredBytes: 0,
+                        totalBytes: 0,
+                        elapsedSeconds: second,
+                        detail: 'Waiting for the administrator password in the macOS Terminal',
+                    });
+                    await sleep(700);
+                }
+                machine.xcodeSelected = true;
+                return view(machine);
+            });
+        },
+        async provisionSigning(machineId) {
+            const machine = find(machineId);
+            return busy(machine, 'Provisioning signing', async () => {
+                const phases: T.SigningProvisioningPhase[] = [
+                    'preparing',
+                    'transferring',
+                    'importing_certificate',
+                    'inspecting_profiles',
+                    'installing_profiles',
+                    'verifying',
+                    'completed',
+                ];
+                for (const [index, phase] of phases.entries()) {
+                    emitter.emit<T.MachineEvent<T.SigningProvisioningProgress>>(
+                        'machine-signing-progress',
+                        {
+                            machineId,
+                            phase,
+                            completedBytes: index,
+                            totalBytes: phases.length - 1,
+                            elapsedSeconds: index * 3,
+                            detail: phase.replace(/_/g, ' '),
+                        },
+                    );
+                    await sleep(450);
+                }
+                machine.signing = readyMachine().signing;
+                return view(machine);
+            });
+        },
+        async clearGuestSigning(machineId) {
+            const machine = find(machineId);
+            machine.signing = null;
+            return view(machine);
+        },
+        async approveWorkspace(machineId, path) {
+            const machine = find(machineId);
+            await sleep(250);
+            machine.workspace = {
+                ...(readyMachine().workspace as T.StoredAppleWorkspace),
+                localPath: path,
+                name: path.split('/').filter(Boolean).pop() ?? 'project',
+                lastSnapshotSha256: null,
+                lastSource: null,
+                lastSyncFileCount: null,
+                lastSyncBytes: null,
+                lastBuildSucceeded: false,
+                lastXcodeVersion: null,
+            };
+            return view(machine);
+        },
+        async clearWorkspace(machineId) {
+            const machine = find(machineId);
+            machine.workspace = null;
+            return view(machine);
+        },
+        async syncWorkspace(machineId) {
+            const machine = find(machineId);
+            return busy(machine, 'Synchronizing source', async () => {
+                const total = 48_213_770;
+                const phases: T.AppleProjectPhase[] = [
+                    'snapshotting',
+                    'transferring',
+                    'extracting',
+                    'completed',
+                ];
+                for (const [index, phase] of phases.entries()) {
+                    emitter.emit<T.MachineEvent<T.AppleProjectProgress>>(
+                        'machine-project-progress',
+                        {
+                            machineId,
+                            phase,
+                            completedBytes: (total / 3) * Math.min(index, 3),
+                            totalBytes: total,
+                            elapsedSeconds: index * 4,
+                            detail: phase,
+                            logLine: null,
+                        },
+                    );
+                    await sleep(500);
+                }
+                if (machine.workspace) {
+                    machine.workspace.lastSnapshotSha256 =
+                        '9999cccc8888dddd7777eeee6666ffff5555aaaa4444bbbb3333cccc2222dddd';
+                    machine.workspace.lastSyncFileCount = 1842;
+                    machine.workspace.lastSyncBytes = total;
+                    machine.workspace.lastBuildSucceeded = false;
+                }
+                return {
+                    view: view(machine),
+                    sync: {
+                        guestPath: `/Users/${machine.username}/BuildBridge/workspaces/active`,
+                        snapshotSha256:
+                            '9999cccc8888dddd7777eeee6666ffff5555aaaa4444bbbb3333cccc2222dddd',
+                        sourceFileCount: 1842,
+                        sourceBytes: total,
+                        archiveBytes: 12_400_000,
+                    },
+                };
+            });
+        },
+        async runSmokeBuild(machineId) {
+            const machine = find(machineId);
+            return busy(machine, 'Running the test build', async () => {
+                for (const [index, phase] of projectPhases.entries()) {
+                    emitter.emit<T.MachineEvent<T.AppleProjectProgress>>(
+                        'machine-project-progress',
+                        {
+                            machineId,
+                            phase,
+                            completedBytes: 0,
+                            totalBytes: 0,
+                            elapsedSeconds: index * 7,
+                            detail: phase,
+                            logLine:
+                                phase === 'building'
+                                    ? 'CompileSwift normal arm64 App/AppDelegate.swift'
+                                    : null,
+                        },
+                    );
+                    await sleep(500);
+                }
+                if (machine.workspace) {
+                    machine.workspace.lastBuildSucceeded = true;
+                    machine.workspace.lastXcodeVersion = machine.xcodeVersion;
+                }
+                return {
+                    view: view(machine),
+                    build: {
+                        xcodeVersion: machine.xcodeVersion ?? '26.6',
+                        nativeLockfileUpdated: false,
+                        outputTail: ['** BUILD SUCCEEDED **'],
+                    },
+                };
+            });
+        },
+        async runSignedArchive(machineId, envSetId) {
+            const machine = find(machineId);
+            machine.archiveEnvSet = envSets.find((set) => set.id === envSetId)?.name ?? null;
+            return busy(machine, 'Building the signed archive', async () => {
+                const phases: T.AppleArchivePhase[] = [
+                    'preparing',
+                    ...(envSetId ? (['building_web_assets'] as const) : []),
+                    'archiving',
+                    'exporting',
+                    'verifying',
+                    'packaging_archive',
+                    'transferring',
+                    'completed',
+                ];
+                for (const [index, phase] of phases.entries()) {
+                    emitter.emit<T.MachineEvent<T.AppleArchiveProgress>>(
+                        'machine-archive-progress',
+                        {
+                            machineId,
+                            phase,
+                            completedBytes: index,
+                            totalBytes: phases.length - 1,
+                            elapsedSeconds: index * 25,
+                            detail: phase,
+                            logLine: phase === 'archiving' ? '** ARCHIVE SUCCEEDED **' : null,
+                        },
+                    );
+                    await sleep(600);
+                }
+                machine.archive = readyMachine().archive;
+                machine.archiveError = null;
+                return { view: view(machine), archive: machine.archive as T.AppleArchiveResult };
+            });
+        },
+        async revealArchive() {},
+        async cancelMachineOperation() {
+            // The preview's operations are short timers; there is nothing to interrupt.
+        },
+        async clearArchive(machineId) {
+            const machine = find(machineId);
+            machine.archive = null;
+            machine.archiveError = null;
+            return view(machine);
+        },
+
+        async listEnvSets() {
+            await sleep(120);
+            refreshEnvAttachments();
+            return envSets.map((set) => ({ ...set }));
+        },
+        async saveEnvSet(input) {
+            await sleep(500);
+            const existing = envSets.find((set) => set.id === input.setId) ?? null;
+            const setId = existing?.id ?? input.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+            const storedSecrets = envSecretValues[setId] ?? {};
+            const variables = input.variables
+                .filter((variable) => !variable.secret)
+                .map((variable) => ({
+                    key: variable.key,
+                    value:
+                        variable.value ??
+                        existing?.variables.find((stored) => stored.key === variable.key)?.value ??
+                        '',
+                }));
+            const secrets = input.variables.filter((variable) => variable.secret);
+            envSecretValues[setId] = Object.fromEntries(
+                secrets.map((secret) => [
+                    secret.key,
+                    secret.value ?? storedSecrets[secret.key] ?? '',
+                ]),
+            );
+            const secretKeys = secrets.map((secret) => secret.key);
+            if (input.setId) {
+                if (existing) {
+                    existing.name = input.name;
+                    existing.variables = variables;
+                    existing.secretKeys = secretKeys;
+                }
+            } else {
+                envSets.push({
+                    id: setId,
+                    name: input.name,
+                    variables,
+                    secretKeys,
+                    createdAtEpochSeconds: Math.floor(Date.now() / 1000),
+                    attachedMachines: [],
+                });
+            }
+            return this.listEnvSets();
+        },
+        async deleteEnvSet(setId) {
+            await sleep(300);
+            const index = envSets.findIndex((set) => set.id === setId);
+            if (index >= 0) {
+                envSets.splice(index, 1);
+            }
+            delete envSecretValues[setId];
+            for (const id of Object.keys(envAttachments)) {
+                if (envAttachments[id] === setId) {
+                    envAttachments[id] = null;
+                }
+            }
+            return this.listEnvSets();
+        },
+        async attachEnvSet(machineId, setId) {
+            await sleep(300);
+            envAttachments[machineId] = setId;
+            refreshEnvAttachments();
+            const machine = machines.find((entry) => entry.id === machineId)!;
+            return view(machine);
+        },
+        async revealEnvSecrets(setId) {
+            await sleep(250);
+            const values = envSecretValues[setId];
+            if (!values) {
+                throw new Error('This env set is no longer stored.');
+            }
+            return Object.entries(values).map(([key, value]) => ({ key, value }));
+        },
+        async listSigningKits() {
+            await sleep(80);
+            return storedKits().map((kit) => ({ ...kit }));
+        },
+        async saveSigningKit(input) {
+            await sleep(250);
+            const name = input.name.trim();
+            if (name === '') {
+                throw new Error('Give the signing kit a name of 1 to 60 characters.');
+            }
+            const existing = input.kitId ? kits.find((kit) => kit.id === input.kitId) : null;
+            const merged: T.SigningKitSummary = {
+                id: existing?.id ?? slug(name),
+                name,
+                appStoreConnectConfigured:
+                    existing?.appStoreConnectConfigured || input.appStoreConnectKeyId.trim() !== '',
+                appStoreConnectKeyId:
+                    input.appStoreConnectKeyId.trim() || (existing?.appStoreConnectKeyId ?? null),
+                signingCertificateConfigured:
+                    (existing?.signingCertificateConfigured ?? false) ||
+                    input.signingCertificatePath.trim() !== '',
+                signingCertificateName:
+                    input.signingCertificatePath.split('/').pop() ||
+                    (existing?.signingCertificateName ?? null),
+                signingCertificatePasswordStored:
+                    (existing?.signingCertificatePasswordStored ?? false) ||
+                    input.signingCertificatePassword !== '',
+                provisioningProfileNames: input.provisioningProfilePaths.length
+                    ? input.provisioningProfilePaths.map((path) => path.split('/').pop() ?? path)
+                    : (existing?.provisioningProfileNames ?? []),
+                guestKeychainConfigured:
+                    (existing?.guestKeychainConfigured ?? false) ||
+                    input.guestKeychainPassword !== '',
+                createdAtEpochSeconds:
+                    existing?.createdAtEpochSeconds ?? Math.floor(Date.now() / 1000),
+                attachedMachines: existing?.attachedMachines ?? [],
+            };
+            if (existing) {
+                kits[kits.indexOf(existing)] = merged;
+            } else {
+                kits.push(merged);
+            }
+            return kits.map((kit) => ({ ...kit }));
+        },
+        async deleteSigningKit(kitId) {
+            const index = kits.findIndex((kit) => kit.id === kitId);
+            if (index < 0) {
+                throw new Error('This signing kit is no longer stored.');
+            }
+            kits.splice(index, 1);
+            for (const [machineId, attached] of Object.entries(attachments)) {
+                if (attached === kitId) {
+                    attachments[machineId] = null;
+                }
+            }
+            return kits.map((kit) => ({ ...kit }));
+        },
+        async attachSigningKit(machineId, kitId) {
+            const machine = find(machineId);
+            attachments[machineId] = kitId;
+            for (const kit of kits) {
+                kit.attachedMachines = Object.entries(attachments)
+                    .filter(([, attached]) => attached === kit.id)
+                    .map(([id]) => machines.find((entry) => entry.id === id)?.config.name ?? id);
+            }
+            return view(machine);
+        },
+
+        async verifyAppleTeam() {
+            await sleep(900);
+            return {
+                keyId: 'KEYID12345',
+                projectDevelopmentTeam: 'TEAM123456',
+                bundleIdentifier: 'com.example.app',
+                appStoreRecordFound: true,
+                appStoreAppName: 'Example App',
+                appStoreAppId: '1234567890',
+                bundleIdFound: true,
+                bundleIdName: 'Example App',
+                bundleIdPlatform: 'UNIVERSAL',
+                appIdPrefix: 'TEAM123456',
+                bundleLookupFallbackUsed: true,
+                developerResourcesAccessible: true,
+                developerResourcesIssue: null,
+                profilesAccessible: true,
+                profilesIssue: null,
+                profiles: [
+                    {
+                        id: 'prof-1',
+                        name: 'BuildBridge App Store profile',
+                        platform: 'IOS',
+                        profileType: 'IOS_APP_STORE',
+                        profileState: 'ACTIVE',
+                        uuid: '11111111-2222-3333-4444-555555555555',
+                        createdDate: '2026-09-02T09:00:00Z',
+                        expirationDate: '2027-09-02T10:14:00Z',
+                    },
+                    {
+                        id: 'prof-2',
+                        name: 'Example App Store',
+                        platform: 'IOS',
+                        profileType: 'IOS_APP_STORE',
+                        profileState: 'EXPIRED',
+                        uuid: '66666666-7777-8888-9999-000000000000',
+                        createdDate: '2025-07-28T09:00:00Z',
+                        expirationDate: '2026-07-28T09:00:00Z',
+                    },
+                ],
+                certificatesAccessible: true,
+                certificatesIssue: null,
+                certificates: [
+                    {
+                        id: 'cert-1',
+                        name: 'iOS Distribution',
+                        displayName: 'Example Developer',
+                        certificateType: 'IOS_DISTRIBUTION',
+                        serialNumber: '1111222233334444',
+                        platform: 'IOS',
+                        expirationDate: '2027-09-02T10:14:00Z',
+                    },
+                    {
+                        id: 'cert-2',
+                        name: 'Apple Development',
+                        displayName: 'Example Developer',
+                        certificateType: 'DEVELOPMENT',
+                        serialNumber: '5555666677778888',
+                        platform: 'IOS',
+                        expirationDate: '2027-03-11T10:14:00Z',
+                    },
+                ],
+                verifiedAtEpochSeconds: Math.floor(Date.now() / 1000),
+            };
+        },
+        async createAppleProfile(machineId: string) {
+            await sleep(900);
+            const verification = await this.verifyAppleTeam(machineId);
+            const kit = kits.find((entry) => entry.id === attachments[machineId]) ?? kits[0]!;
+            kit.provisioningProfileNames = [
+                '11111111-2222-3333-4444-555555555555.mobileprovision',
+                ...kit.provisioningProfileNames,
+            ];
+            return {
+                profile: verification.profiles[0] as T.AppleProvisioningProfile,
+                certificate: verification.certificates[0] as T.AppleCertificate,
+                savedPath:
+                    '/home/you/.config/dev.buildbridge.desktop/macos-builder/profiles/11111111-2222-3333-4444-555555555555.mobileprovision',
+                kit: { ...kit },
+            };
+        },
+
+        async createAppleCertificate(kitId: string) {
+            await sleep(1200);
+            const kit = kits.find((entry) => entry.id === kitId)!;
+            kit.signingCertificateConfigured = true;
+            kit.signingCertificateName = 'distribution.p12';
+            kit.signingCertificatePasswordStored = true;
+            return {
+                certificate: {
+                    id: 'cert-new',
+                    name: 'Apple Distribution: Example Developer (TEAM123456)',
+                    displayName: 'Example Developer',
+                    certificateType: 'DISTRIBUTION',
+                    serialNumber: '0123456789ABCDEF',
+                    platform: 'IOS',
+                    expirationDate: '2027-09-03T10:00:00Z',
+                },
+                savedPath:
+                    '/home/you/.config/dev.buildbridge.desktop/macos-builder/certificates/distribution-1756800000/distribution.p12',
+                kit: { ...kit },
+            };
+        },
+        async listGuestOptimizations(machineId: string) {
+            await sleep(200);
+            return optimizationsFor(machineId);
+        },
+        async applyGuestOptimization(machineId: string, optimizationId: string) {
+            const machine = find(machineId);
+            return busy(machine, 'Applying an optimization', async () => {
+                await sleep(1200);
+                appliedOptimizations.add(`${machineId}:${optimizationId}`);
+                return optimizationsFor(machineId);
+            });
+        },
+        async listManagedAppleProfiles() {
+            await sleep(120);
+            return [
+                {
+                    fileName: '11111111-2222-3333-4444-555555555555.mobileprovision',
+                    path: '/home/you/.config/dev.buildbridge.desktop/macos-builder/profiles/11111111-2222-3333-4444-555555555555.mobileprovision',
+                    savedAtEpochSeconds: Math.floor(Date.now() / 1000) - 86_400,
+                },
+            ];
+        },
+
+        async downloadAppleProfile(machineId: string, profileId: string) {
+            await sleep(700);
+            const verification = await this.verifyAppleTeam(machineId);
+            const profile = (verification.profiles.find((entry) => entry.id === profileId) ??
+                verification.profiles[0]) as T.AppleProvisioningProfile;
+            const kit = kits.find((entry) => entry.id === attachments[machineId]) ?? kits[0]!;
+            const fileName = `${profile.uuid}.mobileprovision`;
+            if (!kit.provisioningProfileNames.includes(fileName)) {
+                kit.provisioningProfileNames = [fileName, ...kit.provisioningProfileNames];
+            }
+            return {
+                profile,
+                savedPath: `/home/you/.config/dev.buildbridge.desktop/macos-builder/profiles/${fileName}`,
+                kit: { ...kit },
+            };
+        },
+
+        onMachineChanged: async (handler) => emitter.on('machine-changed', handler),
+        onLaunchProgress: async (handler) => emitter.on('machine-launch-progress', handler),
+        onXcodeProgress: async (handler) => emitter.on('machine-xcode-progress', handler),
+        onSigningProgress: async (handler) => emitter.on('machine-signing-progress', handler),
+        onProjectProgress: async (handler) => emitter.on('machine-project-progress', handler),
+        onArchiveProgress: async (handler) => emitter.on('machine-archive-progress', handler),
+        onDragDrop: async (handler: (event: DragDropEvent) => void) => {
+            void handler;
+            return () => {};
+        },
+        async pickPaths(request) {
+            // The browser preview has no native dialog; return a plausible path so the field's
+            // behaviour after a pick can still be exercised.
+            await sleep(150);
+            const extension = request.filter?.extensions[0];
+            if (request.kind === 'directory') {
+                return ['/path/to/example-app'];
+            }
+            if (request.kind === 'files') {
+                return [`/path/to/AppStore.${extension ?? 'file'}`];
+            }
+            return [`/path/to/chosen.${extension ?? 'file'}`];
+        },
+    };
+}
