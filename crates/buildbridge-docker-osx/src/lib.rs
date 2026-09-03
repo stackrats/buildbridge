@@ -4996,6 +4996,19 @@ fn write_secret_frame(writer: &mut impl Write, secret: &str) -> Result<(), Provi
     })
 }
 
+/// The fixed shell for reading one profile's metadata in the guest: decode, read the UUID,
+/// team, application identifier and expiry, hash each developer certificate, then the
+/// entitlement flags and provisioned devices. `plutil` prints a missing key's error on stdout
+/// and exits 1, so each boolean is filtered to a bare `true`/`false` and defaults to `false`.
+fn profile_inspection_command(guest_profile: &str) -> String {
+    let profile = shell_single_quote(guest_profile);
+    let plist = shell_single_quote(&format!("{guest_profile}.plist"));
+    let certificate = shell_single_quote(&format!("{guest_profile}.certificate.der"));
+    format!(
+        "; /usr/bin/security cms -D -i {profile} > {plist}; uuid=$(/usr/bin/plutil -extract UUID raw -o - {plist}); team=$(/usr/bin/plutil -extract TeamIdentifier.0 raw -o - {plist}); app_id=$(/usr/bin/plutil -extract Entitlements.application-identifier raw -o - {plist}); expires_at=$(/usr/bin/plutil -extract ExpirationDate raw -o - {plist}); if ! expiry_epoch=$(/bin/date -j -f '%Y-%m-%d %H:%M:%S %z' \"$expires_at\" +%s 2>/dev/null || /bin/date -j -f '%Y-%m-%dT%H:%M:%SZ' \"$expires_at\" +%s 2>/dev/null); then /usr/bin/printf 'invalid_profile_expiry:%s' \"$uuid\" >&2; exit 1; fi; if /bin/test \"$expiry_epoch\" -le \"$(/bin/date +%s)\"; then /usr/bin/printf 'expired_profile:%s' \"$uuid\" >&2; exit 1; fi; /usr/bin/printf '__BUILDBRIDGE_PROFILE__\\t%s\\t%s\\t%s\\t%s\\n' \"$uuid\" \"$team\" \"$app_id\" \"$expires_at\"; certificate_count=$(/usr/bin/plutil -extract DeveloperCertificates xml1 -o - {plist} | /usr/bin/grep -c '<data>'); certificate_index=0; while /bin/test \"$certificate_index\" -lt \"$certificate_count\"; do /usr/bin/plutil -extract \"DeveloperCertificates.$certificate_index\" raw -o - {plist} | /usr/bin/base64 -D > {certificate}; certificate_sha256=$(/usr/bin/openssl dgst -sha256 {certificate} | /usr/bin/awk '{{print $NF}}'); /usr/bin/printf '__BUILDBRIDGE_PROFILE_CERT__\\t%s\\t%s\\n' \"$uuid\" \"$certificate_sha256\"; certificate_index=$((certificate_index + 1)); done; get_task_allow=$(/usr/bin/plutil -extract Entitlements.get-task-allow raw -o - {plist} 2>/dev/null | /usr/bin/grep -x -E 'true|false' || /bin/echo false); provisions_all=$(/usr/bin/plutil -extract ProvisionsAllDevices raw -o - {plist} 2>/dev/null | /usr/bin/grep -x -E 'true|false' || /bin/echo false); /usr/bin/printf '__BUILDBRIDGE_PROFILE_FLAGS__\\t%s\\t%s\\t%s\\n' \"$uuid\" \"$get_task_allow\" \"$provisions_all\"; device_count=$(/usr/bin/plutil -extract ProvisionedDevices xml1 -o - {plist} 2>/dev/null | /usr/bin/grep -c '<string>' || /usr/bin/true); device_index=0; while /bin/test \"${{device_count:-0}}\" -gt \"$device_index\"; do device_udid=$(/usr/bin/plutil -extract \"ProvisionedDevices.$device_index\" raw -o - {plist}); /usr/bin/printf '__BUILDBRIDGE_PROFILE_DEVICE__\\t%s\\t%s\\n' \"$uuid\" \"$device_udid\"; device_index=$((device_index + 1)); done; /bin/rm -f {certificate} {plist}"
+    )
+}
+
 fn inspect_guest_profiles(
     profiles: &[(String, PathBuf)],
     ssh_port: u16,
@@ -5005,12 +5018,7 @@ fn inspect_guest_profiles(
 ) -> Result<String, ProviderError> {
     let mut command = "set -eu; umask 077".to_string();
     for (guest_profile, _) in profiles {
-        let profile = shell_single_quote(guest_profile);
-        let plist = shell_single_quote(&format!("{guest_profile}.plist"));
-        let certificate = shell_single_quote(&format!("{guest_profile}.certificate.der"));
-        command.push_str(&format!(
-            "; /usr/bin/security cms -D -i {profile} > {plist}; uuid=$(/usr/bin/plutil -extract UUID raw -o - {plist}); team=$(/usr/bin/plutil -extract TeamIdentifier.0 raw -o - {plist}); app_id=$(/usr/bin/plutil -extract Entitlements.application-identifier raw -o - {plist}); expires_at=$(/usr/bin/plutil -extract ExpirationDate raw -o - {plist}); if ! expiry_epoch=$(/bin/date -j -f '%Y-%m-%d %H:%M:%S %z' \"$expires_at\" +%s 2>/dev/null || /bin/date -j -f '%Y-%m-%dT%H:%M:%SZ' \"$expires_at\" +%s 2>/dev/null); then /usr/bin/printf 'invalid_profile_expiry:%s' \"$uuid\" >&2; exit 1; fi; if /bin/test \"$expiry_epoch\" -le \"$(/bin/date +%s)\"; then /usr/bin/printf 'expired_profile:%s' \"$uuid\" >&2; exit 1; fi; /usr/bin/printf '__BUILDBRIDGE_PROFILE__\\t%s\\t%s\\t%s\\t%s\\n' \"$uuid\" \"$team\" \"$app_id\" \"$expires_at\"; certificate_count=$(/usr/bin/plutil -extract DeveloperCertificates xml1 -o - {plist} | /usr/bin/grep -c '<data>'); certificate_index=0; while /bin/test \"$certificate_index\" -lt \"$certificate_count\"; do /usr/bin/plutil -extract \"DeveloperCertificates.$certificate_index\" raw -o - {plist} | /usr/bin/base64 -D > {certificate}; certificate_sha256=$(/usr/bin/openssl dgst -sha256 {certificate} | /usr/bin/awk '{{print $NF}}'); /usr/bin/printf '__BUILDBRIDGE_PROFILE_CERT__\\t%s\\t%s\\n' \"$uuid\" \"$certificate_sha256\"; certificate_index=$((certificate_index + 1)); done; get_task_allow=$(/usr/bin/plutil -extract Entitlements.get-task-allow raw -o - {plist} 2>/dev/null || /bin/echo false); provisions_all=$(/usr/bin/plutil -extract ProvisionsAllDevices raw -o - {plist} 2>/dev/null || /bin/echo false); /usr/bin/printf '__BUILDBRIDGE_PROFILE_FLAGS__\\t%s\\t%s\\t%s\\n' \"$uuid\" \"$get_task_allow\" \"$provisions_all\"; device_count=$(/usr/bin/plutil -extract ProvisionedDevices xml1 -o - {plist} 2>/dev/null | /usr/bin/grep -c '<string>' || /usr/bin/true); device_index=0; while /bin/test \"${{device_count:-0}}\" -gt \"$device_index\"; do device_udid=$(/usr/bin/plutil -extract \"ProvisionedDevices.$device_index\" raw -o - {plist}); /usr/bin/printf '__BUILDBRIDGE_PROFILE_DEVICE__\\t%s\\t%s\\n' \"$uuid\" \"$device_udid\"; device_index=$((device_index + 1)); done; /bin/rm -f {certificate} {plist}"
-        ));
+        command.push_str(&profile_inspection_command(guest_profile));
     }
 
     match run_guest_command(
@@ -7340,6 +7348,17 @@ mod tests {
         );
         // A development-only record never yields an App Store profile to archive with.
         assert!(select_app_store_profile(&development_only).is_none());
+    }
+
+    #[test]
+    fn profile_flags_that_are_not_booleans_are_refused_and_the_probe_filters_them() {
+        // plutil reports a missing key on stdout, so an unfiltered probe would hand the parser
+        // its error text; the script keeps only a bare true/false and defaults to false.
+        let polluted = "__BUILDBRIDGE_PROFILE__\t01234567-89AB-CDEF-0123-456789ABCDEF\tTEAM123456\tTEAM123456.com.example.app\t2027-09-02 12:00:00 +0000\n__BUILDBRIDGE_PROFILE_CERT__\t01234567-89AB-CDEF-0123-456789ABCDEF\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n__BUILDBRIDGE_PROFILE_FLAGS__\t01234567-89AB-CDEF-0123-456789ABCDEF\tfalse\tprofile.plist: Could not extract value\n";
+        assert!(parse_profile_summaries(polluted).is_err());
+        let script = profile_inspection_command("/tmp/p.mobileprovision");
+        assert!(script.contains("Entitlements.get-task-allow raw -o - "));
+        assert!(script.contains("| /usr/bin/grep -x -E 'true|false' || /bin/echo false"));
     }
 
     #[test]
