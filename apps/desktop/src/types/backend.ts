@@ -541,6 +541,28 @@ export interface AppleSmokeBuildResult {
     outputTail: string[];
 }
 
+/** One pod whose pinned version differs between the host's Podfile.lock and the guest's. */
+export interface PodfileLockChange {
+    name: string;
+    before: string | null;
+    after: string | null;
+}
+
+export interface PodfileLockChanges {
+    pods: PodfileLockChange[];
+    linesAdded: number;
+    linesRemoved: number;
+    identical: boolean;
+}
+
+/** The guest's refreshed Podfile.lock adopted into the approved project. */
+export interface AdoptPodfileLockResult {
+    view: MacBuilderView;
+    changes: PodfileLockChanges;
+    hostPath: string;
+    backupPath: string;
+}
+
 export interface RunAppleSmokeBuildResult {
     view: MacBuilderView;
     build: AppleSmokeBuildResult;

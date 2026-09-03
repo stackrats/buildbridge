@@ -10,6 +10,7 @@ import { formatTime } from '../lib/format';
 import type { LogLine } from '../components/ui/LogView.vue';
 import { deriveJourney, summarizeJourney, type JourneyStep } from '../model/steps';
 import type {
+    AdoptPodfileLockResult,
     AppleArchiveProgress,
     AppleDeviceRunProgress,
     AppleProjectProgress,
@@ -57,7 +58,8 @@ export type OperationId =
     | 'usb-detach'
     | 'device-signing'
     | 'run-device'
-    | 'clear-device-run';
+    | 'clear-device-run'
+    | 'adopt-lock';
 
 /** Maps the native busy key (see src-tauri/src/lib.rs) to the step it blocks. */
 const busyKeyStep: Record<string, string> = {
@@ -69,6 +71,7 @@ const busyKeyStep: Record<string, string> = {
     clearing_signing: 'provision',
     synchronizing: 'sync',
     test_building: 'test-build',
+    adopting_lock: 'test-build',
     archiving: 'archive',
     deleting: 'launch',
     discarding: 'launch',
@@ -89,6 +92,7 @@ export const busyKeyLabel: Record<string, string> = {
     clearing_signing: 'Removing guest signing',
     synchronizing: 'Synchronizing source',
     test_building: 'Running the test build',
+    adopting_lock: 'Adopting the guest Podfile.lock',
     archiving: 'Building the signed archive',
     deleting: 'Deleting the machine',
     discarding: 'Discarding the container',
@@ -108,6 +112,7 @@ const operationStep: Partial<Record<OperationId, string>> = {
     'xcode-activate': 'xcode-activate',
     sync: 'sync',
     'test-build': 'test-build',
+    'adopt-lock': 'test-build',
     provision: 'provision',
     'clear-signing': 'provision',
     archive: 'archive',
@@ -149,6 +154,8 @@ export interface MachineSession {
     archiveLog: LogLine[];
     /** The app's own console while it runs on the phone. */
     deviceLog: LogLine[];
+    /** The guest's Podfile.lock adopted into the project, until the next test build. */
+    lockAdoption: AdoptPodfileLockResult | null;
     activity: LogLine[];
     lastFailure: { operation: OperationId; message: string; at: number } | null;
 }
@@ -191,6 +198,7 @@ function createSession(id: string): MachineSession {
         buildLog: [],
         archiveLog: [],
         deviceLog: [],
+        lockAdoption: null,
         activity: [],
         lastFailure: null,
     };
@@ -601,6 +609,7 @@ export function useMachinesStore() {
         testBuild: async (id: string, buildTarget: UnsignedBuildTarget = 'device_sdk') => {
             const target = session(id);
             target.project = null;
+            target.lockAdoption = null;
             return runOperation(
                 id,
                 'test-build',
@@ -828,6 +837,23 @@ export function useMachinesStore() {
                 return result;
             });
         },
+        /**
+         * Copies the Podfile.lock CocoaPods wrote in the guest into the approved project and
+         * lifts the archive's drift block; the guest already compiled with exactly that lock.
+         */
+        adoptGuestLock: (id: string) =>
+            runOperation(id, 'adopt-lock', () => useBackend().adoptGuestPodfileLock(id), {
+                started: 'Reading the Podfile.lock the guest resolved',
+                finished: (result) =>
+                    result.changes.identical
+                        ? 'The project already held the guest’s Podfile.lock; the block is lifted.'
+                        : `Adopted the guest’s Podfile.lock into the project: ${result.changes.pods.length} pod${result.changes.pods.length === 1 ? '' : 's'} repinned. Commit it in the project.`,
+            }).then((result) => {
+                if (result) {
+                    session(id).lockAdoption = result;
+                }
+                return result;
+            }),
         clearDeviceRun: (id: string) =>
             runOperation(id, 'clear-device-run', () => useBackend().clearAppleDeviceRun(id), {
                 finished: 'Last device run cleared.',

@@ -72,6 +72,7 @@ export interface Backend {
         machineId: string,
         target: T.UnsignedBuildTarget,
     ): Promise<T.RunAppleSmokeBuildResult>;
+    adoptGuestPodfileLock(machineId: string): Promise<T.AdoptPodfileLockResult>;
     /** `envSetId` null builds without an env set; the step defaults it to the attached one. */
     runSignedArchive(machineId: string, envSetId: string | null): Promise<T.RunAppleArchiveResult>;
     revealArchive(machineId: string): Promise<void>;
@@ -215,6 +216,7 @@ async function createTauriBackend(): Promise<Backend> {
         syncWorkspace: (machineId) => invoke('sync_apple_workspace', { machineId }),
         runSmokeBuild: (machineId, target) =>
             invoke('run_apple_smoke_build', { machineId, input: { target } }),
+        adoptGuestPodfileLock: (machineId) => invoke('adopt_guest_podfile_lock', { machineId }),
         runSignedArchive: (machineId, envSetId) =>
             invoke('run_apple_signed_archive', { machineId, envSetId }),
         revealArchive: (machineId) => invoke('reveal_apple_archive', { machineId }),

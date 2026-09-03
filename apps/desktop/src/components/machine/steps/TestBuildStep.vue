@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Hammer, ScrollText } from '@lucide/vue';
+import { FileCheck, Hammer, ScrollText } from '@lucide/vue';
 import { computed, ref, watch } from 'vue';
 
 import { percent } from '../../../lib/format';
@@ -102,7 +102,13 @@ const targetOptions = computed(() => [
         </template>
 
         <template
-            v-if="building || failure || workspace?.lastNativeLockUpdated || downloadsSimulator"
+            v-if="
+                building ||
+                failure ||
+                workspace?.lastNativeLockUpdated ||
+                session.lockAdoption ||
+                downloadsSimulator
+            "
             #status
         >
             <ProgressRow
@@ -144,9 +150,55 @@ const targetOptions = computed(() => [
                 tone="warn"
                 title="The guest refreshed Podfile.lock"
             >
-                Generated Capacitor plugin metadata had drifted from the committed lock. The change
-                stayed inside the guest; commit an updated Podfile.lock on the host and synchronize
-                again before a signed build, which fails closed on drift.
+                <p>
+                    CocoaPods resolved different pod versions in the guest than the project's
+                    committed Podfile.lock pins, usually because the JavaScript packages moved on.
+                    Signed builds fail closed on that drift. Adopt the guest's lock into the project
+                    here, then commit it; the build that just passed used exactly that lock, so
+                    nothing needs rebuilding.
+                </p>
+                <div class="mt-2">
+                    <Button
+                        size="sm"
+                        variant="outline"
+                        title="Copies the guest's Podfile.lock over the project's, keeping the previous copy"
+                        :disabled="busy"
+                        @click="machines.adoptGuestLock(session.id)"
+                    >
+                        <Spinner v-if="session.operation === 'adopt-lock'" />
+                        <FileCheck v-else class="h-3.5 w-3.5" />
+                        Adopt the guest's Podfile.lock
+                    </Button>
+                </div>
+            </Callout>
+            <Callout
+                v-else-if="session.lockAdoption"
+                tone="ok"
+                title="The guest's Podfile.lock is now the project's"
+            >
+                <div v-if="session.lockAdoption" class="mt-2 space-y-1">
+                    <p>
+                        Adopted into
+                        <span class="font-mono">{{ session.lockAdoption.hostPath }}</span
+                        >{{
+                            session.lockAdoption.changes.identical
+                                ? ', which already matched.'
+                                : `: ${session.lockAdoption.changes.pods.length} pod${session.lockAdoption.changes.pods.length === 1 ? '' : 's'} repinned, ${session.lockAdoption.changes.linesAdded} lines in, ${session.lockAdoption.changes.linesRemoved} out.`
+                        }}
+                        Commit it in the project; the previous copy is kept at
+                        <span class="font-mono">{{ session.lockAdoption.backupPath }}</span
+                        >.
+                    </p>
+                    <ul
+                        v-if="session.lockAdoption.changes.pods.length"
+                        class="font-mono text-[11px] leading-4"
+                    >
+                        <li v-for="pod in session.lockAdoption.changes.pods" :key="pod.name">
+                            {{ pod.name }} · {{ pod.before ?? 'absent' }} →
+                            {{ pod.after ?? 'removed' }}
+                        </li>
+                    </ul>
+                </div>
             </Callout>
         </template>
 

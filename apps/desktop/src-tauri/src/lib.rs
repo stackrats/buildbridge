@@ -15,8 +15,8 @@ use buildbridge_docker_osx::{
     AppleArchiveArtifact, AppleArchiveProgress, AppleArchiveResult, AppleDeviceRunProgress,
     AppleDeviceRunResult, AppleProjectProgress, AppleSmokeBuildResult, AppleWorkspaceSyncResult,
     ContainerState, GuestDiagnostics, GuestEnvFiles, GuestOptimization, GuestSshStatus,
-    GuestTrustState, HostPrerequisites, MacBuilderConfig, OperationScope, RuntimeStatus,
-    SigningProvisioningProgress, SigningProvisioningResult, UnsignedBuildTarget,
+    GuestTrustState, HostPrerequisites, MacBuilderConfig, OperationScope, PodfileLockChanges,
+    RuntimeStatus, SigningProvisioningProgress, SigningProvisioningResult, UnsignedBuildTarget,
     XcodeImportProgress,
 };
 use buildbridge_runner::{ApiClient, execute};
@@ -771,6 +771,17 @@ struct ImportMacXcodeResult {
 struct SyncAppleWorkspaceResult {
     view: MacBuilderView,
     sync: AppleWorkspaceSyncResult,
+}
+
+/// The guest's refreshed Podfile.lock adopted into the approved project: what changed, where it
+/// went, and where the previous copy is kept.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdoptPodfileLockResult {
+    view: MacBuilderView,
+    changes: PodfileLockChanges,
+    host_path: String,
+    backup_path: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3668,6 +3679,88 @@ async fn clear_apple_device_run(
     build_mac_builder_view(&app, &paths).await
 }
 
+/// Copies the Podfile.lock CocoaPods wrote in the guest into the approved host project, so a
+/// drifted lock can be adopted without a Mac. The host copy it replaces is kept beside the
+/// machine's records, the change is reported pod by pod, and the archive's drift block lifts:
+/// the guest workspace already compiled with exactly this lock. Committing it stays the user's.
+#[tauri::command]
+async fn adopt_guest_podfile_lock(
+    app: AppHandle,
+    machine_id: String,
+) -> Result<AdoptPodfileLockResult, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let access = load_mac_guest_access(&paths)?
+        .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
+    let mut workspace = load_apple_workspace(&paths)?
+        .ok_or_else(|| "Approve and synchronize a local Apple project first.".to_string())?;
+    if !workspace.last_native_lock_updated {
+        return Err(
+            "The guest did not refresh Podfile.lock in its last test build, so there is nothing to adopt."
+                .to_string(),
+        );
+    }
+    let current = build_mac_builder_view(&app, &paths).await?;
+    ensure_apple_project_guest_ready(&current)?;
+    let host_lock = PathBuf::from(&workspace.local_path).join("ios/App/Podfile.lock");
+    let identity_path = paths.guest_identity();
+    let known_hosts_path = paths.known_hosts();
+
+    let guard = begin_machine_operation(&app, &machine_id, "adopting_lock")?;
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        buildbridge_docker_osx::read_guest_podfile_lock(
+            profile.ssh_port,
+            &access.username,
+            &identity_path,
+            &known_hosts_path,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string());
+    drop(guard);
+    let guest_lock = finish_operation(&cancel_probe, joined)?;
+
+    let before = match fs::read_to_string(&host_lock) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(format!(
+                "The project's Podfile.lock could not be read: {error}"
+            ));
+        }
+    };
+    let changes = buildbridge_docker_osx::podfile_lock_changes(&before, &guest_lock);
+    let backup = paths.podfile_lock_backup();
+    if !before.is_empty() {
+        write_restricted_file(&backup, before.as_bytes())?;
+    }
+    let incoming = host_lock.with_extension("lock.buildbridge-incoming");
+    fs::write(&incoming, guest_lock.as_bytes())
+        .and_then(|()| fs::rename(&incoming, &host_lock))
+        .map_err(|error| {
+            let _ = fs::remove_file(&incoming);
+            format!("The project's Podfile.lock could not be replaced: {error}")
+        })?;
+
+    workspace.last_native_lock_updated = false;
+    save_apple_workspace(&paths, &workspace)?;
+    let view = build_mac_builder_view(&app, &paths).await?;
+
+    Ok(AdoptPodfileLockResult {
+        view,
+        changes,
+        host_path: host_lock.to_string_lossy().into_owned(),
+        backup_path: backup.to_string_lossy().into_owned(),
+    })
+}
+
 fn load_apple_device_run(paths: &MachinePaths) -> Result<Option<StoredAppleDeviceRun>, String> {
     match fs::read(paths.apple_device_run_record()) {
         Ok(bytes) => serde_json::from_slice(&bytes)
@@ -5914,6 +6007,7 @@ pub fn run() {
             clear_apple_workspace,
             sync_apple_workspace,
             run_apple_smoke_build,
+            adopt_guest_podfile_lock,
             run_apple_signed_archive,
             reveal_apple_archive,
             clear_apple_archive,

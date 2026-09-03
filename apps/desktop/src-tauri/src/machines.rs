@@ -192,6 +192,11 @@ impl MachinePaths {
         self.config_dir.join("device-run-error.txt")
     }
 
+    /// The host project's Podfile.lock as it was before the guest's copy was adopted.
+    pub fn podfile_lock_backup(&self) -> PathBuf {
+        self.config_dir.join("Podfile.lock.previous")
+    }
+
     /// Removes the disk and the control directory: everything the container was built
     /// around. Discarding a container discards its macOS, so this goes with it.
     pub fn remove_container_storage(&self) -> Result<(), String> {

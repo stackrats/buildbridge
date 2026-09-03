@@ -38,6 +38,8 @@ const query =
         ? new URLSearchParams()
         : new URLSearchParams(window.location.search);
 const deviceReady = query.get('device') === 'ready';
+// `?lockDrift` previews the archive blocked on a guest-refreshed Podfile.lock.
+const lockDrift = query.has('lockDrift');
 let usbRuleInstalled = query.has('usbRule') || deviceReady;
 
 const hostUsbDevices: T.HostUsbDevice[] = [
@@ -199,7 +201,7 @@ function readyMachine(): MockMachine {
             lastSyncBytes: 48_213_770,
             lastBuildSucceeded: true,
             lastXcodeVersion: '26.6',
-            lastNativeLockUpdated: false,
+            lastNativeLockUpdated: lockDrift,
             lastBuildTarget: 'simulator',
         },
         signing: {
@@ -1035,6 +1037,31 @@ export function createMockBackend(): Backend {
                         nativeLockfileUpdated: false,
                         outputTail: ['** BUILD SUCCEEDED **'],
                     },
+                };
+            });
+        },
+        async adoptGuestPodfileLock(machineId) {
+            const machine = find(machineId);
+            return busy(machine, 'Adopting the guest Podfile.lock', async () => {
+                await sleep(600);
+                if (machine.workspace) {
+                    machine.workspace.lastNativeLockUpdated = false;
+                }
+                return {
+                    view: view(machine),
+                    changes: {
+                        pods: [
+                            { name: 'Capacitor', before: '8.3.4', after: '8.4.2' },
+                            { name: 'CapacitorCordova', before: '8.3.4', after: '8.4.2' },
+                            { name: 'CapacitorCamera', before: '8.2.0', after: '8.2.1' },
+                        ],
+                        linesAdded: 21,
+                        linesRemoved: 21,
+                        identical: false,
+                    },
+                    hostPath: '/home/you/projects/example-app/ios/App/Podfile.lock',
+                    backupPath:
+                        '/home/you/.config/dev.buildbridge.desktop/machines/default/Podfile.lock.previous',
                 };
             });
         },
