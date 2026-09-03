@@ -7,14 +7,42 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-pub const CONTAINER_NAME: &str = "buildbridge-macos-builder";
+/// Identifier of the builder that existed before BuildBridge kept a machine registry.
+pub const DEFAULT_MACHINE_ID: &str = "default";
+/// Container name of the legacy single builder; newer machines derive their own name.
+pub const DEFAULT_CONTAINER_NAME: &str = "buildbridge-macos-builder";
 pub const DOCKER_IMAGE: &str = "sickcodes/docker-osx:latest";
+
+/// Returns whether a machine identifier is safe to use in container names and directories.
+pub fn valid_machine_id(machine_id: &str) -> bool {
+    !machine_id.is_empty()
+        && machine_id.len() <= 40
+        && !machine_id.starts_with('-')
+        && !machine_id.ends_with('-')
+        && machine_id.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
+}
+
+/// Maps a machine identifier to its managed Docker container name.
+///
+/// The legacy machine keeps the container it was created with so existing installations
+/// continue to resolve after the registry migration.
+pub fn container_name(machine_id: &str) -> String {
+    if machine_id == DEFAULT_MACHINE_ID {
+        DEFAULT_CONTAINER_NAME.to_string()
+    } else {
+        format!("buildbridge-macos-{machine_id}")
+    }
+}
 const XCODE_ARCHIVE_NAME: &str = "BuildBridge-Xcode.xip";
 const XCODE_PACKAGE_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const SIGNING_CERTIFICATE_MAX_BYTES: u64 = 32 * 1024 * 1024;
@@ -220,6 +248,25 @@ pub struct GuestDiagnostics {
     pub issue: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchPhase {
+    Preparing,
+    PullingImage,
+    GeneratingIdentity,
+    CreatingContainer,
+    Starting,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchProgress {
+    pub phase: LaunchPhase,
+    pub elapsed_seconds: u64,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum XcodeImportPhase {
@@ -341,6 +388,8 @@ pub struct AppleSmokeBuildResult {
 #[serde(rename_all = "snake_case")]
 pub enum AppleArchivePhase {
     Preparing,
+    /// Only when a build chooses an env set: the web assets are rebuilt with it first.
+    BuildingWebAssets,
     Archiving,
     Exporting,
     Verifying,
@@ -382,6 +431,538 @@ pub struct AppleArchiveResult {
     pub ipa: AppleArchiveArtifact,
     pub archive: AppleArchiveArtifact,
     pub output_tail: Vec<String>,
+}
+
+/// One long-running operation on one machine, as the thing a **Stop** button acts on.
+///
+/// Every child process the crate starts while the scope is entered — every `ssh`, `docker`
+/// and `tar` — is registered here, so cancelling kills what is actually running rather than
+/// leaving a build to finish in the background. The scope is thread-local because each
+/// operation already runs on its own blocking thread; nothing in the crate's signatures has to
+/// know about it.
+#[derive(Debug, Default)]
+pub struct OperationScope {
+    cancelled: AtomicBool,
+    children: Mutex<Vec<u32>>,
+}
+
+impl OperationScope {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    /// Marks the operation cancelled and terminates every child it has running. Later spawns
+    /// under this scope refuse to start.
+    pub fn cancel(&self) -> usize {
+        self.cancelled.store(true, Ordering::Release);
+        let pids = self
+            .children
+            .lock()
+            .map(|children| children.clone())
+            .unwrap_or_default();
+        for pid in &pids {
+            terminate_process(*pid);
+        }
+
+        pids.len()
+    }
+
+    fn register(&self, pid: u32) {
+        if let Ok(mut children) = self.children.lock() {
+            children.push(pid);
+        }
+    }
+
+    fn unregister(&self, pid: u32) {
+        if let Ok(mut children) = self.children.lock() {
+            children.retain(|child| *child != pid);
+        }
+    }
+}
+
+fn terminate_process(pid: u32) {
+    #[cfg(windows)]
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    #[cfg(not(windows))]
+    let _ = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+thread_local! {
+    static CURRENT_SCOPE: std::cell::RefCell<Option<Arc<OperationScope>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Makes `scope` the current operation on this thread until the returned guard drops.
+pub fn enter_operation(scope: Arc<OperationScope>) -> OperationGuard {
+    CURRENT_SCOPE.with(|current| *current.borrow_mut() = Some(scope));
+    OperationGuard(())
+}
+
+pub struct OperationGuard(());
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        CURRENT_SCOPE.with(|current| *current.borrow_mut() = None);
+    }
+}
+
+fn current_scope() -> Option<Arc<OperationScope>> {
+    CURRENT_SCOPE.with(|current| current.borrow().clone())
+}
+
+/// A child process that the current operation scope knows about. The child is optional only
+/// so `wait_with_output`, which consumes it, can take it out before the drop unregisters it.
+struct TrackedChild {
+    child: Option<Child>,
+    scope: Option<Arc<OperationScope>>,
+}
+
+impl TrackedChild {
+    fn wait_with_output(mut self) -> std::io::Result<Output> {
+        let child = self
+            .child
+            .take()
+            .expect("a tracked child is present until consumed");
+        let pid = child.id();
+        let output = child.wait_with_output();
+        if let Some(scope) = &self.scope {
+            scope.unregister(pid);
+        }
+        output
+    }
+}
+
+impl std::ops::Deref for TrackedChild {
+    type Target = Child;
+
+    fn deref(&self) -> &Child {
+        self.child
+            .as_ref()
+            .expect("a tracked child is present until consumed")
+    }
+}
+
+impl std::ops::DerefMut for TrackedChild {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.child
+            .as_mut()
+            .expect("a tracked child is present until consumed")
+    }
+}
+
+impl Drop for TrackedChild {
+    fn drop(&mut self) {
+        if let (Some(scope), Some(child)) = (&self.scope, &self.child) {
+            scope.unregister(child.id());
+        }
+    }
+}
+
+trait TrackedCommand {
+    fn tracked_spawn(&mut self) -> std::io::Result<TrackedChild>;
+    fn tracked_output(&mut self) -> std::io::Result<Output>;
+}
+
+impl TrackedCommand for Command {
+    fn tracked_spawn(&mut self) -> std::io::Result<TrackedChild> {
+        let scope = current_scope();
+        if scope.as_ref().is_some_and(|scope| scope.is_cancelled()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "the operation was stopped",
+            ));
+        }
+        let child = self.spawn()?;
+        if let Some(scope) = &scope {
+            scope.register(child.id());
+        }
+
+        Ok(TrackedChild {
+            child: Some(child),
+            scope,
+        })
+    }
+
+    fn tracked_output(&mut self) -> std::io::Result<Output> {
+        self.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .tracked_spawn()?
+            .wait_with_output()
+    }
+}
+
+/// How much a guest optimization changes about the machine's security posture, in the words
+/// the osx-optimizer project uses for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptimizationTier {
+    /// Faster builds, no meaningful change to who can do what on the machine.
+    Recommended,
+    /// Trades some protection for convenience; the source marks these "at your own risk".
+    AtYourOwnRisk,
+    /// Removes authentication inside the guest. Only defensible for a VM nothing else can reach.
+    ExtremelyInsecure,
+}
+
+/// One tweak from sickcodes/osx-optimizer as BuildBridge can run it: a fixed script for the
+/// guest, a check that reports whether it is already in effect, and the caveat the source gives.
+/// Admin tweaks run in the guest's own Terminal, where `sudo` reads the password from its TTY;
+/// BuildBridge never sees it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuestOptimization {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub summary: &'static str,
+    pub tier: OptimizationTier,
+    /// The caveat, in the source's words where it gives one.
+    pub warning: Option<&'static str>,
+    pub needs_admin: bool,
+    #[serde(skip)]
+    pub apply: &'static str,
+    /// Prints `applied` or `not_applied`; anything else reads as unknown.
+    #[serde(skip)]
+    pub check: &'static str,
+}
+
+pub fn guest_optimizations() -> &'static [GuestOptimization] {
+    &[
+        GuestOptimization {
+            id: "disable-spotlight",
+            title: "Disable Spotlight indexing",
+            summary: "Stops the indexer that otherwise churns through every synchronized project and every Xcode install. The single biggest win for a virtual machine.",
+            tier: OptimizationTier::Recommended,
+            warning: Some(
+                "Spotlight stops finding apps and files; `sudo mdutil -i on -a` turns it back on.",
+            ),
+            needs_admin: true,
+            apply: "/usr/bin/sudo /usr/bin/mdutil -i off -a",
+            check: "if /usr/bin/mdutil -s / 2>/dev/null | /usr/bin/grep -qi 'disabled'; then /usr/bin/printf applied; else /usr/bin/printf not_applied; fi",
+        },
+        GuestOptimization {
+            id: "performance-mode",
+            title: "Enable performance mode",
+            summary: "Sets Apple's server performance mode in the boot arguments, which dedicates more system resources to long-running processes such as builds.",
+            tier: OptimizationTier::Recommended,
+            warning: Some("Takes effect after the next restart of the guest."),
+            needs_admin: true,
+            apply: r#"/usr/bin/sudo /usr/sbin/nvram boot-args="serverperfmode=1 $(/usr/sbin/nvram boot-args 2>/dev/null | /usr/bin/cut -f 2-)""#,
+            check: "if /usr/sbin/nvram boot-args 2>/dev/null | /usr/bin/grep -q 'serverperfmode=1'; then /usr/bin/printf applied; else /usr/bin/printf not_applied; fi",
+        },
+        GuestOptimization {
+            id: "reduce-motion",
+            title: "Reduce motion and transparency",
+            summary: "Turns off the animations and blur the console window otherwise has to render through QEMU.",
+            tier: OptimizationTier::Recommended,
+            warning: None,
+            needs_admin: false,
+            apply: "/usr/bin/defaults write com.apple.Accessibility DifferentiateWithoutColor -int 1 && /usr/bin/defaults write com.apple.Accessibility ReduceMotionEnabled -int 1 && /usr/bin/defaults write com.apple.universalaccess reduceMotion -int 1 && /usr/bin/defaults write com.apple.universalaccess reduceTransparency -int 1",
+            check: "if /usr/bin/test \"$(/usr/bin/defaults read com.apple.universalaccess reduceMotion 2>/dev/null)\" = 1; then /usr/bin/printf applied; else /usr/bin/printf not_applied; fi",
+        },
+        GuestOptimization {
+            id: "no-state-restore",
+            title: "Do not restore apps on login",
+            summary: "Stops macOS reopening whatever was running at shutdown, so a restart comes up clean and faster.",
+            tier: OptimizationTier::Recommended,
+            warning: Some("This may be slower for you depending on what you are doing."),
+            needs_admin: false,
+            apply: "/usr/bin/defaults write com.apple.loginwindow TALLogoutSavesState -bool false",
+            check: "if /usr/bin/test \"$(/usr/bin/defaults read com.apple.loginwindow TALLogoutSavesState 2>/dev/null)\" = 0; then /usr/bin/printf applied; else /usr/bin/printf not_applied; fi",
+        },
+        GuestOptimization {
+            id: "no-app-nap",
+            title: "Keep apps from sleeping",
+            summary: "Disables App Nap so background processes such as Xcode are never throttled into a sleeping state.",
+            tier: OptimizationTier::Recommended,
+            warning: Some("This increases RAM usage."),
+            needs_admin: false,
+            apply: "/usr/bin/defaults write NSGlobalDomain NSAppSleepDisabled -bool YES",
+            check: "if /usr/bin/test \"$(/usr/bin/defaults read NSGlobalDomain NSAppSleepDisabled 2>/dev/null)\" = 1; then /usr/bin/printf applied; else /usr/bin/printf not_applied; fi",
+        },
+        GuestOptimization {
+            id: "lighter-login",
+            title: "Lighter login screen",
+            summary: "Drops the login wallpaper and shows a plain name and password prompt instead of a list of users.",
+            tier: OptimizationTier::Recommended,
+            warning: None,
+            needs_admin: true,
+            apply: r#"/usr/bin/sudo /usr/bin/defaults write /Library/Preferences/com.apple.loginwindow DesktopPicture "" && /usr/bin/sudo /usr/bin/defaults write /Library/Preferences/com.apple.loginwindow.plist SHOWFULLNAME -bool true && /usr/bin/defaults write com.apple.loginwindow AllowList -string '*'"#,
+            check: "if /usr/bin/test \"$(/usr/bin/defaults read /Library/Preferences/com.apple.loginwindow SHOWFULLNAME 2>/dev/null)\" = 1; then /usr/bin/printf applied; else /usr/bin/printf not_applied; fi",
+        },
+        GuestOptimization {
+            id: "disable-updates",
+            title: "Disable software updates",
+            summary: "Stops macOS downloading multi-gigabyte updates in the background, which is what makes a virtual disk grow out of proportion.",
+            tier: OptimizationTier::AtYourOwnRisk,
+            warning: Some(
+                "At your own risk: the guest stops receiving security updates. Update it deliberately instead.",
+            ),
+            needs_admin: true,
+            apply: "/usr/bin/sudo /usr/bin/defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticDownload -bool false && /usr/bin/sudo /usr/bin/defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled -bool false && /usr/bin/sudo /usr/bin/defaults write /Library/Preferences/com.apple.SoftwareUpdate ConfigDataInstall -int 0 && /usr/bin/sudo /usr/bin/defaults write /Library/Preferences/com.apple.SoftwareUpdate CriticalUpdateInstall -int 0 && /usr/bin/sudo /usr/bin/defaults write /Library/Preferences/com.apple.SoftwareUpdate ScheduleFrequency -int 0 && /usr/bin/sudo /usr/bin/defaults write /Library/Preferences/com.apple.commerce AutoUpdate -bool false && /usr/bin/sudo /usr/bin/defaults write /Library/Preferences/com.apple.commerce AutoUpdateRestartRequired -bool false",
+            check: "if /usr/bin/test \"$(/usr/bin/defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticDownload 2>/dev/null)\" = 0; then /usr/bin/printf applied; else /usr/bin/printf not_applied; fi",
+        },
+        GuestOptimization {
+            id: "auto-login",
+            title: "Skip the login screen",
+            summary: "Logs the console straight into the user account at boot instead of stopping at the login window.",
+            tier: OptimizationTier::AtYourOwnRisk,
+            warning: Some("At your own risk: anyone who can see the console is logged in."),
+            needs_admin: false,
+            apply: "/usr/bin/defaults write com.apple.loginwindow autoLoginUser -bool true",
+            check: "if /usr/bin/test \"$(/usr/bin/defaults read com.apple.loginwindow autoLoginUser 2>/dev/null)\" = 1; then /usr/bin/printf applied; else /usr/bin/printf not_applied; fi",
+        },
+        GuestOptimization {
+            id: "disable-screen-lock",
+            title: "Disable screen locking",
+            summary: "Keeps the console session unlocked so a build is never waiting behind a lock screen.",
+            tier: OptimizationTier::AtYourOwnRisk,
+            warning: Some("The console never asks for a password again once it is logged in."),
+            needs_admin: false,
+            apply: "/usr/bin/defaults write com.apple.loginwindow DisableScreenLock -bool true",
+            check: "if /usr/bin/test \"$(/usr/bin/defaults read com.apple.loginwindow DisableScreenLock 2>/dev/null)\" = 1; then /usr/bin/printf applied; else /usr/bin/printf not_applied; fi",
+        },
+        GuestOptimization {
+            id: "osascript-over-ssh",
+            title: "Allow automation over SSH",
+            summary: "Lets scripts run over SSH drive apps with osascript without the accessibility and full-disk-access prompts.",
+            tier: OptimizationTier::AtYourOwnRisk,
+            warning: Some("Anything that can open an SSH session can then automate the desktop."),
+            needs_admin: false,
+            apply: "/usr/bin/defaults write com.apple.universalaccessAuthWarning /System/Applications/Utilities/Terminal.app -bool true && /usr/bin/defaults write com.apple.universalaccessAuthWarning /usr/libexec -bool true && /usr/bin/defaults write com.apple.universalaccessAuthWarning /usr/libexec/sshd-keygen-wrapper -bool true && /usr/bin/defaults write com.apple.universalaccessAuthWarning com.apple.Terminal -bool true",
+            check: "if /usr/bin/test \"$(/usr/bin/defaults read com.apple.universalaccessAuthWarning /usr/libexec/sshd-keygen-wrapper 2>/dev/null)\" = 1; then /usr/bin/printf applied; else /usr/bin/printf not_applied; fi",
+        },
+        GuestOptimization {
+            id: "multi-sessions",
+            title: "Enable multiple sessions",
+            summary: "Allows more than one user session at a time, so a console login and an SSH-driven build do not fight over the one session.",
+            tier: OptimizationTier::AtYourOwnRisk,
+            warning: None,
+            needs_admin: true,
+            apply: r#"/usr/bin/sudo /usr/bin/defaults write .GlobalPreferences MultipleSessionsEnabled -bool TRUE && /usr/bin/defaults write "Apple Global Domain" MultipleSessionsEnabled -bool true"#,
+            check: "if /usr/bin/test \"$(/usr/bin/defaults read 'Apple Global Domain' MultipleSessionsEnabled 2>/dev/null)\" = 1; then /usr/bin/printf applied; else /usr/bin/printf not_applied; fi",
+        },
+        GuestOptimization {
+            id: "remote-management",
+            title: "Enable remote management",
+            summary: "Turns on Apple Remote Desktop screen sharing for every user, so the guest can be watched and driven without the QEMU console.",
+            tier: OptimizationTier::AtYourOwnRisk,
+            warning: Some(
+                "At your own risk: every account on the guest can then be reached over the network.",
+            ),
+            needs_admin: true,
+            apply: "/usr/bin/sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -off -restart -agent -privs -all -allowAccessFor -allUsers",
+            check: "if /usr/bin/pgrep -x ARDAgent >/dev/null 2>&1; then /usr/bin/printf applied; else /usr/bin/printf not_applied; fi",
+        },
+        GuestOptimization {
+            id: "disable-passwords",
+            title: "Disable passwords globally",
+            summary: "Rewrites every PAM policy so no password is ever required: everyone is root, sudo never asks, and SSH password login accepts an empty password.",
+            tier: OptimizationTier::ExtremelyInsecure,
+            warning: Some(
+                "These macOS optimizations should only be used in CI/CD, behind a VPN, and with no external connectivity. This is not a warning, it is absolutely essential, or anyone can just SSH into the remote mac.",
+            ),
+            needs_admin: true,
+            apply: r#"for PAM_FILE in /etc/pam.d/*; do /usr/bin/sudo /usr/bin/sed -i -e 's/required/optional/g' -e 's/sufficient/optional/g' "$PAM_FILE"; done"#,
+            check: "if /usr/bin/grep -q 'required' /etc/pam.d/sudo 2>/dev/null; then /usr/bin/printf not_applied; else /usr/bin/printf applied; fi",
+        },
+        GuestOptimization {
+            id: "everyone-sudoer",
+            title: "Make every user a passwordless sudoer",
+            summary: "Writes a NOPASSWD sudoers rule for every account under /Users, so scripts can use sudo without a password.",
+            tier: OptimizationTier::ExtremelyInsecure,
+            warning: Some(
+                "These macOS optimizations should only be used in CI/CD, behind a VPN, and with no external connectivity. Any account on the guest becomes root without a password.",
+            ),
+            needs_admin: true,
+            apply: r#"for USER_DIR in /Users/*; do REAL_NAME=$(/usr/bin/basename "$USER_DIR"); if /usr/bin/test "$REAL_NAME" = Shared; then continue; fi; /usr/bin/printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$REAL_NAME" | /usr/bin/sudo /usr/bin/tee "/etc/sudoers.d/$REAL_NAME" >/dev/null; /usr/bin/sudo /bin/chmod 440 "/etc/sudoers.d/$REAL_NAME"; done"#,
+            check: "if /usr/bin/sudo -n /usr/bin/true >/dev/null 2>&1; then /usr/bin/printf applied; else /usr/bin/printf not_applied; fi",
+        },
+    ]
+}
+
+pub fn guest_optimization(id: &str) -> Option<&'static GuestOptimization> {
+    guest_optimizations().iter().find(|item| item.id == id)
+}
+
+/// Reports which optimizations are in effect, in one round trip: every check prints its id
+/// and state on its own line, and a check that cannot run reads as unknown rather than as
+/// "not applied", so nothing is offered as undone when the truth is unknowable.
+pub fn check_guest_optimizations(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+) -> Result<Vec<(&'static str, Option<bool>)>, ProviderError> {
+    validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
+    let script = guest_optimizations()
+        .iter()
+        .map(|item| {
+            format!(
+                "/usr/bin/printf '%s=' {}; ({}) 2>/dev/null || /usr/bin/printf unknown; /usr/bin/printf '\\n'",
+                shell_single_quote(item.id),
+                item.check
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let output = run_guest_command(ssh_port, username, identity_path, known_hosts_path, &script)?;
+
+    Ok(guest_optimizations()
+        .iter()
+        .map(|item| {
+            let state = output
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{}=", item.id)))
+                .map(str::trim);
+            let applied = match state {
+                Some("applied") => Some(true),
+                Some("not_applied") => Some(false),
+                _ => None,
+            };
+            (item.id, applied)
+        })
+        .collect())
+}
+
+/// Applies one optimization. A user-level tweak runs straight over the bridge; an admin tweak
+/// opens the guest's Terminal with a fixed command file so `sudo` reads the password from its
+/// own TTY. Either way the script is the catalogue's, verbatim.
+pub fn apply_guest_optimization<F>(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+    optimization_id: &str,
+    mut on_waiting: F,
+) -> Result<(), ProviderError>
+where
+    F: FnMut(u64),
+{
+    let item = guest_optimization(optimization_id).ok_or_else(|| {
+        ProviderError::GuestBridge("that optimization is not in the catalogue".to_string())
+    })?;
+    validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
+
+    if !item.needs_admin {
+        run_guest_command(
+            ssh_port,
+            username,
+            identity_path,
+            known_hosts_path,
+            item.apply,
+        )?;
+        return Ok(());
+    }
+
+    let task_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let guest_cache = format!("/Users/{username}/Library/Caches/dev.buildbridge.desktop");
+    let status_path = format!("{guest_cache}/optimize-{task_id}.status");
+    let script_path = format!("{guest_cache}/optimize-{task_id}.command");
+    let terminal_script = format!(
+        r#"#!/bin/zsh
+/usr/bin/clear
+/usr/bin/printf "BuildBridge: {title}\n\n"
+/usr/bin/printf "Enter the local macOS login password when sudo asks.\n"
+/usr/bin/printf "The password remains inside this macOS Terminal.\n\n"
+trap "/usr/bin/printf \"failed:interrupted\\n\" > {status_path}" EXIT
+if ( {apply} ); then
+    trap - EXIT
+    /usr/bin/printf "success\n" > {status_path}
+    /usr/bin/printf "\nDone. You can close this window.\n"
+else
+    result=$?
+    trap - EXIT
+    /usr/bin/printf "failed:%s\n" "$result" > {status_path}
+    /usr/bin/printf "\nThat did not complete. Return to BuildBridge.\n"
+fi
+read -k 1 "?Press any key to close this window."
+"#,
+        title = item.title,
+        apply = item.apply,
+    );
+    let quoted = shell_single_quote(&terminal_script);
+    let remote_command = format!(
+        "/bin/mkdir -p '{guest_cache}'; /bin/rm -f '{status_path}' '{script_path}'; /usr/bin/printf '%s' {quoted} > '{script_path}'; /bin/chmod 700 '{script_path}'; if ! /usr/bin/open -a Terminal '{script_path}'; then /usr/bin/printf launch_failed; exit 0; fi; remaining=900; while /bin/test ! -f '{status_path}' && /bin/test \"$remaining\" -gt 0; do /bin/sleep 1; remaining=$((remaining - 1)); done; if /bin/test -f '{status_path}'; then /bin/cat '{status_path}'; /bin/rm -f '{status_path}' '{script_path}'; else /usr/bin/printf timeout; fi"
+    );
+    let started_at = Instant::now();
+    let mut child = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
+        .arg(remote_command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .tracked_spawn()
+        .map_err(|error| {
+            ProviderError::GuestBridge(format!("could not open the guest Terminal: {error}"))
+        })?;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                on_waiting(started_at.elapsed().as_secs());
+                thread::sleep(Duration::from_secs(1));
+            }
+            Err(error) => {
+                return Err(ProviderError::GuestBridge(format!(
+                    "could not monitor the guest Terminal: {error}"
+                )));
+            }
+        }
+    };
+    let output = child.wait_with_output().map_err(|error| {
+        ProviderError::GuestBridge(format!("could not read the guest Terminal result: {error}"))
+    })?;
+    if !status.success() {
+        return Err(ProviderError::GuestBridge(clean_output(&output.stderr)));
+    }
+    match clean_output(&output.stdout).as_str() {
+        "success" => Ok(()),
+        "launch_failed" => Err(ProviderError::GuestBridge(
+            "macOS could not open a Terminal window; log in on the console and try again"
+                .to_string(),
+        )),
+        "timeout" => Err(ProviderError::GuestBridge(
+            "no password was entered in the guest Terminal within 15 minutes".to_string(),
+        )),
+        other => Err(ProviderError::GuestBridge(format!(
+            "the guest reported: {}",
+            if other.is_empty() { "no result" } else { other }
+        ))),
+    }
+}
+
+/// Stops any BuildBridge job still running inside the guest after its host-side operation was
+/// cancelled. The test build deliberately survives a dropped SSH session so a desktop restart
+/// can reattach; a Stop button must reach past that.
+pub fn stop_guest_jobs(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+) -> Result<(), ProviderError> {
+    validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
+    let jobs = format!("/Users/{username}/.buildbridge/tools/jobs");
+    let script = format!(
+        "for pid_file in {}/*/pid; do if /bin/test -f \"$pid_file\"; then pid=$(/bin/cat \"$pid_file\"); pgid=$(/bin/ps -o pgid= -p \"$pid\" 2>/dev/null | /usr/bin/tr -d ' '); if /bin/test -n \"$pgid\"; then /bin/kill -TERM -- \"-$pgid\" 2>/dev/null || /bin/true; fi; /bin/kill -TERM \"$pid\" 2>/dev/null || /bin/true; fi; done; /bin/rm -rf {}/*; /usr/bin/true",
+        shell_single_quote(&jobs),
+        shell_single_quote(&jobs)
+    );
+    run_guest_command(ssh_port, username, identity_path, known_hosts_path, &script).map(|_| ())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -589,7 +1170,7 @@ pub fn guest_diagnostics(
             .is_ok();
 
             (
-                Some(version),
+                Some(parse_xcode_version(&version)),
                 selected_path,
                 first_launch_ready,
                 (!first_launch_ready).then(|| {
@@ -611,7 +1192,7 @@ pub fn guest_diagnostics(
                 &direct_xcodebuild,
             ) {
                 Ok(version) => (
-                    Some(version),
+                    Some(parse_xcode_version(&version)),
                     Some(installed_path),
                     false,
                     Some(
@@ -639,6 +1220,88 @@ pub fn guest_diagnostics(
         xcode_path,
         xcode_selected,
         issue,
+    }
+}
+
+/// Installs the BuildBridge public key into the guest user's `authorized_keys` over one
+/// password-authenticated SSH session — the `ssh-copy-id` route. The session is pinned to the
+/// already-trusted host key, so the password only ever reaches the machine whose fingerprint
+/// was verified. The password is handed to `ssh` through the environment of that one process
+/// and read back by a fixed askpass helper; it is never an argument, never written to disk,
+/// and never part of an error. Every later guest operation authenticates with the key.
+pub fn authorize_guest_key(
+    ssh_port: u16,
+    username: &str,
+    public_key: &str,
+    password: &str,
+    known_hosts_path: &Path,
+) -> Result<(), ProviderError> {
+    if !valid_guest_username(username) {
+        return Err(ProviderError::GuestBridge(
+            "the macOS short username is invalid".to_string(),
+        ));
+    }
+    if ssh_port < 1024 {
+        return Err(ProviderError::GuestBridge(
+            "guest SSH port must be between 1024 and 65535".to_string(),
+        ));
+    }
+    if !known_hosts_path.is_file() {
+        return Err(ProviderError::GuestBridge(
+            "pin the guest SSH fingerprint before sending it a password".to_string(),
+        ));
+    }
+    if !valid_guest_public_key(public_key) {
+        return Err(ProviderError::GuestBridge(
+            "the BuildBridge guest public key is invalid".to_string(),
+        ));
+    }
+    if !valid_guest_password(password) {
+        return Err(ProviderError::GuestBridge(
+            "enter the local macOS login password: up to 512 characters on one line".to_string(),
+        ));
+    }
+
+    let askpass = GuestAskpassHelper::create()?;
+    let output =
+        guest_password_ssh_command(ssh_port, username, known_hosts_path, &askpass.script())
+            .env(GUEST_PASSWORD_ENV, password)
+            .arg(guest_key_install_command(public_key))
+            .tracked_output()
+            .map_err(|error| {
+                ProviderError::GuestBridge(format!(
+                    "could not run ssh; install OpenSSH client tools: {error}"
+                ))
+            })?;
+    drop(askpass);
+
+    if !output.status.success() {
+        return Err(ProviderError::GuestBridge(
+            describe_password_session_failure(username, &clean_output(&output.stderr)),
+        ));
+    }
+    match clean_output(&output.stdout).as_str() {
+        "authorized" => Ok(()),
+        other => Err(ProviderError::GuestBridge(format!(
+            "the guest did not confirm the key install: {}",
+            if other.is_empty() { "no result" } else { other }
+        ))),
+    }
+}
+
+fn describe_password_session_failure(username: &str, stderr: &str) -> String {
+    if stderr.contains("Permission denied") {
+        format!(
+            "macOS did not accept the password for {username}. Check the short username and the local macOS login password, or add the key from the guest Terminal instead."
+        )
+    } else if stderr.contains("Host key verification failed")
+        || stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+    {
+        "the guest SSH identity no longer matches the pinned fingerprint; forget the pin only after verifying this is the expected machine".to_string()
+    } else if stderr.is_empty() {
+        "the password-authenticated SSH session failed without a message".to_string()
+    } else {
+        stderr.to_string()
     }
 }
 
@@ -857,7 +1520,7 @@ read -k 1 "?Press any key to close this window."
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .tracked_spawn()
         .map_err(|error| {
             ProviderError::GuestBridge(format!("could not start macOS Xcode activation: {error}"))
         })?;
@@ -1365,8 +2028,17 @@ pub fn clear_signing(
     Ok(())
 }
 
+/// A build's environment, rendered twice because its two readers quote differently: Vite's
+/// dotenv loader reads `.env.production.local`, and the guest build shell sources `env.sh`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestEnvFiles {
+    pub dotenv: String,
+    pub shell: String,
+}
+
 pub fn sync_apple_workspace<F>(
     workspace_path: &Path,
+    env: Option<&GuestEnvFiles>,
     ssh_port: u16,
     username: &str,
     identity_path: &Path,
@@ -1415,8 +2087,10 @@ where
     let guest_workspace = format!("{guest_root}/active");
     let guest_staging = format!("{guest_root}/active.incoming");
     let guest_archive = format!("{guest_root}/active.tar.gz");
+    let guest_env = format!("{guest_root}/active.env");
+    let guest_env_shell = format!("{guest_root}/active.env.sh");
     let prepare = format!(
-        "/bin/mkdir -p '{guest_root}'; /bin/rm -rf '{guest_staging}'; /bin/rm -f '{guest_archive}'"
+        "/bin/mkdir -p '{guest_root}'; /bin/rm -rf '{guest_staging}'; /bin/rm -f '{guest_archive}' '{guest_env}' '{guest_env_shell}'"
     );
     run_guest_command(
         ssh_port,
@@ -1437,6 +2111,29 @@ where
         &mut on_progress,
     )?;
 
+    // The environment travels the same pinned channel as the source, as owner-only files that
+    // land next to it: one for Vite, one for the build shell. Never as command arguments.
+    if let Some(env) = env {
+        stream_bytes_to_guest(
+            env.dotenv.as_bytes(),
+            ssh_port,
+            username,
+            identity_path,
+            known_hosts_path,
+            &guest_env,
+            "env file",
+        )?;
+        stream_bytes_to_guest(
+            env.shell.as_bytes(),
+            ssh_port,
+            username,
+            identity_path,
+            known_hosts_path,
+            &guest_env_shell,
+            "env script",
+        )?;
+    }
+
     on_progress(apple_progress(
         AppleProjectPhase::Extracting,
         archive_bytes,
@@ -1446,7 +2143,7 @@ where
         None,
     ));
     let extract = format!(
-        "set -eu; /bin/mkdir -p '{guest_staging}'; /usr/bin/tar -xzf '{guest_archive}' -C '{guest_staging}'; /bin/test -f '{guest_staging}/package.json'; /bin/test -d '{guest_staging}/ios/App/App.xcworkspace'; /bin/rm -rf '{guest_workspace}.previous'; if /bin/test -d '{guest_workspace}'; then /bin/mv '{guest_workspace}' '{guest_workspace}.previous'; fi; /bin/mv '{guest_staging}' '{guest_workspace}'; /bin/rm -f '{guest_archive}'; /bin/rm -rf '{guest_workspace}.previous'"
+        "set -eu; /bin/mkdir -p '{guest_staging}'; /usr/bin/tar -xzf '{guest_archive}' -C '{guest_staging}'; /bin/test -f '{guest_staging}/package.json'; /bin/test -d '{guest_staging}/ios/App/App.xcworkspace'; /bin/rm -rf '{guest_workspace}.previous'; if /bin/test -d '{guest_workspace}'; then /bin/mv '{guest_workspace}' '{guest_workspace}.previous'; fi; /bin/mv '{guest_staging}' '{guest_workspace}'; if /bin/test -f '{guest_env}'; then /bin/mv '{guest_env}' '{guest_workspace}/.env.production.local'; /bin/chmod 600 '{guest_workspace}/.env.production.local'; fi; if /bin/test -f '{guest_env_shell}'; then /bin/mkdir -p '{guest_workspace}/.buildbridge'; /bin/mv '{guest_env_shell}' '{guest_workspace}/.buildbridge/env.sh'; /bin/chmod 600 '{guest_workspace}/.buildbridge/env.sh'; fi; /bin/rm -f '{guest_archive}'; /bin/rm -rf '{guest_workspace}.previous'"
     );
     run_guest_command(
         ssh_port,
@@ -1537,6 +2234,9 @@ export DEVELOPER_DIR="{developer_dir}"
 export LANG="en_US.UTF-8"
 export RUBYOPT="-rlogger"
 export CYPRESS_INSTALL_BINARY=0
+if /bin/test -f "{workspace}/.buildbridge/env.sh"; then
+    . "{workspace}/.buildbridge/env.sh"
+fi
 
 phase preparing_tools
 /bin/mkdir -p "{tools}"
@@ -1680,7 +2380,7 @@ exit "$job_result"
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
+        .tracked_spawn()
         .map_err(|error| {
             ProviderError::GuestBridge(format!("could not start the Apple test build: {error}"))
         })?;
@@ -1839,17 +2539,13 @@ exit "$job_result"
         }));
     }
 
-    let xcode_version = run_guest_command(
+    let xcode_version = parse_xcode_version(&run_guest_command(
         ssh_port,
         username,
         identity_path,
         known_hosts_path,
         "/usr/bin/xcodebuild -version",
-    )?
-    .lines()
-    .next()
-    .unwrap_or("Xcode")
-    .to_string();
+    )?);
     on_progress(apple_progress(
         AppleProjectPhase::Completed,
         0,
@@ -1875,6 +2571,7 @@ pub fn run_signed_apple_archive<F>(
     signing: &SigningProvisioningResult,
     scheme: &str,
     keychain_password: &str,
+    env: Option<&GuestEnvFiles>,
     output_directory: &Path,
     mut on_progress: F,
 ) -> Result<AppleArchiveResult, ProviderError>
@@ -2005,6 +2702,18 @@ where
     )?;
 
     let operation = (|| {
+        if let Some(env) = env {
+            rebuild_web_assets_with_env(
+                env,
+                ssh_port,
+                username,
+                identity_path,
+                known_hosts_path,
+                &guest_home,
+                started_at,
+                &mut on_progress,
+            )?;
+        }
         let archive_target = resolve_archive_app_target(
             ssh_port,
             username,
@@ -2456,7 +3165,7 @@ where
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
+        .tracked_spawn()
         .map_err(|error| {
             ProviderError::GuestBridge(format!("could not start the signed archive: {error}"))
         })?;
@@ -2564,6 +3273,7 @@ where
 fn archive_phase_detail(phase: AppleArchivePhase) -> &'static str {
     match phase {
         AppleArchivePhase::Preparing => "Preparing the signed Release recipe",
+        AppleArchivePhase::BuildingWebAssets => "Rebuilding the web assets with the chosen env set",
         AppleArchivePhase::Archiving => "Compiling and signing the Release archive",
         AppleArchivePhase::Exporting => "Exporting the App Store Connect IPA",
         AppleArchivePhase::Verifying => "Verifying the archived app signature",
@@ -2756,7 +3466,7 @@ where
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .tracked_spawn()
         .map_err(|error| {
             ProviderError::GuestBridge(format!("could not start artifact transfer: {error}"))
         })?;
@@ -3084,7 +3794,7 @@ fn create_workspace_archive(root: &Path, archive_path: &Path) -> Result<(), Prov
         .arg("-C")
         .arg(root)
         .arg(".")
-        .output()
+        .tracked_output()
         .map_err(|error| {
             ProviderError::GuestBridge(format!(
                 "could not run tar for the source snapshot: {error}"
@@ -3154,7 +3864,7 @@ where
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .spawn()
+        .tracked_spawn()
         .map_err(|error| {
             ProviderError::GuestBridge(format!("could not start source synchronization: {error}"))
         })?;
@@ -3195,6 +3905,148 @@ where
         return Err(ProviderError::GuestBridge(format!(
             "the guest rejected the source snapshot: {}",
             clean_output(&output.stderr)
+        )));
+    }
+
+    Ok(())
+}
+
+/// Rebuilds the web assets inside the guest with a chosen env set, in place, and re-syncs them
+/// into the iOS project. This is what makes an env a per-build choice: the source snapshot and
+/// the installed dependencies stay, only the assets that read the environment are produced again.
+/// Refuses to continue if the native lockfile moves, exactly as the test build would.
+#[allow(clippy::too_many_arguments)]
+fn rebuild_web_assets_with_env<F>(
+    env: &GuestEnvFiles,
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+    guest_home: &str,
+    started_at: Instant,
+    on_progress: &mut F,
+) -> Result<(), ProviderError>
+where
+    F: FnMut(AppleArchiveProgress),
+{
+    on_progress(archive_progress(
+        AppleArchivePhase::BuildingWebAssets,
+        0,
+        0,
+        started_at,
+        "Applying the chosen env set and rebuilding the web assets.",
+        None,
+    ));
+    let root = format!("{guest_home}/BuildBridge/workspaces/active");
+    let tools = format!("{guest_home}/.buildbridge/tools");
+    let node_root = format!("{tools}/node-v{NODE_VERSION}-darwin-x64");
+    let gem_home = format!("{tools}/gems");
+    let developer_dir = format!("{guest_home}/Applications/Xcode.app/Contents/Developer");
+
+    run_guest_command(
+        ssh_port,
+        username,
+        identity_path,
+        known_hosts_path,
+        &format!(
+            "set -eu; /bin/test -d {}; /bin/mkdir -p {}",
+            shell_single_quote(&root),
+            shell_single_quote(&format!("{root}/.buildbridge"))
+        ),
+    )?;
+    stream_bytes_to_guest(
+        env.dotenv.as_bytes(),
+        ssh_port,
+        username,
+        identity_path,
+        known_hosts_path,
+        &format!("{root}/.env.production.local"),
+        "env file",
+    )?;
+    stream_bytes_to_guest(
+        env.shell.as_bytes(),
+        ssh_port,
+        username,
+        identity_path,
+        known_hosts_path,
+        &format!("{root}/.buildbridge/env.sh"),
+        "env script",
+    )?;
+
+    let script = format!(
+        r#"set -u
+exec 2>&1
+set -e
+export PATH="{node_root}/bin:{tools}/pnpm/node_modules/.bin:{gem_home}/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export GEM_HOME="{gem_home}"
+export GEM_PATH="{gem_home}"
+export DEVELOPER_DIR="{developer_dir}"
+export LANG="en_US.UTF-8"
+export RUBYOPT="-rlogger"
+export CYPRESS_INSTALL_BINARY=0
+/bin/test -f "{root}/package.json"
+/bin/test -x "{root}/node_modules/.bin/vp"
+/bin/test -x "{root}/node_modules/.bin/cap"
+. "{root}/.buildbridge/env.sh"
+cd "{root}"
+"{root}/node_modules/.bin/vp" build
+lock_before=$(/usr/bin/shasum -a 256 "{root}/ios/App/Podfile.lock" | /usr/bin/cut -d ' ' -f 1)
+"{root}/node_modules/.bin/cap" sync ios
+lock_after=$(/usr/bin/shasum -a 256 "{root}/ios/App/Podfile.lock" | /usr/bin/cut -d ' ' -f 1)
+if /bin/test "$lock_before" != "$lock_after"; then
+    /usr/bin/printf '__BUILDBRIDGE_NATIVE_LOCK_UPDATED__:yes\n'
+    exit 3
+fi
+"#
+    );
+    let mut child = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .tracked_spawn()
+        .map_err(|error| {
+            ProviderError::GuestBridge(format!("could not start the web asset rebuild: {error}"))
+        })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        ProviderError::GuestBridge("could not capture the web asset rebuild output".to_string())
+    })?;
+    let mut tail: Vec<String> = Vec::new();
+    let mut lock_moved = false;
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|error| {
+            ProviderError::GuestBridge(format!("could not read the web asset rebuild: {error}"))
+        })?;
+        if line == "__BUILDBRIDGE_NATIVE_LOCK_UPDATED__:yes" {
+            lock_moved = true;
+            continue;
+        }
+        if tail.len() >= 40 {
+            tail.remove(0);
+        }
+        tail.push(line.clone());
+        on_progress(archive_progress(
+            AppleArchivePhase::BuildingWebAssets,
+            0,
+            0,
+            started_at,
+            "Applying the chosen env set and rebuilding the web assets.",
+            Some(line),
+        ));
+    }
+    let status = child.wait().map_err(|error| {
+        ProviderError::GuestBridge(format!("could not finish the web asset rebuild: {error}"))
+    })?;
+    if lock_moved {
+        return Err(ProviderError::GuestBridge(
+            "rebuilding with this env set changed Podfile.lock; synchronize and run the test build again before a signed archive"
+                .to_string(),
+        ));
+    }
+    if !status.success() {
+        return Err(ProviderError::GuestBridge(format!(
+            "the web asset rebuild failed:\n{}",
+            tail.join("\n")
         )));
     }
 
@@ -3389,7 +4241,7 @@ fn stream_bytes_to_guest(
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .spawn()
+        .tracked_spawn()
         .map_err(|error| {
             ProviderError::GuestBridge(format!("could not start {label} transfer: {error}"))
         })?;
@@ -3439,7 +4291,7 @@ where
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .spawn()
+        .tracked_spawn()
         .map_err(|error| {
             ProviderError::GuestBridge(format!(
                 "could not start signing material transfer: {error}"
@@ -3518,7 +4370,7 @@ fn run_signing_helper(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .tracked_spawn()
         .map_err(|error| {
             ProviderError::GuestBridge(format!("could not start signing import: {error}"))
         })?;
@@ -3815,7 +4667,7 @@ fn verify_code_signing_identity(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .tracked_spawn()
         .map_err(|error| {
             ProviderError::GuestBridge(format!("could not start the signing probe: {error}"))
         })?;
@@ -4113,7 +4965,7 @@ where
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .spawn()
+        .tracked_spawn()
         .map_err(|error| {
             ProviderError::GuestBridge(format!(
                 "could not start the secure Xcode transfer: {error}"
@@ -4198,7 +5050,7 @@ where
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .tracked_spawn()
         .map_err(|error| {
             ProviderError::GuestBridge(format!("could not start Xcode expansion: {error}"))
         })?;
@@ -4360,7 +5212,7 @@ fn run_guest_command(
 ) -> Result<String, ProviderError> {
     let output = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
         .arg(command)
-        .output()
+        .tracked_output()
         .map_err(|error| {
             ProviderError::GuestBridge(format!(
                 "could not run ssh; install OpenSSH client tools: {error}"
@@ -4418,6 +5270,155 @@ fn guest_ssh_command(
     command
 }
 
+/// Environment variable the one-time key install hands the macOS password to `ssh` through.
+/// Only the askpass helper reads it.
+const GUEST_PASSWORD_ENV: &str = "BUILDBRIDGE_GUEST_PASSWORD";
+
+/// The fixed askpass helper OpenSSH runs during the one-time key install. It only echoes the
+/// password variable set on that one `ssh` process, so the password never becomes an
+/// argument, a file, or a log line.
+const GUEST_ASKPASS_SCRIPT: &str = "#!/bin/sh\nprintf '%s\\n' \"$BUILDBRIDGE_GUEST_PASSWORD\"\n";
+
+/// A private, single-use directory holding the askpass helper for one key install. Dropping
+/// it removes the helper again, whether or not `ssh` succeeded.
+struct GuestAskpassHelper {
+    dir: PathBuf,
+}
+
+impl GuestAskpassHelper {
+    fn create() -> Result<Self, ProviderError> {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "buildbridge-askpass-{}-{nanos}",
+            std::process::id()
+        ));
+        let failed = |error: std::io::Error| {
+            ProviderError::GuestBridge(format!("could not prepare the password helper: {error}"))
+        };
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&dir)
+                .map_err(failed)?;
+            let helper = Self { dir };
+            let script = helper.script();
+            fs::write(&script, GUEST_ASKPASS_SCRIPT).map_err(failed)?;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).map_err(failed)?;
+
+            Ok(helper)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (dir, failed);
+            Err(ProviderError::GuestBridge(
+                "the one-time key install needs a Unix host".to_string(),
+            ))
+        }
+    }
+
+    fn script(&self) -> PathBuf {
+        self.dir.join("askpass")
+    }
+}
+
+impl Drop for GuestAskpassHelper {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Returns whether a public key is the one BuildBridge generated: a single `ssh-ed25519` line
+/// with base64 material and at most a plain comment, so it can be quoted into a guest command.
+pub fn valid_guest_public_key(public_key: &str) -> bool {
+    let mut fields = public_key.split(' ');
+    let algorithm = fields.next();
+    let Some(material) = fields.next() else {
+        return false;
+    };
+    let comment_is_plain = match fields.next() {
+        None => true,
+        Some(comment) => {
+            !comment.is_empty()
+                && comment.chars().all(|character| {
+                    character.is_ascii_alphanumeric()
+                        || matches!(character, '-' | '_' | '.' | '@' | ':')
+                })
+        }
+    };
+
+    public_key.len() <= 2_048
+        && algorithm == Some("ssh-ed25519")
+        && !material.is_empty()
+        && material.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '/' | '=')
+        })
+        && comment_is_plain
+        && fields.next().is_none()
+}
+
+/// The askpass helper answers with one line, so the password has to be one.
+fn valid_guest_password(password: &str) -> bool {
+    !password.is_empty() && password.len() <= 512 && !password.chars().any(char::is_control)
+}
+
+/// The command the password session runs in the guest: append the key once, with the
+/// permissions sshd insists on, and confirm. Idempotent, so a retry never duplicates the line.
+fn guest_key_install_command(public_key: &str) -> String {
+    let quoted = shell_single_quote(public_key);
+    format!(
+        "umask 077; key={quoted}; /bin/mkdir -p \"$HOME/.ssh\" && /bin/chmod 700 \"$HOME/.ssh\" && {{ /usr/bin/grep -qxF \"$key\" \"$HOME/.ssh/authorized_keys\" 2>/dev/null || /usr/bin/printf '%s\\n' \"$key\" >> \"$HOME/.ssh/authorized_keys\"; }} && /bin/chmod 600 \"$HOME/.ssh/authorized_keys\" && /usr/bin/printf authorized"
+    )
+}
+
+/// The one `ssh` invocation that authenticates with a password instead of the key. It still
+/// refuses anything but the pinned host identity, tries the password once, and gets it from
+/// the askpass helper rather than a terminal or an agent.
+fn guest_password_ssh_command(
+    ssh_port: u16,
+    username: &str,
+    known_hosts_path: &Path,
+    askpass_path: &Path,
+) -> Command {
+    let destination = format!("{username}@127.0.0.1");
+    let mut command = Command::new("ssh");
+    command
+        .arg("-F")
+        .arg("/dev/null")
+        .args([
+            "-o",
+            "PubkeyAuthentication=no",
+            "-o",
+            "PasswordAuthentication=yes",
+            "-o",
+            "KbdInteractiveAuthentication=yes",
+            "-o",
+            "NumberOfPasswordPrompts=1",
+            "-o",
+            "ConnectTimeout=3",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "LogLevel=ERROR",
+            "-p",
+        ])
+        .arg(ssh_port.to_string())
+        .arg("-o")
+        .arg(format!("UserKnownHostsFile={}", known_hosts_path.display()))
+        .arg(destination)
+        .env("SSH_ASKPASS", askpass_path)
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env_remove("SSH_AUTH_SOCK");
+
+    command
+}
+
 pub fn probe_host() -> HostPrerequisites {
     let supported_host = cfg!(target_os = "linux") && std::env::consts::ARCH == "x86_64";
     let docker_cli_output = Command::new("docker").arg("--version").output();
@@ -4470,7 +5471,8 @@ pub fn probe_host() -> HostPrerequisites {
     }
 }
 
-pub fn status() -> Result<RuntimeStatus, ProviderError> {
+/// Reports the host prerequisites and the state of one managed container.
+pub fn status(container_name: &str) -> Result<RuntimeStatus, ProviderError> {
     let prerequisites = probe_host();
 
     if !prerequisites.docker_daemon {
@@ -4482,7 +5484,7 @@ pub fn status() -> Result<RuntimeStatus, ProviderError> {
         });
     }
 
-    let (state, container_id, started_at) = inspect_container()?;
+    let (state, container_id, started_at) = inspect_container(container_name)?;
 
     Ok(RuntimeStatus {
         prerequisites,
@@ -4492,46 +5494,80 @@ pub fn status() -> Result<RuntimeStatus, ProviderError> {
     })
 }
 
-pub fn launch(
+/// Creates the managed container when it is missing, then starts it.
+///
+/// Progress is reported per phase so the desktop can explain a multi-gigabyte image pull
+/// instead of showing an unexplained wait.
+pub fn launch<F>(
+    container_name: &str,
     config: &MacBuilderConfig,
     identity_path: &Path,
-) -> Result<RuntimeStatus, ProviderError> {
+    mut on_progress: F,
+) -> Result<RuntimeStatus, ProviderError>
+where
+    F: FnMut(LaunchProgress),
+{
     config.validate()?;
+    let started = Instant::now();
+    let mut report = |phase: LaunchPhase, detail: &str| {
+        on_progress(LaunchProgress {
+            phase,
+            elapsed_seconds: started.elapsed().as_secs(),
+            detail: detail.to_string(),
+        });
+    };
+    report(LaunchPhase::Preparing, "Checking the host and Docker");
     let prerequisites = probe_host();
 
     if !prerequisites.ready {
         return Err(ProviderError::Prerequisites(prerequisites.issues.join(" ")));
     }
 
-    let (state, _, _) = inspect_container()?;
+    let (state, _, _) = inspect_container(container_name)?;
 
     if state == ContainerState::Missing {
+        report(
+            LaunchPhase::PullingImage,
+            "Pulling the Docker-OSX image; the first pull downloads several gigabytes",
+        );
         ensure_image()?;
+        report(
+            LaunchPhase::GeneratingIdentity,
+            "Generating a stable machine identity",
+        );
         ensure_identity(identity_path)?;
+        report(
+            LaunchPhase::CreatingContainer,
+            "Creating the managed container",
+        );
         create_container(
+            container_name,
             config,
             prerequisites.display.as_deref().unwrap_or(":0"),
             identity_path,
         )?;
     } else {
-        ensure_manual_restart_policy()?;
+        ensure_manual_restart_policy(container_name)?;
     }
 
-    let (state, _, _) = inspect_container()?;
+    let (state, _, _) = inspect_container(container_name)?;
     if state != ContainerState::Running {
-        run_docker("start", &["start".to_string(), CONTAINER_NAME.to_string()])?;
+        report(LaunchPhase::Starting, "Starting the macOS machine");
+        run_docker("start", &["start".to_string(), container_name.to_string()])?;
     }
 
-    status()
+    report(LaunchPhase::Completed, "The macOS machine is running");
+    status(container_name)
 }
 
-pub fn stop() -> Result<RuntimeStatus, ProviderError> {
-    let current = status()?;
+/// Stops the container gracefully while preserving it and its macOS disk.
+pub fn stop(container_name: &str) -> Result<RuntimeStatus, ProviderError> {
+    let current = status(container_name)?;
 
     if current.state == ContainerState::Paused {
         run_docker(
             "unpause",
-            &["unpause".to_string(), CONTAINER_NAME.to_string()],
+            &["unpause".to_string(), container_name.to_string()],
         )?;
     }
 
@@ -4544,16 +5580,42 @@ pub fn stop() -> Result<RuntimeStatus, ProviderError> {
             &[
                 "stop".to_string(),
                 "--time=30".to_string(),
-                CONTAINER_NAME.to_string(),
+                container_name.to_string(),
             ],
         )?;
     }
 
-    status()
+    status(container_name)
 }
 
-pub fn recent_logs() -> Result<Vec<String>, ProviderError> {
-    let current = status()?;
+/// Removes a stopped container together with the macOS disk stored inside it.
+///
+/// This is deliberately separate from [`stop`]: callers must confirm the data loss and
+/// stop the machine first. A live container is never removed implicitly.
+pub fn remove(container_name: &str) -> Result<RuntimeStatus, ProviderError> {
+    let current = status(container_name)?;
+
+    match current.state {
+        ContainerState::Missing | ContainerState::Unavailable => return Ok(current),
+        ContainerState::Running | ContainerState::Paused | ContainerState::Restarting => {
+            return Err(ProviderError::DockerCommand {
+                operation: "container removal",
+                message: "stop the machine before discarding its container".to_string(),
+            });
+        }
+        _ => {}
+    }
+
+    run_docker(
+        "container removal",
+        &["rm".to_string(), container_name.to_string()],
+    )?;
+
+    status(container_name)
+}
+
+pub fn recent_logs(container_name: &str) -> Result<Vec<String>, ProviderError> {
+    let current = status(container_name)?;
 
     if matches!(
         current.state,
@@ -4567,7 +5629,7 @@ pub fn recent_logs() -> Result<Vec<String>, ProviderError> {
         &[
             "logs".to_string(),
             "--tail=80".to_string(),
-            CONTAINER_NAME.to_string(),
+            container_name.to_string(),
         ],
     )?;
     let combined = format!(
@@ -4583,13 +5645,15 @@ pub fn recent_logs() -> Result<Vec<String>, ProviderError> {
         .collect())
 }
 
-fn inspect_container() -> Result<(ContainerState, Option<String>, Option<String>), ProviderError> {
+fn inspect_container(
+    container_name: &str,
+) -> Result<(ContainerState, Option<String>, Option<String>), ProviderError> {
     let output = Command::new("docker")
         .args([
             "inspect",
             "--format",
             "{{.State.Status}}|{{.Id}}|{{.State.StartedAt}}",
-            CONTAINER_NAME,
+            container_name,
         ])
         .output()
         .map_err(|error| ProviderError::DockerUnavailable(error.to_string()))?;
@@ -4728,33 +5792,39 @@ fn validate_identity_file(identity_path: &Path) -> Result<(), ProviderError> {
 }
 
 fn create_container(
+    container_name: &str,
     config: &MacBuilderConfig,
     display: &str,
     identity_path: &Path,
 ) -> Result<(), ProviderError> {
-    let args = create_args(config, display, identity_path);
+    let args = create_args(container_name, config, display, identity_path);
     run_docker("container creation", &args)?;
 
     Ok(())
 }
 
-fn ensure_manual_restart_policy() -> Result<(), ProviderError> {
+fn ensure_manual_restart_policy(container_name: &str) -> Result<(), ProviderError> {
     run_docker(
         "restart policy update",
         &[
             "update".to_string(),
             "--restart=no".to_string(),
-            CONTAINER_NAME.to_string(),
+            container_name.to_string(),
         ],
     )?;
 
     Ok(())
 }
 
-fn create_args(config: &MacBuilderConfig, display: &str, identity_path: &Path) -> Vec<String> {
+fn create_args(
+    container_name: &str,
+    config: &MacBuilderConfig,
+    display: &str,
+    identity_path: &Path,
+) -> Vec<String> {
     vec![
         "create".to_string(),
-        format!("--name={CONTAINER_NAME}"),
+        format!("--name={container_name}"),
         "--label=dev.buildbridge.managed=true".to_string(),
         "--restart=no".to_string(),
         "--interactive".to_string(),
@@ -4787,7 +5857,7 @@ fn create_args(config: &MacBuilderConfig, display: &str, identity_path: &Path) -
 fn run_docker(operation: &'static str, args: &[String]) -> Result<Output, ProviderError> {
     let output = Command::new("docker")
         .args(args)
-        .output()
+        .tracked_output()
         .map_err(|error| ProviderError::DockerUnavailable(error.to_string()))?;
 
     if output.status.success() {
@@ -4797,6 +5867,19 @@ fn run_docker(operation: &'static str, args: &[String]) -> Result<Output, Provid
             operation,
             message: clean_output(&output.stderr),
         })
+    }
+}
+
+/// Reduces `xcodebuild -version` output ("Xcode 26.6\nBuild version 17F113") to the bare
+/// version the desktop contract carries ("26.6"); every caller renders its own "Xcode" label.
+fn parse_xcode_version(raw: &str) -> String {
+    let line = raw.lines().next().unwrap_or_default().trim();
+    let version = line.strip_prefix("Xcode").unwrap_or(line).trim();
+
+    if version.is_empty() {
+        "version unknown".to_string()
+    } else {
+        version.to_string()
     }
 }
 
@@ -4811,6 +5894,46 @@ fn clean_output(output: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_optimization_catalogue_is_fixed_and_self_describing() {
+        let items = guest_optimizations();
+        assert!(items.len() >= 12);
+        let mut ids: Vec<&str> = items.iter().map(|item| item.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), items.len(), "ids are unique");
+        for item in items {
+            assert!(!item.apply.is_empty() && !item.check.is_empty());
+            assert!(
+                item.check.contains("applied"),
+                "{} reports its state",
+                item.id
+            );
+            if item.apply.contains("/usr/bin/sudo") {
+                assert!(
+                    item.needs_admin,
+                    "{} uses sudo and must go through the Terminal",
+                    item.id
+                );
+            }
+            if item.tier == OptimizationTier::ExtremelyInsecure {
+                assert!(item.warning.is_some(), "{} must carry its warning", item.id);
+            }
+        }
+        assert!(guest_optimization("disable-spotlight").is_some());
+        assert!(guest_optimization("rm-rf").is_none());
+    }
+
+    #[test]
+    fn xcode_version_is_reported_without_the_label_the_interface_already_renders() {
+        assert_eq!(
+            parse_xcode_version("Xcode 26.6\nBuild version 17F113"),
+            "26.6"
+        );
+        assert_eq!(parse_xcode_version("26.6"), "26.6");
+        assert_eq!(parse_xcode_version(""), "version unknown");
+    }
 
     #[test]
     fn default_profile_is_valid_and_serializes_as_the_desktop_contract() {
@@ -4857,12 +5980,14 @@ mod tests {
     #[test]
     fn docker_create_uses_fixed_argv_without_privileged_mode_or_secrets() {
         let args = create_args(
+            "buildbridge-macos-team-mac",
             &MacBuilderConfig::default(),
             ":1",
             Path::new("/tmp/buildbridge/identity.env"),
         );
 
         assert_eq!(args.first().map(String::as_str), Some("create"));
+        assert!(args.contains(&"--name=buildbridge-macos-team-mac".to_string()));
         assert!(args.contains(&"--device=/dev/kvm".to_string()));
         assert!(args.contains(&"--env=SHORTNAME=sequoia".to_string()));
         assert!(args.contains(&"--env=GENERATE_SPECIFIC=true".to_string()));
@@ -4881,6 +6006,20 @@ mod tests {
                 || normalized.contains("private_key")
                 || normalized.contains("secret")
         }));
+    }
+
+    #[test]
+    fn machine_identifiers_map_to_stable_container_names() {
+        assert_eq!(container_name(DEFAULT_MACHINE_ID), DEFAULT_CONTAINER_NAME);
+        assert_eq!(container_name("team-mac"), "buildbridge-macos-team-mac");
+        assert!(valid_machine_id("default"));
+        assert!(valid_machine_id("team-mac-2"));
+        assert!(!valid_machine_id(""));
+        assert!(!valid_machine_id("-leading"));
+        assert!(!valid_machine_id("Upper"));
+        assert!(!valid_machine_id("has space"));
+        assert!(!valid_machine_id("../escape"));
+        assert!(!valid_machine_id(&"a".repeat(41)));
     }
 
     #[test]
@@ -4955,6 +6094,160 @@ mod tests {
         assert_eq!(shell_single_quote("plain"), "'plain'");
         assert_eq!(shell_single_quote("it’s safe"), "'it’s safe'");
         assert_eq!(shell_single_quote("it's safe"), "'it'\"'\"'s safe'");
+    }
+
+    #[test]
+    fn guest_public_key_must_be_one_plain_ed25519_line() {
+        assert!(valid_guest_public_key(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample+Key/Material= buildbridge-guest"
+        ));
+        assert!(valid_guest_public_key(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample"
+        ));
+
+        for key in [
+            "",
+            "ssh-ed25519",
+            "ssh-rsa AAAA buildbridge-guest",
+            "ssh-ed25519 AAAA'; /bin/rm -rf /",
+            "ssh-ed25519 AAAA comment extra",
+            "ssh-ed25519 AAAA\ncommand",
+            "ssh-ed25519 AAAA a comment",
+        ] {
+            assert!(!valid_guest_public_key(key), "{key:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn guest_password_is_one_bounded_line() {
+        assert!(valid_guest_password("hunter2"));
+        assert!(valid_guest_password("pässwörd with spaces and 'quotes'"));
+        assert!(!valid_guest_password(""));
+        assert!(!valid_guest_password("two\nlines"));
+        assert!(!valid_guest_password(&"x".repeat(513)));
+    }
+
+    #[test]
+    fn guest_key_install_appends_once_with_sshd_permissions_and_confirms() {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample buildbridge-guest";
+        let command = guest_key_install_command(key);
+
+        assert!(command.starts_with(
+            "umask 077; key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample buildbridge-guest'; "
+        ));
+        assert!(command.contains("/bin/chmod 700 \"$HOME/.ssh\""));
+        assert!(command.contains("/usr/bin/grep -qxF \"$key\" \"$HOME/.ssh/authorized_keys\""));
+        assert!(command.contains("/bin/chmod 600 \"$HOME/.ssh/authorized_keys\""));
+        assert!(command.ends_with("/usr/bin/printf authorized"));
+        assert_eq!(command.matches("ssh-ed25519").count(), 1);
+    }
+
+    #[test]
+    fn password_session_keeps_the_pin_and_takes_the_password_from_the_helper_only() {
+        let known_hosts = Path::new("/tmp/buildbridge-test/known_hosts");
+        let askpass = Path::new("/tmp/buildbridge-test/askpass");
+        let command = guest_password_ssh_command(50_922, "builder", known_hosts, askpass);
+        let args: Vec<String> = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+
+        for expected in [
+            "PubkeyAuthentication=no",
+            "PasswordAuthentication=yes",
+            "NumberOfPasswordPrompts=1",
+            "StrictHostKeyChecking=yes",
+            "UserKnownHostsFile=/tmp/buildbridge-test/known_hosts",
+        ] {
+            assert!(args.contains(&expected.to_string()), "{expected} missing");
+        }
+        assert!(!args.contains(&"BatchMode=yes".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("builder@127.0.0.1"));
+
+        let envs: Vec<(String, Option<String>)> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(envs.contains(&(
+            "SSH_ASKPASS".to_string(),
+            Some("/tmp/buildbridge-test/askpass".to_string())
+        )));
+        assert!(envs.contains(&("SSH_ASKPASS_REQUIRE".to_string(), Some("force".to_string()))));
+        assert!(envs.contains(&("SSH_AUTH_SOCK".to_string(), None)));
+        assert!(!envs.iter().any(|(key, _)| key == GUEST_PASSWORD_ENV));
+    }
+
+    #[test]
+    fn askpass_helper_is_private_echoes_only_its_variable_and_is_removed_after_use() {
+        let helper = GuestAskpassHelper::create().expect("helper should be created");
+        let script = helper.script();
+        assert!(script.is_file());
+        assert_eq!(
+            fs::read_to_string(&script).expect("helper should be readable"),
+            GUEST_ASKPASS_SCRIPT
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = fs::metadata(&helper.dir)
+                .expect("helper directory should exist")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+
+        let output = Command::new(&script)
+            .arg("builder@127.0.0.1's password: ")
+            .env(GUEST_PASSWORD_ENV, "s3cret 'value'")
+            .output()
+            .expect("helper should run");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"s3cret 'value'\n");
+
+        let dir = helper.dir.clone();
+        drop(helper);
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn key_install_refuses_to_send_a_password_without_a_pin() {
+        let missing = Path::new("/nonexistent/buildbridge/known_hosts");
+        let error = authorize_guest_key(
+            50_922,
+            "builder",
+            "ssh-ed25519 AAAA buildbridge-guest",
+            "secret",
+            missing,
+        )
+        .expect_err("an unpinned guest must be refused");
+
+        assert!(error.to_string().contains("pin"));
+    }
+
+    #[test]
+    fn password_session_failures_name_the_cause_without_the_password() {
+        let denied = describe_password_session_failure(
+            "builder",
+            "builder@127.0.0.1: Permission denied (publickey,password,keyboard-interactive).",
+        );
+        assert!(denied.contains("did not accept the password for builder"));
+        assert!(
+            describe_password_session_failure("builder", "Host key verification failed.")
+                .contains("pinned fingerprint")
+        );
+        assert_eq!(
+            describe_password_session_failure(
+                "builder",
+                "ssh: connect to host 127.0.0.1 port 50922: Connection refused"
+            ),
+            "ssh: connect to host 127.0.0.1 port 50922: Connection refused"
+        );
     }
 
     #[test]
@@ -5076,7 +6369,7 @@ mod tests {
     #[test]
     fn provisioning_profile_metadata_is_validated_and_matches_exact_or_wildcard_bundles() {
         let profiles = parse_profile_summaries(
-            "__BUILDBRIDGE_PROFILE__\t01234567-89AB-CDEF-0123-456789ABCDEF\tF5QA294KSX\tF5QA294KSX.nz.co.thinksolar.app\t2027-09-02 12:00:00 +0000\n__BUILDBRIDGE_PROFILE_CERT__\t01234567-89AB-CDEF-0123-456789ABCDEF\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+            "__BUILDBRIDGE_PROFILE__\t01234567-89AB-CDEF-0123-456789ABCDEF\tTEAM123456\tTEAM123456.com.example.app\t2027-09-02 12:00:00 +0000\n__BUILDBRIDGE_PROFILE_CERT__\t01234567-89AB-CDEF-0123-456789ABCDEF\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
         )
         .expect("valid profile metadata should parse");
 
@@ -5084,19 +6377,19 @@ mod tests {
         assert_eq!(profiles[0].developer_certificate_sha256.len(), 1);
         assert!(profile_allows_bundle(
             &profiles[0].application_identifier,
-            "nz.co.thinksolar.app"
+            "com.example.app"
         ));
         assert!(profile_allows_bundle(
-            "F5QA294KSX.nz.co.thinksolar.*",
-            "nz.co.thinksolar.app"
+            "TEAM123456.com.example.*",
+            "com.example.app"
         ));
         assert!(!profile_allows_bundle(
-            "F5QA294KSX.nz.co.another.app",
-            "nz.co.thinksolar.app"
+            "TEAM123456.nz.co.another.app",
+            "com.example.app"
         ));
         assert!(
             parse_profile_summaries(
-                "__BUILDBRIDGE_PROFILE__\t../../escape\tF5QA294KSX\tF5QA294KSX.*\t2027\n"
+                "__BUILDBRIDGE_PROFILE__\t../../escape\tTEAM123456\tTEAM123456.*\t2027\n"
             )
             .is_err()
         );
@@ -5120,13 +6413,13 @@ mod tests {
         assert!(APPLE_WWDR_G3_PEM.starts_with(b"-----BEGIN CERTIFICATE-----\n"));
 
         let (expires_at, sha1, sha256, team, name) = parse_certificate_metadata(
-            "notAfter=Sep  2 12:00:00 2027 GMT\nsha256 Fingerprint=01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF\nsubject=UID=ABC,CN=Apple Distribution: Example,OU=F5QA294KSX,O=Example,C=NZ\nsha1 Fingerprint=01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67\n",
+            "notAfter=Sep  2 12:00:00 2027 GMT\nsha256 Fingerprint=01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF\nsubject=UID=ABC,CN=Apple Distribution: Example,OU=TEAM123456,O=Example,C=NZ\nsha1 Fingerprint=01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67\n",
         )
         .expect("certificate metadata should parse");
         assert_eq!(expires_at, "Sep  2 12:00:00 2027 GMT");
         assert_eq!(sha1, "0123456789ABCDEF0123456789ABCDEF01234567");
         assert_eq!(sha256.len(), 64);
-        assert_eq!(team, "F5QA294KSX");
+        assert_eq!(team, "TEAM123456");
         assert_eq!(name, "Apple Distribution: Example");
     }
 
@@ -5158,30 +6451,30 @@ mod tests {
 
     #[test]
     fn signing_target_rejects_shell_or_wildcard_values() {
-        assert!(validate_signing_target("F5QA294KSX", "nz.co.thinksolar.app").is_ok());
-        assert!(validate_signing_target("$(command)", "nz.co.thinksolar.app").is_err());
-        assert!(validate_signing_target("F5QA294KSX", "nz.co.*").is_err());
+        assert!(validate_signing_target("TEAM123456", "com.example.app").is_ok());
+        assert!(validate_signing_target("$(command)", "com.example.app").is_err());
+        assert!(validate_signing_target("TEAM123456", "nz.co.*").is_err());
     }
 
     #[test]
     fn signed_archive_uses_a_fixed_manual_app_store_connect_recipe() {
         let options = apple_export_options_plist(
-            "F5QA294KSX",
-            "nz.co.thinksolar.app",
+            "TEAM123456",
+            "com.example.app",
             "01234567-89AB-CDEF-0123-456789ABCDEF",
             "0123456789ABCDEF0123456789ABCDEF01234567",
         );
 
         assert!(options.contains("<string>app-store-connect</string>"));
         assert!(options.contains("<string>manual</string>"));
-        assert!(options.contains("<key>nz.co.thinksolar.app</key>"));
+        assert!(options.contains("<key>com.example.app</key>"));
         assert!(options.contains("<string>01234567-89AB-CDEF-0123-456789ABCDEF</string>"));
         assert!(options.contains("<key>manageAppVersionAndBuildNumber</key>\n    <false/>"));
         assert!(!options.contains("uploadDestination"));
 
         let signing_settings = apple_archive_signing_xcconfig(
             "App",
-            "F5QA294KSX",
+            "TEAM123456",
             "0123456789ABCDEF0123456789ABCDEF01234567",
             "01234567-89AB-CDEF-0123-456789ABCDEF",
         );
@@ -5192,7 +6485,7 @@ mod tests {
         );
         assert_eq!(
             build_setting_value(
-                "    TARGET_NAME = App\n    PRODUCT_BUNDLE_IDENTIFIER = nz.co.thinksolar.app",
+                "    TARGET_NAME = App\n    PRODUCT_BUNDLE_IDENTIFIER = com.example.app",
                 "TARGET_NAME"
             ),
             Some("App")
@@ -5202,11 +6495,11 @@ mod tests {
     #[test]
     fn signed_archive_metadata_is_strictly_validated() {
         let inspection = parse_apple_archive_inspection(
-            "__BUILDBRIDGE_APP__\tnz.co.thinksolar.app\t3.2.0\t15\n__BUILDBRIDGE_IPA__\tApp.ipa\t1048576\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+            "__BUILDBRIDGE_APP__\tcom.example.app\t3.2.0\t15\n__BUILDBRIDGE_IPA__\tApp.ipa\t1048576\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
         )
         .expect("bounded archive metadata should parse");
 
-        assert_eq!(inspection.bundle_identifier, "nz.co.thinksolar.app");
+        assert_eq!(inspection.bundle_identifier, "com.example.app");
         assert_eq!(inspection.marketing_version, "3.2.0");
         assert_eq!(inspection.build_number, "15");
         assert_eq!(inspection.ipa_name, "App.ipa");
@@ -5218,7 +6511,7 @@ mod tests {
 
         assert!(
             parse_apple_archive_inspection(
-                "__BUILDBRIDGE_APP__\tnz.co.thinksolar.app\t3.2.0\t15\n__BUILDBRIDGE_IPA__\t../escape.ipa\t1\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+                "__BUILDBRIDGE_APP__\tcom.example.app\t3.2.0\t15\n__BUILDBRIDGE_IPA__\t../escape.ipa\t1\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
             )
             .is_err()
         );
