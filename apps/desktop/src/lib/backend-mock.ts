@@ -679,9 +679,39 @@ export function createMockBackend(): Backend {
                 };
             });
         },
-        async activateXcode(machineId) {
+        async activateXcode(machineId, password) {
             const machine = find(machineId);
             return busy(machine, 'Activating Xcode', async () => {
+                if (password !== null) {
+                    const stages = [
+                        'Authorizing with sudo over the pinned bridge',
+                        'Selecting the developer directory',
+                        "Accepting Apple's license",
+                        "Running Xcode's first-launch tasks and installing required components. This can take several minutes.",
+                    ];
+                    for (const [index, detail] of stages.entries()) {
+                        emitter.emit<T.MachineEvent<T.XcodeImportProgress>>(
+                            'machine-xcode-progress',
+                            {
+                                machineId,
+                                phase: 'activating',
+                                transferredBytes: 0,
+                                totalBytes: 0,
+                                elapsedSeconds: index,
+                                detail,
+                            },
+                        );
+                        await sleep(700);
+                        // The preview rejects one password so the failure path can be seen.
+                        if (index === 0 && password === 'wrong') {
+                            throw new Error(
+                                `macOS guest bridge failed: macOS did not accept the password for ${machine.username}; nothing was changed. Check the local macOS login password, or leave it blank to type it in the guest Terminal.`,
+                            );
+                        }
+                    }
+                    machine.xcodeSelected = true;
+                    return view(machine);
+                }
                 for (let second = 0; second < 4; second += 1) {
                     emitter.emit<T.MachineEvent<T.XcodeImportProgress>>('machine-xcode-progress', {
                         machineId,

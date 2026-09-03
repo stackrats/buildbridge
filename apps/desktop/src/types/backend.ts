@@ -338,7 +338,8 @@ export type XcodeImportPhase =
     | 'transferring'
     | 'expanding'
     | 'awaiting_activation'
-    | 'awaiting_authorization';
+    | 'awaiting_authorization'
+    | 'activating';
 
 export interface XcodeImportProgress {
     phase: XcodeImportPhase;

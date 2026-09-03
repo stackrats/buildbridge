@@ -58,7 +58,11 @@ export interface Backend {
     trustGuest(machineId: string, fingerprint: string): Promise<T.MacBuilderView>;
     forgetGuestTrust(machineId: string): Promise<T.MacBuilderView>;
     importXcode(machineId: string, path: string): Promise<T.ImportMacXcodeResult>;
-    activateXcode(machineId: string): Promise<T.MacBuilderView>;
+    /**
+     * With a password, activation runs over the bridge under sudo and the password is used for
+     * that one session only. With null, the guest Terminal opens and the person types it there.
+     */
+    activateXcode(machineId: string, password: string | null): Promise<T.MacBuilderView>;
     provisionSigning(machineId: string): Promise<T.MacBuilderView>;
     clearGuestSigning(machineId: string): Promise<T.MacBuilderView>;
     approveWorkspace(machineId: string, path: string): Promise<T.MacBuilderView>;
@@ -169,7 +173,8 @@ async function createTauriBackend(): Promise<Backend> {
         forgetGuestTrust: (machineId) => invoke('forget_mac_builder_guest_trust', { machineId }),
         importXcode: (machineId, path) =>
             invoke('import_mac_xcode_package', { machineId, input: { path } }),
-        activateXcode: (machineId) => invoke('activate_mac_xcode', { machineId }),
+        activateXcode: (machineId, password) =>
+            invoke('activate_mac_xcode', { machineId, input: { password } }),
         provisionSigning: (machineId) => invoke('provision_mac_signing', { machineId }),
         clearGuestSigning: (machineId) => invoke('clear_mac_guest_signing', { machineId }),
         approveWorkspace: (machineId, path) =>

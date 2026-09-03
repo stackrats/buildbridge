@@ -544,6 +544,24 @@ impl std::fmt::Debug for AuthorizeMacGuestKeyInput {
     }
 }
 
+/// How Xcode activation gets its administrator password: typed here, it runs over the bridge
+/// with `sudo`; absent or blank, the guest Terminal opens and the user types it there.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ActivateMacXcodeInput {
+    #[serde(default)]
+    password: Option<String>,
+}
+
+impl std::fmt::Debug for ActivateMacXcodeInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActivateMacXcodeInput")
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TrustMacGuestInput {
@@ -2474,7 +2492,11 @@ async fn import_mac_xcode_package(
 }
 
 #[tauri::command]
-async fn activate_mac_xcode(app: AppHandle, machine_id: String) -> Result<MacBuilderView, String> {
+async fn activate_mac_xcode(
+    app: AppHandle,
+    machine_id: String,
+    input: ActivateMacXcodeInput,
+) -> Result<MacBuilderView, String> {
     let paths = MachinePaths::resolve(&app, &machine_id)?;
     let profile = machines::load_registry(&app)?
         .find(&machine_id)?
@@ -2508,22 +2530,34 @@ async fn activate_mac_xcode(app: AppHandle, machine_id: String) -> Result<MacBui
     let event_machine_id = machine_id.clone();
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
+    let password = input.password.filter(|value| !value.is_empty());
     let joined = tauri::async_runtime::spawn_blocking(move || {
         let _operation = buildbridge_docker_osx::enter_operation(scope);
-        buildbridge_docker_osx::activate_xcode(
-            profile.ssh_port,
-            &access.username,
-            &identity_path,
-            &known_hosts_path,
-            |progress: XcodeImportProgress| {
-                emit_machine_progress(
-                    &event_app,
-                    XCODE_PROGRESS_EVENT,
-                    &event_machine_id,
-                    progress,
-                );
-            },
-        )
+        let mut report = |progress: XcodeImportProgress| {
+            emit_machine_progress(
+                &event_app,
+                XCODE_PROGRESS_EVENT,
+                &event_machine_id,
+                progress,
+            );
+        };
+        match password {
+            Some(password) => buildbridge_docker_osx::activate_xcode_with_password(
+                profile.ssh_port,
+                &access.username,
+                &identity_path,
+                &known_hosts_path,
+                &password,
+                &mut report,
+            ),
+            None => buildbridge_docker_osx::activate_xcode(
+                profile.ssh_port,
+                &access.username,
+                &identity_path,
+                &known_hosts_path,
+                &mut report,
+            ),
+        }
         .map_err(|error| error.to_string())
     })
     .await

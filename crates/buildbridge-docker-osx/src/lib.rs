@@ -275,6 +275,8 @@ pub enum XcodeImportPhase {
     Expanding,
     AwaitingActivation,
     AwaitingAuthorization,
+    /// The bridge route is running the activation commands under `sudo`.
+    Activating,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1433,40 +1435,8 @@ pub fn activate_xcode<F>(
 where
     F: FnMut(XcodeImportProgress),
 {
-    if !valid_guest_username(username) {
-        return Err(ProviderError::GuestBridge(
-            "the macOS short username is invalid".to_string(),
-        ));
-    }
-    if ssh_port < 1024 {
-        return Err(ProviderError::GuestBridge(
-            "guest SSH port must be between 1024 and 65535".to_string(),
-        ));
-    }
-    if !identity_path.is_file() || !known_hosts_path.is_file() {
-        return Err(ProviderError::GuestBridge(
-            "configure a guest key and trust its SSH fingerprint before activating Xcode"
-                .to_string(),
-        ));
-    }
-
-    let installed_path = guest_xcode_application_path(username);
-    let inspect_xcode = format!(
-        "if /bin/test -x '{installed_path}/Contents/Developer/usr/bin/xcodebuild'; then /usr/bin/printf ready; else /usr/bin/printf missing; fi"
-    );
-    if run_guest_command(
-        ssh_port,
-        username,
-        identity_path,
-        known_hosts_path,
-        &inspect_xcode,
-    )? != "ready"
-    {
-        return Err(ProviderError::GuestBridge(
-            "the imported Xcode application could not be found; import it again or use the recovery commands"
-                .to_string(),
-        ));
-    }
+    let installed_path =
+        ensure_imported_xcode(ssh_port, username, identity_path, known_hosts_path)?;
 
     let started_at = Instant::now();
     let detail = "A macOS Terminal window is opening. Enter the local macOS login password there; BuildBridge does not receive or store it.";
@@ -1478,9 +1448,10 @@ where
         detail: detail.to_string(),
     });
 
-    // A bare SSH process cannot display Authorization Services UI in the console
-    // audit session. Open a fixed, short-lived command file in the guest's Terminal
-    // instead: sudo reads the password directly from its macOS TTY, never over SSH.
+    // The no-password route. A bare SSH process cannot display Authorization Services UI in
+    // the console audit session, so open a fixed, short-lived command file in the guest's
+    // Terminal: sudo reads the password from its macOS TTY and it never leaves the guest. The
+    // bridge route below is the alternative when the password is typed into the desktop.
     let activation_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1617,6 +1588,256 @@ read -k 1 "?Press any key to close this window."
         }
     }
 
+    verify_xcode_activation(
+        ssh_port,
+        username,
+        identity_path,
+        known_hosts_path,
+        &installed_path,
+    )
+}
+
+/// Marker the bridge route prints between its commands so progress can name the one running.
+const XCODE_ACTIVATION_MARKER: &str = "__BUILDBRIDGE_ACTIVATION__:";
+
+/// Activates Xcode over the pinned bridge instead of the guest Terminal. The local macOS login
+/// password is written once to the SSH session's stdin, where a single `sudo -S` reads it and
+/// runs the same fixed `xcode-select`, license, and first-launch commands the Terminal route
+/// runs. The password is never an argument on either side, never a file, and is gone when the
+/// session ends. Output streams back so the interface can say which command is running.
+pub fn activate_xcode_with_password<F>(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+    password: &str,
+    mut on_progress: F,
+) -> Result<(), ProviderError>
+where
+    F: FnMut(XcodeImportProgress),
+{
+    if !valid_guest_password(password) {
+        return Err(ProviderError::GuestBridge(
+            "enter the local macOS login password: up to 512 characters on one line".to_string(),
+        ));
+    }
+    let installed_path =
+        ensure_imported_xcode(ssh_port, username, identity_path, known_hosts_path)?;
+
+    let started_at = Instant::now();
+    let mut step = "authorizing".to_string();
+    let mut detail = xcode_activation_step_detail(&step).to_string();
+    on_progress(xcode_activation_progress(&detail, 0));
+
+    let mut child = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
+        .arg(xcode_activation_sudo_command(&installed_path))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .tracked_spawn()
+        .map_err(|error| {
+            ProviderError::GuestBridge(format!(
+                "could not start Xcode activation over the bridge: {error}"
+            ))
+        })?;
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        ProviderError::GuestBridge(
+            "could not hand the password to the activation session".to_string(),
+        )
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        ProviderError::GuestBridge("could not capture Xcode activation output".to_string())
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        ProviderError::GuestBridge("could not capture Xcode activation errors".to_string())
+    })?;
+    // sudo reads exactly one line. Closing stdin right after is what stops it asking again, and
+    // a session that died before reading explains itself through its exit status below.
+    let _ = stdin
+        .write_all(password.as_bytes())
+        .and_then(|()| stdin.write_all(b"\n"))
+        .and_then(|()| stdin.flush());
+    drop(stdin);
+
+    let (lines, received) = std::sync::mpsc::channel::<String>();
+    let stdout_reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut stderr = stderr;
+        let _ = stderr.read_to_end(&mut output);
+        output
+    });
+    loop {
+        match received.recv_timeout(Duration::from_secs(1)) {
+            Ok(line) => {
+                if let Some(reached) = line.strip_prefix(XCODE_ACTIVATION_MARKER) {
+                    step = reached.trim().to_string();
+                    detail = xcode_activation_step_detail(&step).to_string();
+                } else {
+                    let line = sanitize_build_log_line(&line);
+                    if !line.is_empty() {
+                        detail = format!("{} · {line}", xcode_activation_step_detail(&step));
+                    }
+                }
+                on_progress(xcode_activation_progress(
+                    &detail,
+                    started_at.elapsed().as_secs(),
+                ));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                on_progress(xcode_activation_progress(
+                    &detail,
+                    started_at.elapsed().as_secs(),
+                ));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let _ = stdout_reader.join();
+    let status = child.wait().map_err(|error| {
+        ProviderError::GuestBridge(format!("could not monitor Xcode activation: {error}"))
+    })?;
+    let stderr = clean_output(&stderr_reader.join().unwrap_or_default());
+
+    if !status.success() {
+        return Err(ProviderError::GuestBridge(
+            describe_bridge_activation_failure(username, &step, &stderr),
+        ));
+    }
+
+    verify_xcode_activation(
+        ssh_port,
+        username,
+        identity_path,
+        known_hosts_path,
+        &installed_path,
+    )
+}
+
+/// The one remote command of the bridge route: `sudo` takes the password from stdin, ignores any
+/// cached credential, prints nothing as a prompt, and runs the fixed activation script, whose
+/// own stdin is `/dev/null` so nothing downstream can read the session again.
+fn xcode_activation_sudo_command(installed_path: &str) -> String {
+    let script = format!(
+        "exec </dev/null; /usr/bin/printf '{marker}select\\n'; /usr/bin/xcode-select --switch '{installed_path}' && /usr/bin/printf '{marker}license\\n' && /usr/bin/xcodebuild -license accept && /usr/bin/printf '{marker}first-launch\\n' && /usr/bin/xcodebuild -runFirstLaunch && /usr/bin/printf '{marker}done\\n'",
+        marker = XCODE_ACTIVATION_MARKER
+    );
+
+    format!(
+        "/usr/bin/sudo -S -k -p '' /bin/sh -c {}",
+        shell_single_quote(&script)
+    )
+}
+
+fn xcode_activation_step_detail(step: &str) -> &'static str {
+    match step {
+        "authorizing" => "Authorizing with sudo over the pinned bridge",
+        "select" => "Selecting the developer directory",
+        "license" => "Accepting Apple's license",
+        "first-launch" => {
+            "Running Xcode's first-launch tasks and installing required components. This can take several minutes."
+        }
+        "done" => "Activation finished; verifying",
+        _ => "Activating Xcode",
+    }
+}
+
+fn xcode_activation_progress(detail: &str, elapsed_seconds: u64) -> XcodeImportProgress {
+    XcodeImportProgress {
+        phase: XcodeImportPhase::Activating,
+        transferred_bytes: 0,
+        total_bytes: 0,
+        elapsed_seconds,
+        detail: detail.to_string(),
+    }
+}
+
+fn describe_bridge_activation_failure(username: &str, step: &str, stderr: &str) -> String {
+    if stderr.contains("incorrect password attempt") || stderr.contains("Sorry, try again") {
+        return format!(
+            "macOS did not accept the password for {username}; nothing was changed. Check the local macOS login password, or leave it blank to type it in the guest Terminal."
+        );
+    }
+    if stderr.contains("not in the sudoers") || stderr.contains("not allowed to") {
+        return format!(
+            "{username} is not an administrator on the guest, so sudo refused. Activate with an administrator account or use the manual commands."
+        );
+    }
+
+    let stage = match step {
+        "authorizing" => " before any command ran",
+        "select" => " while selecting the developer directory",
+        "license" => " while accepting the license",
+        "first-launch" => " during Xcode's first-launch tasks",
+        _ => "",
+    };
+    if stderr.is_empty() {
+        format!("macOS could not complete Xcode activation{stage}; no message was returned")
+    } else {
+        format!("macOS could not complete Xcode activation{stage}: {stderr}")
+    }
+}
+
+/// Confirms the imported Xcode application is where the import left it and returns its path.
+fn ensure_imported_xcode(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+) -> Result<String, ProviderError> {
+    if !valid_guest_username(username) {
+        return Err(ProviderError::GuestBridge(
+            "the macOS short username is invalid".to_string(),
+        ));
+    }
+    if ssh_port < 1024 {
+        return Err(ProviderError::GuestBridge(
+            "guest SSH port must be between 1024 and 65535".to_string(),
+        ));
+    }
+    if !identity_path.is_file() || !known_hosts_path.is_file() {
+        return Err(ProviderError::GuestBridge(
+            "configure a guest key and trust its SSH fingerprint before activating Xcode"
+                .to_string(),
+        ));
+    }
+
+    let installed_path = guest_xcode_application_path(username);
+    let inspect_xcode = format!(
+        "if /bin/test -x '{installed_path}/Contents/Developer/usr/bin/xcodebuild'; then /usr/bin/printf ready; else /usr/bin/printf missing; fi"
+    );
+    if run_guest_command(
+        ssh_port,
+        username,
+        identity_path,
+        known_hosts_path,
+        &inspect_xcode,
+    )? != "ready"
+    {
+        return Err(ProviderError::GuestBridge(
+            "the imported Xcode application could not be found; import it again or use the recovery commands"
+                .to_string(),
+        ));
+    }
+
+    Ok(installed_path)
+}
+
+/// Checks that activation, whichever route ran it, left the expected developer directory
+/// selected and first launch complete.
+fn verify_xcode_activation(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+    installed_path: &str,
+) -> Result<(), ProviderError> {
     let selected_path = run_guest_command(
         ssh_port,
         username,
@@ -1626,7 +1847,7 @@ read -k 1 "?Press any key to close this window."
     )
     .map_err(|_| {
         ProviderError::GuestBridge(
-            "Xcode remains inactive. Retry and approve the macOS prompt with the local macOS login password, not the Apple Account password."
+            "Xcode remains inactive. Retry activation with the local macOS login password, not the Apple Account password."
                 .to_string(),
         )
     })?;
@@ -1652,7 +1873,7 @@ read -k 1 "?Press any key to close this window."
     )
     .map_err(|_| {
         ProviderError::GuestBridge(
-            "Xcode was selected, but macOS still reports incomplete first-launch setup. Retry activation and let the Terminal commands finish."
+            "Xcode was selected, but macOS still reports incomplete first-launch setup. Retry activation and let it finish."
                 .to_string(),
         )
     })?;
@@ -6213,6 +6434,74 @@ mod tests {
         let dir = helper.dir.clone();
         drop(helper);
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn bridge_activation_runs_fixed_commands_under_one_sudo_that_reads_stdin_once() {
+        let command = xcode_activation_sudo_command("/Users/builder/Applications/Xcode.app");
+
+        assert!(command.starts_with("/usr/bin/sudo -S -k -p '' /bin/sh -c '"));
+        assert!(command.contains("exec </dev/null;"));
+        assert!(command.contains(
+            "/usr/bin/xcode-select --switch '\"'\"'/Users/builder/Applications/Xcode.app'\"'\"'"
+        ));
+        assert!(command.contains("/usr/bin/xcodebuild -license accept"));
+        assert!(command.contains("/usr/bin/xcodebuild -runFirstLaunch"));
+        for marker in ["select", "license", "first-launch", "done"] {
+            assert!(command.contains(&format!("{XCODE_ACTIVATION_MARKER}{marker}")));
+        }
+        assert!(!command.to_lowercase().contains("password"));
+    }
+
+    #[test]
+    fn bridge_activation_failures_name_the_stage_and_never_the_password() {
+        let rejected = describe_bridge_activation_failure(
+            "builder",
+            "authorizing",
+            "Sorry, try again.\n\nsudo: no password was provided\nsudo: 1 incorrect password attempt",
+        );
+        assert!(rejected.contains("did not accept the password for builder"));
+        assert!(rejected.contains("nothing was changed"));
+
+        assert!(
+            describe_bridge_activation_failure(
+                "guest",
+                "authorizing",
+                "guest is not in the sudoers file."
+            )
+            .contains("not an administrator")
+        );
+
+        let midway = describe_bridge_activation_failure(
+            "builder",
+            "first-launch",
+            "xcodebuild: error: installation failed",
+        );
+        assert!(midway.contains("during Xcode's first-launch tasks"));
+        assert!(midway.contains("installation failed"));
+
+        assert!(
+            describe_bridge_activation_failure("builder", "license", "")
+                .contains("while accepting the license; no message was returned")
+        );
+    }
+
+    #[test]
+    fn bridge_activation_reports_each_stage_in_plain_words() {
+        assert_eq!(
+            xcode_activation_step_detail("select"),
+            "Selecting the developer directory"
+        );
+        assert!(xcode_activation_step_detail("first-launch").contains("several minutes"));
+        assert_eq!(xcode_activation_step_detail("unknown"), "Activating Xcode");
+        assert!(matches!(
+            xcode_activation_progress("detail", 7),
+            XcodeImportProgress {
+                phase: XcodeImportPhase::Activating,
+                elapsed_seconds: 7,
+                ..
+            }
+        ));
     }
 
     #[test]

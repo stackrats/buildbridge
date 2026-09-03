@@ -24,6 +24,7 @@ export const xcodePhaseLabel: Record<XcodeImportPhase, string> = {
     expanding: 'Expanding in the guest',
     awaiting_activation: 'Installed; activation needed',
     awaiting_authorization: 'Waiting for the macOS password',
+    activating: 'Activating over the bridge',
 };
 
 export const signingPhaseLabel: Record<SigningProvisioningPhase, string> = {

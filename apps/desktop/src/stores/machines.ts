@@ -489,13 +489,21 @@ export function useMachinesStore() {
             }
             return result;
         },
-        activateXcode: async (id: string) => {
+        activateXcode: async (id: string, password: string | null) => {
             const target = session(id);
             target.xcode = null;
-            return runOperation(id, 'xcode-activate', () => useBackend().activateXcode(id), {
-                started: 'Waiting for Xcode activation in the guest Terminal',
-                finished: 'Xcode is active. The machine can build projects now.',
-            });
+            return runOperation(
+                id,
+                'xcode-activate',
+                () => useBackend().activateXcode(id, password),
+                {
+                    started:
+                        password === null
+                            ? 'Waiting for Xcode activation in the guest Terminal'
+                            : 'Activating Xcode over the bridge; the password is used for this session only',
+                    finished: 'Xcode is active. The machine can build projects now.',
+                },
+            );
         },
         approveWorkspace: (id: string, path: string) =>
             runOperation(id, 'approve', () => useBackend().approveWorkspace(id, path), {
