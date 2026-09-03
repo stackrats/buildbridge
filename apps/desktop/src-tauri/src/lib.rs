@@ -40,6 +40,7 @@ const ARCHIVE_PROGRESS_EVENT: &str = "machine-archive-progress";
 const USB_MIGRATION_PROGRESS_EVENT: &str = "machine-usb-migration-progress";
 const DEVICE_SIGNING_PROGRESS_EVENT: &str = "machine-device-signing-progress";
 const DEVICE_RUN_PROGRESS_EVENT: &str = "machine-device-progress";
+const BOOT_USB_PROGRESS_EVENT: &str = "machine-boot-usb-progress";
 
 const CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop";
 const MAC_BUILDER_CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop.macos-builder";
@@ -756,6 +757,16 @@ struct MacBuilderView {
 struct AttachUsbDeviceInput {
     bus: u8,
     port: String,
+}
+
+/// The phone to place on QEMU's command line, or nothing to take the current one off. Both
+/// recreate the container, so both are confirmed.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetBootUsbInput {
+    #[serde(default)]
+    device: Option<AttachUsbDeviceInput>,
+    confirmed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1546,6 +1557,85 @@ async fn migrate_machine_for_usb(
         stored.container_id = container_id;
         save_signing_provisioning(&paths, &stored)?;
     }
+    tray::refresh(&app);
+
+    build_mac_builder_view(&app, &paths).await
+}
+
+/// Puts a phone on QEMU's command line, or takes it off, by recreating the container. macOS
+/// restarts, which is the price of the phone being present before it boots — the one moment
+/// macOS enumerates USB without the hot-plug reset that a phone does not survive.
+#[tauri::command]
+async fn set_machine_boot_usb(
+    app: AppHandle,
+    machine_id: String,
+    input: SetBootUsbInput,
+) -> Result<MacBuilderView, String> {
+    if !input.confirmed {
+        return Err("Confirm the machine restart before continuing.".to_string());
+    }
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let boot_device = match &input.device {
+        Some(device) => Some(
+            buildbridge_docker_osx::BootUsbDevice::new(device.bus, &device.port)
+                .map_err(|error| error.to_string())?,
+        ),
+        None => None,
+    };
+    let mut usb = buildbridge_docker_osx::resolve_usb_options().ok_or_else(|| {
+        "This host has no plugdev group or no USB devices, so a phone cannot be passed through."
+            .to_string()
+    })?;
+    usb.boot_device = boot_device;
+
+    let guard = begin_machine_operation(&app, &machine_id, "rebuilding_usb")?;
+    let identity_path = paths.identity();
+    let disk_dir = paths.disk_dir();
+    let qmp_dir = paths.qmp_dir();
+    let container_name = paths.container_name.clone();
+    let event_app = app.clone();
+    let event_machine_id = machine_id.clone();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        let options = buildbridge_docker_osx::LaunchOptions {
+            identity_path: &identity_path,
+            disk_dir: &disk_dir,
+            qmp_dir: &qmp_dir,
+            usb: Some(usb),
+        };
+        buildbridge_docker_osx::set_boot_usb_device(
+            &container_name,
+            &profile,
+            &options,
+            |progress| {
+                emit_machine_progress(
+                    &event_app,
+                    BOOT_USB_PROGRESS_EVENT,
+                    &event_machine_id,
+                    progress,
+                );
+            },
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string());
+    drop(guard);
+    let runtime = finish_operation(&cancel_probe, joined)?;
+    // The container is new, so the keychain record has to point at it or signing reads as lost.
+    if let (Some(container_id), Some(mut stored)) =
+        (runtime.container_id, load_signing_provisioning(&paths)?)
+    {
+        stored.container_id = container_id;
+        save_signing_provisioning(&paths, &stored)?;
+    }
+    clear_usb_attach_issue(&app, &machine_id);
     tray::refresh(&app);
 
     build_mac_builder_view(&app, &paths).await
@@ -5972,6 +6062,7 @@ pub fn run() {
             remove_usb_release_rule,
             migrate_machine_for_usb,
             attach_usb_device,
+            set_machine_boot_usb,
             detach_usb_device,
             list_guest_devices,
             prepare_apple_device_signing,

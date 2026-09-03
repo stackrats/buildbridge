@@ -88,6 +88,7 @@ function baseView(overrides: Partial<MacBuilderView> = {}): MacBuilderView {
             containerIssue: null,
             qmpReachable: false,
             attached: null,
+            bootUsb: null,
         },
         deviceRun: null,
         deviceRunError: null,

@@ -10,6 +10,7 @@ import { formatTime } from '../lib/format';
 import type { LogLine } from '../components/ui/LogView.vue';
 import { deriveJourney, summarizeJourney, type JourneyStep } from '../model/steps';
 import type {
+    BootUsbProgress,
     AdoptPodfileLockResult,
     AppleArchiveProgress,
     AppleDeviceRunProgress,
@@ -56,6 +57,7 @@ export type OperationId =
     | 'usb-migrate'
     | 'usb-attach'
     | 'usb-detach'
+    | 'usb-boot'
     | 'device-signing'
     | 'run-device'
     | 'clear-device-run'
@@ -76,6 +78,7 @@ const busyKeyStep: Record<string, string> = {
     deleting: 'launch',
     discarding: 'launch',
     migrating_usb: 'run-device',
+    rebuilding_usb: 'run-device',
     attaching_usb: 'run-device',
     detaching_usb: 'run-device',
     listing_devices: 'run-device',
@@ -98,6 +101,7 @@ export const busyKeyLabel: Record<string, string> = {
     discarding: 'Discarding the container',
     optimizing: 'Applying an optimization',
     migrating_usb: 'Enabling USB on the machine',
+    rebuilding_usb: 'Rebuilding the machine with the iPhone',
     attaching_usb: 'Attaching the iPhone',
     detaching_usb: 'Detaching the iPhone',
     listing_devices: 'Reading the phones the guest sees',
@@ -120,6 +124,7 @@ const operationStep: Partial<Record<OperationId, string>> = {
     'usb-migrate': 'run-device',
     'usb-attach': 'run-device',
     'usb-detach': 'run-device',
+    'usb-boot': 'run-device',
     'device-signing': 'run-device',
     'run-device': 'run-device',
 };
@@ -148,6 +153,8 @@ export interface MachineSession {
     project: AppleProjectProgress | null;
     archive: AppleArchiveProgress | null;
     usbMigration: DiskMigrationProgress | null;
+    /** Rebuilding the container so the phone is there when macOS boots. */
+    bootUsb: BootUsbProgress | null;
     deviceSigning: DeviceSigningProgress | null;
     device: AppleDeviceRunProgress | null;
     buildLog: LogLine[];
@@ -193,6 +200,7 @@ function createSession(id: string): MachineSession {
         project: null,
         archive: null,
         usbMigration: null,
+        bootUsb: null,
         deviceSigning: null,
         device: null,
         buildLog: [],
@@ -386,6 +394,14 @@ async function listenForEvents(): Promise<void> {
                 const target = session(event.machineId);
                 const phaseChanged = target.usbMigration?.phase !== event.phase;
                 target.usbMigration = event;
+                if (phaseChanged) {
+                    note(target, event.detail);
+                }
+            }),
+            backend.onBootUsbProgress((event) => {
+                const target = session(event.machineId);
+                const phaseChanged = target.bootUsb?.phase !== event.phase;
+                target.bootUsb = event;
                 if (phaseChanged) {
                     note(target, event.detail);
                 }
@@ -772,6 +788,21 @@ export function useMachinesStore() {
                         ? 'iPhone attached. Unlock it and tap Trust when it asks about this computer.'
                         : 'The port is handed to the guest, but the phone has not shown up in it yet.',
             }),
+        /**
+         * Puts the phone on QEMU's command line, or takes it off, by rebuilding the container.
+         * macOS restarts; that is what makes the phone visible to it at all.
+         */
+        setBootUsb: async (id: string, device: { bus: number; port: string } | null) => {
+            session(id).bootUsb = null;
+            return runOperation(id, 'usb-boot', () => useBackend().setMachineBootUsb(id, device), {
+                started: device
+                    ? 'Rebuilding the machine with the iPhone on its command line'
+                    : 'Rebuilding the machine without the iPhone',
+                finished: device
+                    ? 'The machine is starting with the iPhone attached. Unlock it and tap Trust when macOS asks.'
+                    : 'The machine is starting without the iPhone.',
+            });
+        },
         detachUsb: (id: string) =>
             runOperation(id, 'usb-detach', () => useBackend().detachUsbDevice(id), {
                 finished: 'iPhone returned to this host. The app stays installed on it.',

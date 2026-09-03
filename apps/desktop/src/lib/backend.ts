@@ -85,6 +85,11 @@ export interface Backend {
     migrateMachineForUsb(machineId: string): Promise<T.MacBuilderView>;
     attachUsbDevice(machineId: string, bus: number, port: string): Promise<T.MacBuilderView>;
     detachUsbDevice(machineId: string): Promise<T.MacBuilderView>;
+    /** Recreates the container with the phone on QEMU's command line, or without it. */
+    setMachineBootUsb(
+        machineId: string,
+        device: { bus: number; port: string } | null,
+    ): Promise<T.MacBuilderView>;
     /** Asks the guest which phones it sees; the returned view carries the fresh list. */
     listGuestDevices(machineId: string): Promise<T.MacBuilderView>;
     prepareAppleDeviceSigning(
@@ -146,6 +151,9 @@ export interface Backend {
     ): Promise<Unlisten>;
     onUsbMigrationProgress(
         handler: (event: T.MachineEvent<T.DiskMigrationProgress>) => void,
+    ): Promise<Unlisten>;
+    onBootUsbProgress(
+        handler: (event: T.MachineEvent<T.BootUsbProgress>) => void,
     ): Promise<Unlisten>;
     onDeviceSigningProgress(
         handler: (event: T.MachineEvent<T.DeviceSigningProgress>) => void,
@@ -229,6 +237,8 @@ async function createTauriBackend(): Promise<Backend> {
         attachUsbDevice: (machineId, bus, port) =>
             invoke('attach_usb_device', { machineId, input: { bus, port } }),
         detachUsbDevice: (machineId) => invoke('detach_usb_device', { machineId }),
+        setMachineBootUsb: (machineId, device) =>
+            invoke('set_machine_boot_usb', { machineId, input: { device, confirmed: true } }),
         listGuestDevices: (machineId) => invoke('list_guest_devices', { machineId }),
         prepareAppleDeviceSigning: (machineId, udid, deviceName) =>
             invoke('prepare_apple_device_signing', {
@@ -287,6 +297,7 @@ async function createTauriBackend(): Promise<Backend> {
         onProjectProgress: subscribe('machine-project-progress'),
         onArchiveProgress: subscribe('machine-archive-progress'),
         onUsbMigrationProgress: subscribe('machine-usb-migration-progress'),
+        onBootUsbProgress: subscribe('machine-boot-usb-progress'),
         onDeviceSigningProgress: subscribe('machine-device-signing-progress'),
         onDeviceProgress: subscribe('machine-device-progress'),
         pickPaths: async (request) => {

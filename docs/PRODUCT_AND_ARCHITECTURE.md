@@ -980,11 +980,20 @@ ladder is shown as a readiness grid and every rung has one primary action:
 2. **Enable USB on this machine** recreates the container with `--device-cgroup-rule=c 189:* rwm`,
    a `/dev/bus/usb` bind and `--group-add=<plugdev gid>`; never `--privileged`. A machine whose
    disk is still inside the container is migrated to the host first (see *Host lifecycle*).
-3. **Attach** hot-plugs the phone into the guest's `qemu-xhci` controller over QMP:
-   `device_add usb-host` by `hostbus`/`hostport` with `guest-reset=false`, then polls
-   `x-query-usb` for enumeration and, on timeout, surfaces the last `libusb` line from the
-   container log, because `device_add` itself cannot report an open failure. Port matching means
-   an unplug/replug on the same port re-attaches on its own; detach is `device_del`.
+3. **Attach** puts the phone on QEMU's command line — `-device usb-host` by
+   `hostbus`/`hostport`, carrying the same device id a hot-plug would — and recreates the
+   container around it, so macOS finds the phone during its own start-up USB scan. That is the
+   whole point: hot-plugging needs a USB port reset that macOS is either not allowed to make
+   (`guest-reset=false`) or that the phone does not survive (`guest-reset` on), which is the
+   catch-22 behind the upstream reports of flakiness. Both were confirmed on real hardware.
+   Recreating a container is affordable only because the disk lives on this host, so this
+   refuses when it does not, and macOS is asked to shut itself down first rather than being
+   power-cut. Detaching a phone attached this way is the same rebuild without it.
+
+   Hot-plug over QMP (`device_add usb-host` with `guest-reset=false`, polling `x-query-usb`)
+   remains in the provider and is what the status probe reads, but it is not the route the step
+   offers. A phone QEMU holds without having read its descriptors is reported as such rather
+   than as attached, because that is the state a mid-handover reset leaves behind.
 4. **Trust** and **Developer Mode** are the user's on the phone; the step polls
    `xcrun devicectl list devices` until the guest reports the phone paired over a wired tunnel.
 5. **Prepare signing** registers the phone with the team (its UDID comes from the attached

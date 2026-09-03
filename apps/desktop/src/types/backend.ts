@@ -176,6 +176,20 @@ export interface AttachedUsbDevice {
     issue: string | null;
 }
 
+/** A phone placed on QEMU's command line, so macOS finds it as it boots. */
+export interface BootUsbSummary {
+    bus: number;
+    port: string;
+}
+
+export type BootUsbPhase = 'shutting_down' | 'removing' | 'creating' | 'starting' | 'completed';
+
+export interface BootUsbProgress {
+    phase: BootUsbPhase;
+    elapsedSeconds: number;
+    detail: string;
+}
+
 /** USB passthrough for one machine: the host's phones and rule, the container, the attachment. */
 export interface MachineUsbStatus {
     host: HostUsbStatus;
@@ -184,6 +198,8 @@ export interface MachineUsbStatus {
     containerIssue: string | null;
     qmpReachable: boolean;
     attached: AttachedUsbDevice | null;
+    /** The phone this container was created with; letting it go means recreating it. */
+    bootUsb: BootUsbSummary | null;
 }
 
 export type DeveloperModeState = 'enabled' | 'disabled' | 'unknown';
