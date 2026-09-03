@@ -295,7 +295,7 @@ The desktop keeps a registry of managed machines (`machines.json`); each entry o
 
 Rebuild, reset, and delete operations are separate, explicit, confirmation-protected actions with a clear explanation of what state will be lost. The desktop currently exposes two: **Discard container and disk** removes a stopped machine's container (and therefore its macOS disk), clears its pinned host identity and guest signing record, and keeps the machine profile, access key, approved project, and retained artifacts; **Delete machine** additionally removes those per-machine files and the registry entry. Neither touches the host project folder or the signing kit in the operating-system vault, and both refuse while the container is live. Every machine publishes a distinct forwarded SSH port; the registry rejects duplicates. Long-running operations hold a per-machine busy marker that the view model exposes as a stable key, so a reopened desktop shows which step is still running instead of failing on the next click.
 
-The Disk Utility erase and macOS installation are first-time initialization, not a per-launch workflow. Stopping and resuming the same managed container continues to use its existing macOS disk. The current implementation retains that disk in Docker's container storage; before supporting reset, cloning, or dependable backup, BuildBridge should move it to an explicit host-managed volume with visible storage location and health.
+The Disk Utility erase and macOS installation are first-time initialization, not a per-launch workflow. Stopping and resuming the same managed container continues to use its existing macOS disk. That disk, its NVRAM file and, for migrated machines, the installer image live in the machine's own `disk/` directory on the host and are bound into the container — the documented `IMAGE_PATH` route for the disk, file binds over the image's hard-coded paths for the other two — so a container can be recreated with different arguments without losing macOS. Machines created before this layout keep their disk in the container's writable layer until a step needs the new arguments; the *Run on the device* step then migrates them in place: stop, check free space on the data directory's filesystem, `docker cp` the files out with progress, remove, recreate, start. `docker commit` was considered and rejected for this migration because overlayfs copy-up would keep a second copy of the disk inside the committed image permanently. Cloning and dependable backup still need a visible storage-health surface.
 
 ### Local templates and first-boot provisioning
 
@@ -550,10 +550,10 @@ As of 2026-09-02:
 | Build kinds | Control-plane diagnostics and `apple_archive` — a signed Release archive and App Store export on a named machine, of the approved folder or of a ref of the same project — plus the local unsigned smoke build and signing provisioning the archive builds on | Cancellation and retries; Android and native Linux/Windows kinds |
 | Native runner | Fixed-argv platform diagnostics | Native-host workspace and real build providers |
 | Desktop lifecycle | Close-to-tray with per-machine start, stop, refresh, and explicit quit actions; a machine registry with per-machine directories, container names, ports, busy markers, and legacy migration; a sidebar/tab shell with Setup, Build, and Logs per machine; every long-running operation carries a **Stop** that kills its host-side processes and, for builds that outlive their SSH session, the job inside the guest | Notifications and richer background-state recovery |
-| Docker-OSX host | Prerequisite probing, stable identity, create/start/stop/status/logs with launch-phase progress, elapsed-time and guest-readiness monitoring, explicit confirmation-protected container discard and machine deletion | Image pinning, host-managed disks, local templates (clone a prepared machine), storage checks, cancellation |
-| macOS guest bridge | SSH reachability, Ed25519 access key, explicit fingerprint pin, one-time password-authenticated key install on the pin, password-optional Xcode activation over the bridge, mismatch rejection, macOS/Xcode probes, measured Xcode XIP transfer/expansion, bounded project snapshot transfer, fixed tool bootstrap, automatic Simulator installation progress, durable unsigned-build reconnection, a validated simulator build, password-safe signing provisioning, and fixed signed archive/export execution | Per-build isolation, signed-job restart recovery, and cancellation |
+| Docker-OSX host | Prerequisite probing, stable identity, create/start/stop/status/logs with launch-phase progress, elapsed-time and guest-readiness monitoring, explicit confirmation-protected container discard and machine deletion; the macOS disk in a host-managed `disk/` directory bound through `IMAGE_PATH`, with in-place migration of older machines; a QMP control socket and, when the host has `plugdev` and `/dev/bus/usb`, iPhone passthrough by `usb-host` hot-plug with a root-installed udev rule that releases the phone from `usbmuxd` | Image pinning, local templates (clone a prepared machine), storage health, cancellation |
+| macOS guest bridge | SSH reachability, Ed25519 access key, explicit fingerprint pin, one-time password-authenticated key install on the pin, password-optional Xcode activation over the bridge, mismatch rejection, macOS/Xcode probes, measured Xcode XIP transfer/expansion, bounded project snapshot transfer, fixed tool bootstrap, automatic Simulator installation progress, durable unsigned-build reconnection, a validated simulator build, password-safe signing provisioning, fixed signed archive/export execution, and — experimental — `devicectl` listing of a passed-through iPhone, a Debug build signed with the development identity for that phone, install, launch, and its console streamed into the log drawer | Per-build isolation, signed-job restart recovery, cancellation, and the debugger/live-reload routes |
 | Env sets | Named sets of build variables in the OS vault, attached per machine as a default and chosen per signed archive (desktop step and dashboard form), written into the guest as `.env.production.local` for the web build and sourced by the build shell, with the web assets rebuilt in place for a per-archive choice; variables read back with their values, secrets by key only in summaries, fetched masked into the editor with an eye to show one; set names travel in the heartbeat | Env for native compile-time configuration |
-| Signing kits | Multiple named kits in the OS vault with per-machine attachment, safe stored-detail display, and named recovery states when the vault is cleared or unreadable; portable file import remains available; Xcode VM sign-in is labeled best-effort; `.p8` keys are accepted by restricted host path and retained in the OS vault; Apple app, Bundle ID, certificate, and profile metadata are verified read-only; an expired App Store profile can be replaced through confirmed native creation and owner-only retention, and an existing Apple profile can be downloaded into the attached kit or re-added from the host's retained copies; a Distribution identity can be created at Apple for a key generated on the Linux host and packaged into the kit, so no Mac is needed at any point; certificate/profile paths are revalidated and the real signing kit is provisioned and code-sign probed through a fixed native helper; archive execution unlocks and relocks the dedicated keychain within that helper's process boundary | Generate the guest private key/CSR and Apple Distribution certificate, then add rotation/revocation handling |
+| Signing kits | Multiple named kits in the OS vault with per-machine attachment, safe stored-detail display, and named recovery states when the vault is cleared or unreadable; portable file import remains available; Xcode VM sign-in is labeled best-effort; `.p8` keys are accepted by restricted host path and retained in the OS vault; Apple app, Bundle ID, certificate, and profile metadata are verified read-only; an expired App Store profile can be replaced through confirmed native creation and owner-only retention, and an existing Apple profile can be downloaded into the attached kit or re-added from the host's retained copies; a Distribution identity can be created at Apple for a key generated on the Linux host and packaged into the kit, so no Mac is needed at any point; certificate/profile paths are revalidated and the real signing kit is provisioned and code-sign probed through a fixed native helper; archive execution unlocks and relocks the dedicated keychain within that helper's process boundary; a kit may also hold an optional development identity, imported or created at Apple the same way, and the device step registers the attached phone and creates an `IOS_APP_DEVELOPMENT` profile for it on demand, each a confirmed, non-revoking mutation | Rotation/revocation handling |
 | Workspaces | Exact local path approval, project-shape validation, secret-filtered bounded archive, checksum, measured pinned-SSH transfer, atomic active-workspace replacement | Opaque workspace IDs in the control plane, dirty-state fingerprint, per-build snapshots and retention |
 | Artifacts | Local `.ipa` and portable `.xcarchive.zip` transfer with bounded sizes, guest/host SHA-256 agreement, private retention, reveal/copy actions, and confirmation-protected cleanup | Control-plane upload, download authorization, retention policy, and dSYM separation |
 | Windows Docker-OSX | Not implemented | WSL2 provider after Linux golden path |
@@ -833,6 +833,16 @@ The following decisions should be treated as settled until this document is deli
     guest's Terminal, never through a password BuildBridge holds. The extremely insecure ones
     are offered with the source's warning unedited and an explicit acknowledgement, on the
     grounds that the guest is reachable from this host's loopback only.
+38. The macOS disk is host-managed: it lives in the machine's `disk/` directory and is bound into
+    the container, so recreating a container is cheap and never loses macOS. Older machines are
+    migrated by copying the disk out, never by `docker commit`, which would double the footprint
+    through overlay copy-up.
+39. Running on a physical iPhone is an optional, experimental step over raw QEMU `usb-host`
+    passthrough hot-plugged through QMP — never `usbfluxd`, never `--privileged`. The host
+    releases the phone through one root-installed udev rule with a fixed argv, the UDID always
+    comes from the attached phone, and device registration, development certificate and
+    development profile are confirmed, non-revoking mutations at Apple. Trust and Developer Mode
+    stay the user's actions on the phone.
 
 ### Credential loss and recovery
 
@@ -947,6 +957,47 @@ caveat shown, and the extremely insecure ones — disabling passwords, passwordl
 account — require an explicit acknowledgement and are shown with the source's warning unedited.
 They are offered only because the guest listens on this host's loopback and nowhere else.
 
+### Running on a real iPhone
+
+The fourteenth step, **Run on the device**, is optional and labelled experimental. It installs a
+Debug build of the approved project on an iPhone plugged into this host and streams the app's
+console into the log drawer. It is the only step that reaches outside the container, so its
+ladder is shown as a readiness grid and every rung has one primary action:
+
+1. **Prepare the host** installs one udev rule, `/etc/udev/rules.d/40-buildbridge-iphone.rules`,
+   through a single `pkexec /usr/bin/install` with fixed arguments. Sorted after `usbmuxd`'s own
+   rule, it keeps the configuration-0 reset that holds `ipheth`/PTP off the phone but drops the
+   `usbmuxd` ownership and systemd activation, and hands the node to `plugdev` at `0660`. While
+   it is installed, host-side iPhone sync is off for every iPhone on this host; the step says so
+   and offers the mirror removal. The user replugs the phone so the new mode applies.
+2. **Enable USB on this machine** recreates the container with `--device-cgroup-rule=c 189:* rwm`,
+   a `/dev/bus/usb` bind and `--group-add=<plugdev gid>`; never `--privileged`. A machine whose
+   disk is still inside the container is migrated to the host first (see *Host lifecycle*).
+3. **Attach** hot-plugs the phone into the guest's `qemu-xhci` controller over QMP:
+   `device_add usb-host` by `hostbus`/`hostport` with `guest-reset=false`, then polls
+   `x-query-usb` for enumeration and, on timeout, surfaces the last `libusb` line from the
+   container log, because `device_add` itself cannot report an open failure. Port matching means
+   an unplug/replug on the same port re-attaches on its own; detach is `device_del`.
+4. **Trust** and **Developer Mode** are the user's on the phone; the step polls
+   `xcrun devicectl list devices` until the guest reports the phone paired over a wired tunnel.
+5. **Prepare signing** registers the phone with the team (its UDID comes from the attached
+   phone, never from a text box), creates a development certificate into the kit when it holds
+   none, finds or creates an `IOS_APP_DEVELOPMENT` profile listing that phone, downloads it into
+   the kit, and provisions the machine again so the guest keychain holds both identities.
+6. **Build and run** compiles the App scheme in `Debug` for `generic/platform=iOS` inside the same
+   fixed native helper that archives use, verifies the bundle (signature, embedded profile UUID,
+   `get-task-allow`), then a detached guest job runs `devicectl device install app` and
+   `devicectl device process launch --console --terminate-existing`. Stop ends the console and
+   keeps the run; every line reaches the drawer's **Device console** tab.
+
+Why not Docker-OSX's documented `usbfluxd` route: since iOS 17, developer services run as
+CoreDevice/RemoteXPC over the phone's USB Ethernet interface, which a `usbmuxd` proxy never
+carries, so `ideviceinfo` sees the phone while Xcode and `devicectl` do not. Whole-device
+`usb-host` passthrough carries it. The Docker-OSX threads that report it working also report VM
+freezes on hot-plug, hence the label and the advice to detach before unplugging. Out of scope and
+said so in the panel: Xcode's debugger and Instruments, Capacitor live reload, and a QR/OTA
+install route.
+
 ### Runner identity and removal
 
 Pairing creates a runner record and a scoped token. **Unpair** in the desktop clears only that
@@ -972,7 +1023,7 @@ These require a concrete implementation decision before their phase begins:
 - the supported Windows 11 editions, CPU architectures, and WSL distributions;
 - artifact and log retention defaults; and
 - the product language and distribution policy required by Apple licensing constraints;
-- how a prepared machine is captured as a local template and cloned into a new machine (host-managed disks are a prerequisite); and
+- how a prepared machine is captured as a local template and cloned into a new machine (the disk now lives on the host; the template format and copy-on-write derivation remain open); and
 - whether projects become first-class records that can target several machines, which requires per-project guest workspace directories.
 
 ## External references

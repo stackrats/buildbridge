@@ -48,6 +48,9 @@ For the desktop runner on Linux:
 - Docker Engine reachable by your user
 - An X11 display for the one-time macOS installer console
 - OpenSSH client tools
+- Room under `~/.local/share` for each machine's macOS disk (a sparse 200 GB image; tens of GB used)
+
+Optional, to run a Debug build on a real iPhone: the phone on USB, polkit (`pkexec`) to install one udev rule that releases iPhones from `usbmuxd`, and a `plugdev` group. Host-side iPhone sync is off while that rule is installed; the desktop can remove it again. This route is experimental.
 
 Docker-OSX is an experimental, self-hosted route. Apple's licensing ties macOS virtualization to Apple hardware; review it before using BuildBridge for production builds.
 
