@@ -1,5 +1,14 @@
 <script setup lang="ts">
-import { Apple, BadgePlus, KeyRound, Pencil, Plus, TriangleAlert, Trash2 } from '@lucide/vue';
+import {
+    Apple,
+    BadgePlus,
+    KeyRound,
+    Pencil,
+    Plus,
+    Smartphone,
+    TriangleAlert,
+    Trash2,
+} from '@lucide/vue';
 import { computed, ref, watch } from 'vue';
 
 import { formatDate } from '../../lib/format';
@@ -41,16 +50,27 @@ if (previewDialog === 'edit') {
     );
 }
 const removing = ref<SigningKitSummary | null>(null);
-// The kit whose Apple certificate creation is awaiting confirmation.
-const certifying = ref<SigningKitSummary | null>(null);
+// The kit whose Apple certificate creation is awaiting confirmation, and which identity.
+const certifying = ref<{
+    kit: SigningKitSummary;
+    kind: 'distribution' | 'development';
+} | null>(null);
 
 async function createCertificate(): Promise<void> {
-    const kit = certifying.value;
+    const request = certifying.value;
     certifying.value = null;
-    if (kit) {
-        await signing.createCertificate(kit.id);
+    if (request?.kind === 'development') {
+        await signing.createDevelopmentCertificate(request.kit.id);
+    } else if (request) {
+        await signing.createCertificate(request.kit.id);
     }
 }
+
+const creatingAny = computed(
+    () =>
+        signing.state.creatingCertificateKitId !== null ||
+        signing.state.creatingDevelopmentCertificateKitId !== null,
+);
 
 function createKit(): void {
     editing.value = null;
@@ -90,6 +110,10 @@ function detailsFor(kit: SigningKitSummary) {
             label: 'Guest keychain password',
             value: kit.guestKeychainConfigured ? 'Stored in the OS vault' : 'Not stored',
             tone: kit.guestKeychainConfigured ? ('default' as const) : ('warn' as const),
+        },
+        {
+            label: 'Development identity',
+            value: kit.developmentCertificateName ?? 'Not stored · optional, for iPhone builds',
         },
         {
             label: 'App Store Connect key',
@@ -174,12 +198,28 @@ const orphaned = computed(() =>
                     variant="outline"
                     size="sm"
                     title="No Mac needed"
-                    :disabled="signing.state.creatingCertificateKitId !== null"
-                    @click="certifying = kit"
+                    :disabled="creatingAny"
+                    @click="certifying = { kit, kind: 'distribution' }"
                 >
                     <Spinner v-if="signing.state.creatingCertificateKitId === kit.id" />
                     <BadgePlus v-else class="h-3.5 w-3.5" />
                     Create certificate at Apple
+                </Button>
+                <Button
+                    v-if="kit.appStoreConnectConfigured"
+                    variant="outline"
+                    size="sm"
+                    title="The identity a Debug build on a registered iPhone is signed with"
+                    :disabled="creatingAny"
+                    @click="certifying = { kit, kind: 'development' }"
+                >
+                    <Spinner v-if="signing.state.creatingDevelopmentCertificateKitId === kit.id" />
+                    <Smartphone v-else class="h-3.5 w-3.5" />
+                    {{
+                        kit.developmentCertificateConfigured
+                            ? 'New development certificate'
+                            : 'Create development certificate'
+                    }}
                 </Button>
                 <Button variant="outline" size="sm" @click="editKit(kit)">
                     <Pencil class="h-3.5 w-3.5" />
@@ -279,7 +319,11 @@ const orphaned = computed(() =>
 
         <ConfirmDialog
             :open="certifying !== null"
-            title="Create a Distribution certificate at Apple"
+            :title="
+                certifying?.kind === 'development'
+                    ? 'Create a Development certificate at Apple'
+                    : 'Create a Distribution certificate at Apple'
+            "
             confirm-label="Create certificate"
             :destructive="false"
             @update:open="(value) => (certifying = value ? certifying : null)"
@@ -287,11 +331,17 @@ const orphaned = computed(() =>
         >
             <p>
                 BuildBridge generates a private key on this host, asks Apple to sign it with the
-                Team key in <b>{{ certifying?.name }}</b
+                Team key in <b>{{ certifying?.kit.name }}</b
                 >, and stores the result in the kit as a password-protected .p12. No Mac is involved
                 and nothing at Apple is revoked.
             </p>
-            <p>
+            <p v-if="certifying?.kind === 'development'">
+                A development identity signs only Debug builds installed on iPhones registered with
+                the team; the distribution identity in the kit is untouched. The key needs the
+                <b>Admin</b> role at Apple, and Apple allows only a few active development
+                certificates per team; if it refuses, its reason is shown as is.
+            </p>
+            <p v-else>
                 The key needs the <b>Admin</b> role at Apple, and Apple allows only a few active
                 distribution certificates per team; if it refuses, its reason is shown as is. The
                 private key then exists only in this kit, so keep this host's vault backed up.

@@ -5,6 +5,7 @@ import { computed, ref } from 'vue';
 import { formatDate, percent } from '../../../lib/format';
 import type { JourneyStep } from '../../../model/steps';
 import { signingPhaseLabel } from '../../../model/phases';
+import { profileKindLabel } from '../../../model/signing';
 import { useMachinesStore, type MachineSession } from '../../../stores/machines';
 import { useUi } from '../../../stores/ui';
 import Button from '../../ui/Button.vue';
@@ -120,11 +121,27 @@ async function remove(): Promise<void> {
                         label: 'Certificate valid until',
                         value: formatDate(signing.certificateExpiresAt),
                     },
+                    {
+                        label: 'Development identity',
+                        value:
+                            signing.developmentIdentity?.identityName ??
+                            'None · needed only for Debug builds on a phone',
+                    },
                     { label: 'Team', value: signing.developmentTeam, mono: true },
                     { label: 'Bundle identifier', value: signing.bundleIdentifier, mono: true },
                     {
                         label: 'Profiles installed',
-                        value: signing.profiles.map((profile) => profile.uuid).join(', ') || 'none',
+                        value:
+                            signing.profiles
+                                .map(
+                                    (profile) =>
+                                        `${profile.uuid} · ${profileKindLabel[profile.kind ?? 'app_store']}${
+                                            profile.provisionedDeviceUdids?.length
+                                                ? ` · ${profile.provisionedDeviceUdids.length} device${profile.provisionedDeviceUdids.length === 1 ? '' : 's'}`
+                                                : ''
+                                        }`,
+                                )
+                                .join(', ') || 'none',
                         mono: true,
                     },
                     { label: 'Keychain', value: signing.keychainPath, mono: true },

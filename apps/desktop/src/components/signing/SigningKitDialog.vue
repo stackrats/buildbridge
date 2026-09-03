@@ -10,7 +10,11 @@ import { computed, reactive, ref, watch } from 'vue';
 
 import { useBackend } from '../../lib/backend';
 import { mergePathList } from '../../lib/paths';
-import { appStoreConnectIsPartial, missingKitRequirements } from '../../model/signing';
+import {
+    appStoreConnectIsPartial,
+    developmentIdentityStatus,
+    missingKitRequirements,
+} from '../../model/signing';
 import { useSigningStore } from '../../stores/signing';
 import type { ManagedAppleProfile, SigningKitSummary } from '../../types/backend';
 import Button from '../ui/Button.vue';
@@ -41,10 +45,13 @@ const form = reactive({
     appStoreConnectKeyId: '',
     appStoreConnectIssuerId: '',
     appStoreConnectPrivateKeyPath: '',
+    developmentCertificatePath: '',
+    developmentCertificatePassword: '',
 });
 
 const editing = computed(() => kit !== null);
 const showAppStoreConnect = ref(false);
+const developmentStatus = computed(() => developmentIdentityStatus(form, kit));
 
 // Every profile BuildBridge downloads is kept on this host. A vault that loses its paths — a
 // cleared keyring, a new machine profile — does not lose those files, so they are offered back
@@ -116,6 +123,8 @@ watch([open, () => kit], ([value]) => {
         form.appStoreConnectKeyId = '';
         form.appStoreConnectIssuerId = '';
         form.appStoreConnectPrivateKeyPath = '';
+        form.developmentCertificatePath = '';
+        form.developmentCertificatePassword = '';
         showAppStoreConnect.value = kit?.appStoreConnectConfigured ?? false;
         signing.clearMessages();
     }
@@ -132,6 +141,8 @@ async function save(): Promise<void> {
         signingCertificatePassword: form.signingCertificatePassword,
         provisioningProfilePaths: profileLines.value,
         guestKeychainPassword: form.guestKeychainPassword,
+        developmentCertificatePath: form.developmentCertificatePath.trim(),
+        developmentCertificatePassword: form.developmentCertificatePassword,
     });
     if (saved) {
         open.value = false;
@@ -319,6 +330,48 @@ async function save(): Promise<void> {
                 >
                     Still needed: {{ missing.map((item) => item.label).join(', ') }}. A kit can be
                     saved incomplete, but it cannot provision until all four are present.
+                </p>
+            </section>
+
+            <section class="space-y-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+                <div>
+                    <p class="text-xs font-semibold text-zinc-900 dark:text-zinc-50">
+                        Development identity
+                        <span class="font-normal text-zinc-500 dark:text-zinc-400">· optional</span>
+                    </p>
+                    <p class="mt-0.5 text-[11px] leading-4 text-zinc-500 dark:text-zinc-400">
+                        Only needed to install a Debug build on a specific iPhone. With a Team key
+                        in the kit, BuildBridge creates one at Apple from the kit card; store one
+                        here if you already hold its .p12.
+                    </p>
+                </div>
+                <Field
+                    label="Development identity (.p12)"
+                    :stored="kit?.developmentCertificateConfigured"
+                    :hint="kit?.developmentCertificateName ?? undefined"
+                >
+                    <PathField
+                        v-model="form.developmentCertificatePath"
+                        kind="file"
+                        title="Choose the development identity"
+                        :filter="{ name: 'PKCS#12 identity', extensions: ['p12', 'pfx'] }"
+                    />
+                </Field>
+                <Field
+                    label="Development identity export password"
+                    :stored="kit?.developmentCertificatePasswordStored"
+                >
+                    <Input
+                        v-model="form.developmentCertificatePassword"
+                        type="password"
+                        autocomplete="off"
+                    />
+                </Field>
+                <p
+                    v-if="developmentStatus === 'partial'"
+                    class="text-[11px] leading-4 text-amber-700 dark:text-amber-400"
+                >
+                    A development identity needs both the .p12 and its export password.
                 </p>
             </section>
 

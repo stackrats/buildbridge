@@ -109,6 +109,8 @@ export interface Backend {
     ): Promise<T.CreateAppleProfileResult>;
     /** Creates an Apple Distribution identity for the kit with no Mac involved. */
     createAppleCertificate(kitId: string): Promise<T.CreateAppleCertificateResult>;
+    /** Creates the Apple Development identity a Debug build on a registered phone signs with. */
+    createAppleDevelopmentCertificate(kitId: string): Promise<T.CreateAppleCertificateResult>;
     /** Provisioning profiles already downloaded to this host, newest first. */
     listManagedAppleProfiles(): Promise<T.ManagedAppleProfile[]>;
     /** The optimizer catalogue with each item's state on this machine's guest. */
@@ -253,6 +255,11 @@ async function createTauriBackend(): Promise<Backend> {
 
         createAppleCertificate: (kitId) =>
             invoke('create_apple_distribution_certificate', {
+                kitId,
+                input: { confirmed: true },
+            }),
+        createAppleDevelopmentCertificate: (kitId) =>
+            invoke('create_apple_development_certificate', {
                 kitId,
                 input: { confirmed: true },
             }),

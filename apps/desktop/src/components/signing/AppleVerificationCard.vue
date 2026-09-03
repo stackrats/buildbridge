@@ -102,7 +102,22 @@ function certificateState(certificate: { certificateType: string; expirationDate
     ) {
         return { label: 'distribution · usable', tone: 'ok' as const };
     }
+    if (
+        certificate.certificateType === 'DEVELOPMENT' ||
+        certificate.certificateType === 'IOS_DEVELOPMENT'
+    ) {
+        return { label: 'development · for iPhone builds', tone: 'neutral' as const };
+    }
     return { label: 'not for App Store signing', tone: 'neutral' as const };
+}
+
+/** How many phones a development or ad hoc profile lists, when Apple let us read them. */
+function profileDevices(profile: { profileType: string; deviceUdids?: string[] }): string | null {
+    if (profile.profileType !== 'IOS_APP_DEVELOPMENT' && profile.profileType !== 'IOS_APP_ADHOC') {
+        return null;
+    }
+    const count = profile.deviceUdids?.length ?? 0;
+    return `${count} device${count === 1 ? '' : 's'}`;
 }
 
 async function createProfile(): Promise<void> {
@@ -211,7 +226,10 @@ async function createProfile(): Promise<void> {
                                 }}</span>
                                 <span
                                     class="block font-mono text-[11px] text-zinc-500 dark:text-zinc-400"
-                                    >{{ profile.profileType }} · {{ profile.uuid }}</span
+                                    >{{ profile.profileType }} · {{ profile.uuid
+                                    }}<template v-if="profileDevices(profile)">
+                                        · {{ profileDevices(profile) }}</template
+                                    ></span
                                 >
                             </span>
                             <span class="shrink-0 text-[11px] text-zinc-500 dark:text-zinc-400"
@@ -251,6 +269,54 @@ async function createProfile(): Promise<void> {
                         class="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400"
                     >
                         Showing 8 of {{ verification.profiles.length }}.
+                    </p>
+                </div>
+
+                <div class="mt-3">
+                    <p class="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+                        Registered iPhones
+                    </p>
+                    <ul
+                        v-if="verification.devicesAccessible"
+                        class="mt-1 divide-y divide-zinc-200 rounded-md border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800"
+                    >
+                        <li
+                            v-for="device in verification.devices.slice(0, 8)"
+                            :key="device.id"
+                            class="flex items-center gap-2 px-2.5 py-1.5 text-xs"
+                        >
+                            <span class="min-w-0 flex-1">
+                                <span class="block truncate text-zinc-600 dark:text-zinc-300"
+                                    >{{ device.name
+                                    }}<template v-if="device.model">
+                                        · {{ device.model }}</template
+                                    ></span
+                                >
+                                <span
+                                    class="block font-mono text-[11px] text-zinc-500 dark:text-zinc-400"
+                                    >{{ device.udid }}</span
+                                >
+                            </span>
+                            <Badge :tone="device.status === 'ENABLED' ? 'ok' : 'warn'">{{
+                                device.status.toLowerCase()
+                            }}</Badge>
+                        </li>
+                        <li
+                            v-if="!verification.devices.length"
+                            class="px-2.5 py-2 text-xs text-zinc-500 dark:text-zinc-400"
+                        >
+                            No iPhones registered with this team yet; a machine's Run on the device
+                            step registers one.
+                        </li>
+                    </ul>
+                    <p v-else class="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+                        {{ verification.devicesIssue ?? 'Devices were not accessible.' }}
+                    </p>
+                    <p
+                        v-if="verification.devices.length > 8"
+                        class="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400"
+                    >
+                        Showing 8 of {{ verification.devices.length }}.
                     </p>
                 </div>
 

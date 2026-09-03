@@ -1407,10 +1407,15 @@ export function createMockBackend(): Backend {
                 id: existing?.id ?? slug(name),
                 name,
                 developmentCertificateConfigured:
-                    existing?.developmentCertificateConfigured ?? false,
-                developmentCertificateName: existing?.developmentCertificateName ?? null,
+                    (existing?.developmentCertificateConfigured ?? false) ||
+                    input.developmentCertificatePath.trim() !== '',
+                developmentCertificateName:
+                    input.developmentCertificatePath.trim() !== ''
+                        ? (input.developmentCertificatePath.trim().split('/').at(-1) ?? null)
+                        : (existing?.developmentCertificateName ?? null),
                 developmentCertificatePasswordStored:
-                    existing?.developmentCertificatePasswordStored ?? false,
+                    (existing?.developmentCertificatePasswordStored ?? false) ||
+                    input.developmentCertificatePassword !== '',
                 appStoreConnectConfigured:
                     existing?.appStoreConnectConfigured || input.appStoreConnectKeyId.trim() !== '',
                 appStoreConnectKeyId:
@@ -1493,6 +1498,20 @@ export function createMockBackend(): Backend {
                         uuid: '11111111-2222-3333-4444-555555555555',
                         createdDate: '2026-09-02T09:00:00Z',
                         expirationDate: '2027-09-02T10:14:00Z',
+                        deviceUdids: [],
+                        certificateIds: ['cert-1'],
+                    },
+                    {
+                        id: 'prof-3',
+                        name: 'BuildBridge Development 1756900000',
+                        platform: 'IOS',
+                        profileType: 'IOS_APP_DEVELOPMENT',
+                        profileState: 'ACTIVE',
+                        uuid: '22222222-3333-4444-5555-666666666666',
+                        createdDate: '2026-09-03T09:00:00Z',
+                        expirationDate: '2027-09-02T10:14:00Z',
+                        deviceUdids: [DEVICE_UDID],
+                        certificateIds: ['cert-2'],
                     },
                     {
                         id: 'prof-2',
@@ -1503,6 +1522,8 @@ export function createMockBackend(): Backend {
                         uuid: '66666666-7777-8888-9999-000000000000',
                         createdDate: '2025-07-28T09:00:00Z',
                         expirationDate: '2026-07-28T09:00:00Z',
+                        deviceUdids: [],
+                        certificateIds: [],
                     },
                 ],
                 certificatesAccessible: true,
@@ -1525,6 +1546,20 @@ export function createMockBackend(): Backend {
                         serialNumber: '5555666677778888',
                         platform: 'IOS',
                         expirationDate: '2027-03-11T10:14:00Z',
+                    },
+                ],
+                devicesAccessible: true,
+                devicesIssue: null,
+                devices: [
+                    {
+                        id: 'dev-1',
+                        name: 'Matt’s iPhone',
+                        udid: DEVICE_UDID,
+                        platform: 'IOS',
+                        status: 'ENABLED',
+                        deviceClass: 'IPHONE',
+                        model: 'iPhone 15 Pro',
+                        addedDate: '2026-09-03T09:00:00Z',
                     },
                 ],
                 verifiedAtEpochSeconds: Math.floor(Date.now() / 1000),
@@ -1565,6 +1600,27 @@ export function createMockBackend(): Backend {
                 },
                 savedPath:
                     '/home/you/.config/dev.buildbridge.desktop/macos-builder/certificates/distribution-1756800000/distribution.p12',
+                kit: { ...kit },
+            };
+        },
+        async createAppleDevelopmentCertificate(kitId: string) {
+            await sleep(1200);
+            const kit = kits.find((entry) => entry.id === kitId)!;
+            kit.developmentCertificateConfigured = true;
+            kit.developmentCertificateName = 'development.p12';
+            kit.developmentCertificatePasswordStored = true;
+            return {
+                certificate: {
+                    id: 'cert-2',
+                    name: 'Apple Development: Example Developer (TEAM123456)',
+                    displayName: 'Example Developer',
+                    certificateType: 'DEVELOPMENT',
+                    serialNumber: '5555666677778888',
+                    platform: 'IOS',
+                    expirationDate: '2027-03-11T10:14:00Z',
+                },
+                savedPath:
+                    '/home/you/.config/dev.buildbridge.desktop/macos-builder/certificates/development-1756900000/development.p12',
                 kit: { ...kit },
             };
         },

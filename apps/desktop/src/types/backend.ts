@@ -248,6 +248,8 @@ export interface SigningKitInput {
     signingCertificatePassword: string;
     provisioningProfilePaths: string[];
     guestKeychainPassword: string;
+    developmentCertificatePath: string;
+    developmentCertificatePassword: string;
 }
 
 /** One variable as the interface shows it, value included. */
@@ -634,6 +636,21 @@ export interface AppleProvisioningProfile {
     uuid: string;
     createdDate: string;
     expirationDate: string;
+    /** Filled for development and ad hoc profiles when their memberships could be read. */
+    deviceUdids: string[];
+    certificateIds: string[];
+}
+
+/** A device registered with the team, as App Store Connect lists it. */
+export interface AppleDevice {
+    id: string;
+    name: string;
+    udid: string;
+    platform: string;
+    status: string;
+    deviceClass: string;
+    model: string;
+    addedDate: string;
 }
 
 export interface AppleCertificate {
@@ -666,6 +683,9 @@ export interface AppleTeamVerification {
     certificatesAccessible: boolean;
     certificatesIssue: string | null;
     certificates: AppleCertificate[];
+    devicesAccessible: boolean;
+    devicesIssue: string | null;
+    devices: AppleDevice[];
     verifiedAtEpochSeconds: number;
 }
 

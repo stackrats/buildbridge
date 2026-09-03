@@ -29,6 +29,7 @@ const state = reactive({
     verificationError: null as string | null,
     creatingProfile: false,
     creatingCertificateKitId: null as string | null,
+    creatingDevelopmentCertificateKitId: null as string | null,
     downloadingProfileId: null as string | null,
     createdProfile: null as CreateAppleProfileResult | null,
     profileError: null as string | null,
@@ -165,6 +166,32 @@ export function useSigningStore() {
                 return false;
             } finally {
                 state.creatingCertificateKitId = null;
+            }
+        },
+
+        /**
+         * The development counterpart: an Apple Development identity for a key generated on
+         * this host, packaged into the kit next to the distribution one.
+         */
+        async createDevelopmentCertificate(kitId: string): Promise<boolean> {
+            state.creatingDevelopmentCertificateKitId = kitId;
+            state.error = null;
+            try {
+                const result = await useBackend().createAppleDevelopmentCertificate(kitId);
+                const index = state.kits.findIndex((kit) => kit.id === result.kit.id);
+                if (index >= 0) {
+                    state.kits[index] = {
+                        ...result.kit,
+                        attachedMachines: state.kits[index].attachedMachines,
+                    };
+                }
+                state.notice = `${result.certificate.name} created at Apple and stored in ${result.kit.name}. Prepare an iPhone from a machine's Run on the device step to use it.`;
+                return true;
+            } catch (error) {
+                state.error = describeError(error);
+                return false;
+            } finally {
+                state.creatingDevelopmentCertificateKitId = null;
             }
         },
 

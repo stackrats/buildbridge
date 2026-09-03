@@ -4,7 +4,36 @@
 // the vault" — so readiness is the union of what is typed now and what is already stored. Keeping
 // that rule here means the dialog and its tests agree on it.
 
-import type { SigningKitSummary } from '../types/backend';
+import type { ProfileKind, SigningKitSummary } from '../types/backend';
+
+/** What a profile is for, in the words the interface uses. */
+export const profileKindLabel: Record<ProfileKind, string> = {
+    app_store: 'App Store',
+    development: 'development',
+    ad_hoc: 'ad hoc',
+    enterprise: 'enterprise',
+};
+
+/**
+ * The optional development identity: stored already, typed now, half-typed (a mistake worth
+ * naming, since a `.p12` is useless without its passphrase), or absent.
+ */
+export function developmentIdentityStatus(
+    draft: { developmentCertificatePath: string; developmentCertificatePassword: string },
+    stored: SigningKitSummary | null,
+): 'stored' | 'typed' | 'partial' | 'none' {
+    const path = draft.developmentCertificatePath.trim() !== '';
+    const password = draft.developmentCertificatePassword !== '';
+    const storedPath = stored?.developmentCertificateConfigured ?? false;
+    const storedPassword = stored?.developmentCertificatePasswordStored ?? false;
+    if ((path || storedPath) && (password || storedPassword)) {
+        return path || password ? 'typed' : 'stored';
+    }
+    if (path || password) {
+        return 'partial';
+    }
+    return 'none';
+}
 
 export interface SigningKitDraft {
     certificatePath: string;
