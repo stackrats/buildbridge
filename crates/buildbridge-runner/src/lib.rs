@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use buildbridge_contract::{
     AppendLogsRequest, BuildKind, BuildLogLine, ClaimBuildResponse, ClaimedBuild,
-    CompleteBuildRequest, CompletionStatus, HeartbeatRequest, LogStream, PROTOCOL_VERSION,
-    PairRunnerRequest, PairRunnerResponse, RealtimeAuthorizationRequest, RealtimeConfiguration,
-    RealtimeConfigurationResponse,
+    CompleteBuildRequest, CompletionStatus, HeartbeatRequest, HeartbeatResponse, LogStream,
+    PROTOCOL_VERSION, PairRunnerRequest, PairRunnerResponse, RealtimeAuthorizationRequest,
+    RealtimeConfiguration, RealtimeConfigurationResponse, RenewLeaseResponse,
 };
 use reqwest::{Client, StatusCode, Url};
 use serde::Serialize;
@@ -61,8 +61,21 @@ impl ApiClient {
         Ok(paired)
     }
 
-    pub async fn heartbeat(&self, request: &HeartbeatRequest) -> Result<(), RunnerError> {
-        self.post_empty("api/runner/heartbeat", request).await
+    pub async fn heartbeat(
+        &self,
+        request: &HeartbeatRequest,
+    ) -> Result<HeartbeatResponse, RunnerError> {
+        let response = self
+            .http
+            .post(endpoint(&self.base_url, "api/runner/heartbeat")?)
+            .bearer_auth(&self.token)
+            .json(request)
+            .send()
+            .await?;
+        let heartbeat: HeartbeatResponse = decode(response).await?;
+        ensure_protocol(heartbeat.protocol_version)?;
+
+        Ok(heartbeat)
     }
 
     pub async fn realtime_configuration(&self) -> Result<RealtimeConfiguration, RunnerError> {
@@ -129,6 +142,22 @@ impl ApiClient {
         Ok(())
     }
 
+    /// Extends the lease on a running build. Long jobs call this well inside the lease window,
+    /// otherwise the control plane treats the build as abandoned and offers it again.
+    pub async fn renew_lease(&self, build_id: &str) -> Result<RenewLeaseResponse, RunnerError> {
+        let response = self
+            .http
+            .post(endpoint(
+                &self.base_url,
+                &format!("api/runner/builds/{build_id}/lease"),
+            )?)
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+
+        decode(response).await
+    }
+
     pub async fn complete(
         &self,
         build_id: &str,
@@ -163,9 +192,12 @@ pub struct ExecutionResult {
     pub logs: Vec<BuildLogLine>,
 }
 
-pub fn execute(build: &ClaimedBuild) -> ExecutionResult {
+/// Runs a build this crate can run by itself. Kinds that need a managed machine — an Apple
+/// archive — return `None`, and the client that owns the machines executes them.
+pub fn execute(build: &ClaimedBuild) -> Option<ExecutionResult> {
     match build.kind {
-        BuildKind::Diagnostics => execute_diagnostics(build.next_log_sequence),
+        BuildKind::Diagnostics => Some(execute_diagnostics(build.next_log_sequence)),
+        BuildKind::AppleArchive => None,
     }
 }
 
