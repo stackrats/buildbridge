@@ -23,6 +23,12 @@ const state = reactive({
     deleting: false,
     error: null as string | null,
     notice: null as string | null,
+    /**
+     * The kit an error or notice is about, when it is about one. The page shows such a message
+     * inside that kit's card, where the button that caused it is, rather than at the top of the
+     * page where a refusal from Apple went unnoticed.
+     */
+    messageKitId: null as string | null,
     verification: null as AppleTeamVerification | null,
     verificationMachineId: null as string | null,
     verifying: false,
@@ -70,6 +76,7 @@ export function useSigningStore() {
             state.saving = true;
             state.error = null;
             state.notice = null;
+            state.messageKitId = null;
             try {
                 state.kits = await useBackend().saveSigningKit(input);
                 state.notice = input.kitId
@@ -89,6 +96,7 @@ export function useSigningStore() {
             state.deleting = true;
             state.error = null;
             state.notice = null;
+            state.messageKitId = null;
             try {
                 state.kits = await useBackend().deleteSigningKit(kitId);
                 state.verification = null;
@@ -150,6 +158,8 @@ export function useSigningStore() {
         async createCertificate(kitId: string): Promise<boolean> {
             state.creatingCertificateKitId = kitId;
             state.error = null;
+            state.notice = null;
+            state.messageKitId = kitId;
             try {
                 const result = await useBackend().createAppleCertificate(kitId);
                 const index = state.kits.findIndex((kit) => kit.id === result.kit.id);
@@ -176,6 +186,8 @@ export function useSigningStore() {
         async createDevelopmentCertificate(kitId: string): Promise<boolean> {
             state.creatingDevelopmentCertificateKitId = kitId;
             state.error = null;
+            state.notice = null;
+            state.messageKitId = kitId;
             try {
                 const result = await useBackend().createAppleDevelopmentCertificate(kitId);
                 const index = state.kits.findIndex((kit) => kit.id === result.kit.id);
@@ -221,6 +233,7 @@ export function useSigningStore() {
         clearMessages(): void {
             state.error = null;
             state.notice = null;
+            state.messageKitId = null;
         },
     };
 }

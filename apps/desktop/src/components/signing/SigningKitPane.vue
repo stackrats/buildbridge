@@ -169,8 +169,10 @@ const orphaned = computed(() =>
             </p>
         </Callout>
 
-        <Callout v-if="signing.state.error" tone="danger">{{ signing.state.error }}</Callout>
-        <Callout v-else-if="signing.state.notice" tone="ok">{{ signing.state.notice }}</Callout>
+        <template v-if="signing.state.messageKitId === null">
+            <Callout v-if="signing.state.error" tone="danger">{{ signing.state.error }}</Callout>
+            <Callout v-else-if="signing.state.notice" tone="ok">{{ signing.state.notice }}</Callout>
+        </template>
 
         <EmptyState
             v-if="!signing.kits.value.length && !signing.state.loading"
@@ -229,6 +231,16 @@ const orphaned = computed(() =>
                     <Trash2 class="h-3.5 w-3.5 text-red-700 dark:text-red-400" />
                     Remove
                 </Button>
+            </template>
+
+            <!-- A message about this kit sits beside the button that produced it. -->
+            <template v-if="signing.state.messageKitId === kit.id">
+                <Callout v-if="signing.state.error" tone="danger" class="mb-3">
+                    {{ signing.state.error }}
+                </Callout>
+                <Callout v-else-if="signing.state.notice" tone="ok" class="mb-3">
+                    {{ signing.state.notice }}
+                </Callout>
             </template>
 
             <KeyValue :items="detailsFor(kit)" :columns="3" />

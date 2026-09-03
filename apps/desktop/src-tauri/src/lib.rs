@@ -1910,19 +1910,60 @@ async fn create_apple_certificate_command(
     if !input.confirmed {
         return Err("Confirm the Apple certificate creation before continuing.".to_string());
     }
-    let mut kit = read_signing_kits()
-        .await?
-        .kits
-        .into_iter()
+    let kits = read_signing_kits().await?.kits;
+    let mut kit = kits
+        .iter()
         .find(|kit| kit.id == kit_id)
+        .cloned()
         .ok_or_else(|| "This signing kit is no longer stored.".to_string())?;
-    let (certificate, saved_path) = create_apple_certificate_for_kit(&app, &mut kit, kind).await?;
+    let (certificate, saved_path) = create_apple_certificate_for_kit(&app, &mut kit, kind)
+        .await
+        .map_err(|error| {
+            with_other_kit_hint(
+                error,
+                kind,
+                &kits_holding_distribution_identity(&kits, &kit_id),
+            )
+        })?;
 
     Ok(CreateAppleCertificateResult {
         certificate,
         saved_path,
         kit: summarize_signing_kit(&kit),
     })
+}
+
+/// The other kits on this host that already hold a distribution identity. When Apple refuses a
+/// second distribution certificate, the one it counts is usually in one of these.
+fn kits_holding_distribution_identity(kits: &[StoredSigningKit], except_id: &str) -> Vec<String> {
+    kits.iter()
+        .filter(|kit| kit.id != except_id && kit.signing_certificate_path.is_some())
+        .map(|kit| kit.name.clone())
+        .collect()
+}
+
+/// Apple's refusal says to revoke or export; if another kit here already holds the identity
+/// Apple is counting, the right move is to attach that kit instead, so the message says so.
+fn with_other_kit_hint(
+    error: String,
+    kind: apple_api::CertificateKind,
+    holders: &[String],
+) -> String {
+    if kind != apple_api::CertificateKind::Distribution
+        || holders.is_empty()
+        || !error.contains("refused to issue another distribution certificate")
+    {
+        return error;
+    }
+    let holders = holders.join(", ");
+    let verb = if holders.contains(", ") {
+        "already hold"
+    } else {
+        "already holds"
+    };
+    format!(
+        "{error} On this host, {holders} {verb} a distribution identity for this team; attach that kit to the machine instead of creating a second certificate."
+    )
 }
 
 /// Creates an identity of one kind for a kit without a Mac anywhere: the private key is
@@ -5877,6 +5918,54 @@ mod tests {
             development_certificate_path: String::new(),
             development_certificate_password: String::new(),
         }
+    }
+
+    #[test]
+    fn a_refused_distribution_certificate_names_the_kit_that_already_holds_one() {
+        let refusal =
+            "Apple refused to issue another distribution certificate. Apple says: current."
+                .to_string();
+        let hinted = with_other_kit_hint(
+            refusal.clone(),
+            apple_api::CertificateKind::Distribution,
+            &["Dist kit".to_string()],
+        );
+        assert!(hinted.starts_with(&refusal));
+        assert!(hinted.contains("Dist kit already holds a distribution identity"));
+        assert!(hinted.contains("attach that kit"));
+
+        let two = with_other_kit_hint(
+            refusal.clone(),
+            apple_api::CertificateKind::Distribution,
+            &["A".to_string(), "B".to_string()],
+        );
+        assert!(two.contains("A, B already hold"));
+
+        // No holders, a different kind, or a different error: untouched.
+        assert_eq!(
+            with_other_kit_hint(
+                refusal.clone(),
+                apple_api::CertificateKind::Distribution,
+                &[]
+            ),
+            refusal
+        );
+        assert_eq!(
+            with_other_kit_hint(
+                refusal.clone(),
+                apple_api::CertificateKind::Development,
+                &["Dist kit".to_string()]
+            ),
+            refusal
+        );
+        assert_eq!(
+            with_other_kit_hint(
+                "Apple rejected the Team API key.".to_string(),
+                apple_api::CertificateKind::Distribution,
+                &["Dist kit".to_string()]
+            ),
+            "Apple rejected the Team API key."
+        );
     }
 
     #[test]
