@@ -29,17 +29,19 @@ pub use device_run::{
     DeveloperModeState, GuestDevice, PairingState, TransportType, TunnelState, list_guest_devices,
 };
 pub use disk::{
-    ContainerLayout, DISK_IMAGE_NAME, DISK_NVRAM_NAME, DiskMigrationPhase, DiskMigrationProgress,
-    MachineDisk, ensure_machine_disk, inspect_container_layout, migrate_disk_to_host,
-    remove_machine_disk, required_free_bytes, validate_bind_path,
+    BootUsbPhase, BootUsbProgress, ContainerLayout, DISK_IMAGE_NAME, DISK_NVRAM_NAME,
+    DiskMigrationPhase, DiskMigrationProgress, MachineDisk, ensure_machine_disk,
+    inspect_container_layout, migrate_disk_to_host, remove_machine_disk, required_free_bytes,
+    set_boot_usb_device, validate_bind_path,
 };
+use qmp::{IPHONE_QMP_DEVICE_ID, USB_XHCI_BUS};
 pub use qmp::{QMP_CONTAINER_DIR, QMP_SOCKET_NAME};
 pub use usb::{
-    AttachedUsbDevice, ContainerUsbOptions, HostUsbDevice, HostUsbStatus, MachineUsbStatus,
-    USB_UDEV_RULE, USB_UDEV_RULE_PATH, UdevRuleState, UsbHolder, attach_usb_device,
-    attached_usb_device, detach_usb_device, host_usb_status, install_iphone_udev_rule,
-    is_apple_mobile_product, machine_usb_status, remove_iphone_udev_rule, resolve_usb_options,
-    valid_usb_port_path,
+    AttachedUsbDevice, BootUsbDevice, BootUsbSummary, ContainerUsbOptions, HostUsbDevice,
+    HostUsbStatus, MachineUsbStatus, USB_UDEV_RULE, USB_UDEV_RULE_PATH, UdevRuleState, UsbHolder,
+    attach_usb_device, attached_usb_device, detach_usb_device, host_usb_status,
+    install_iphone_udev_rule, is_apple_mobile_product, machine_usb_status, remove_iphone_udev_rule,
+    resolve_usb_options, valid_usb_port_path,
 };
 
 /// Identifier of the builder that existed before BuildBridge kept a machine registry.
@@ -6817,9 +6819,7 @@ fn create_args(
         format!("--env=CORES={}", config.cpu_cores),
         "--env=WIDTH=1280".to_string(),
         "--env=HEIGHT=720".to_string(),
-        format!(
-            "--env=EXTRA=-display gtk,zoom-to-fit=on -qmp unix:{QMP_CONTAINER_DIR}/{QMP_SOCKET_NAME},server,nowait"
-        ),
+        format!("--env=EXTRA={}", qemu_extra_args(usb)),
         format!("--env=SHORTNAME={}", config.macos_release.short_name()),
         "--env=CPU=Haswell-noTSX".to_string(),
         "--env=CPUID_FLAGS=kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on".to_string(),
@@ -6834,6 +6834,28 @@ fn create_args(
     ]);
 
     args
+}
+
+/// QEMU's extra arguments: the console, the control socket, and — when a phone is attached at
+/// boot — the phone itself. The image's launch script word-splits this, so every value here is
+/// either fixed text or already validated to contain no spaces.
+///
+/// The boot device deliberately leaves `guest-reset` at QEMU's default. Hot-plugging sets it
+/// off, because a reset mid-handover leaves the phone unreadable; at boot the opposite is true,
+/// since macOS must reset the port to enumerate the device at all.
+fn qemu_extra_args(usb: Option<&ContainerUsbOptions>) -> String {
+    let mut extra = format!(
+        "-display gtk,zoom-to-fit=on -qmp unix:{QMP_CONTAINER_DIR}/{QMP_SOCKET_NAME},server,nowait"
+    );
+    if let Some(boot) = usb.and_then(|usb| usb.boot_device.as_ref()) {
+        extra.push_str(&format!(
+            " -device usb-host,id={IPHONE_QMP_DEVICE_ID},bus={USB_XHCI_BUS},hostbus={},hostport={}",
+            boot.bus(),
+            boot.port()
+        ));
+    }
+
+    extra
 }
 
 fn run_docker(operation: &'static str, args: &[String]) -> Result<Output, ProviderError> {
@@ -6969,7 +6991,10 @@ mod tests {
             Path::new("/tmp/buildbridge/identity.env"),
             &disk,
             Path::new("/tmp/buildbridge/qmp"),
-            Some(&ContainerUsbOptions { plugdev_gid: 46 }),
+            Some(&ContainerUsbOptions {
+                plugdev_gid: 46,
+                boot_device: None,
+            }),
         );
 
         assert_eq!(args.first().map(String::as_str), Some("create"));
@@ -7442,6 +7467,33 @@ mod tests {
             ))
         );
         assert!(apple_platform_progress("Finding content...").is_none());
+    }
+
+    #[test]
+    fn a_phone_attached_at_boot_joins_qemus_command_line_and_nothing_else_changes() {
+        let plain = qemu_extra_args(Some(&ContainerUsbOptions {
+            plugdev_gid: 46,
+            boot_device: None,
+        }));
+        assert!(!plain.contains("usb-host"));
+        assert!(plain.contains("-qmp unix:"));
+
+        let attached = qemu_extra_args(Some(&ContainerUsbOptions {
+            plugdev_gid: 46,
+            boot_device: Some(BootUsbDevice::new(3, "9").expect("a port")),
+        }));
+        assert!(
+            attached.starts_with(&plain),
+            "the console and socket are kept"
+        );
+        assert!(
+            attached
+                .contains("-device usb-host,id=buildbridge-iphone,bus=xhci.0,hostbus=3,hostport=9")
+        );
+        // Hot-plug turns the guest reset off; at boot macOS must be allowed to reset the port.
+        assert!(!attached.contains("guest-reset"));
+        // The launch script word-splits this, so a stray quote or semicolon would be a hole.
+        assert!(!attached.contains('\'') && !attached.contains(';') && !attached.contains("$("));
     }
 
     #[test]

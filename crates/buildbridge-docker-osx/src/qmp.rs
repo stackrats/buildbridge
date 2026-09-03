@@ -155,6 +155,14 @@ impl QmpClient {
         }
     }
 
+    /// Asks the guest to shut itself down, the way pressing a power button would. QEMU exits
+    /// once macOS has finished, so the container stopping is the signal that it worked.
+    pub fn power_down(&mut self) -> Result<(), ProviderError> {
+        self.execute(&json!({"execute": "system_powerdown"}))
+            .map(|_| ())
+            .map_err(|error| map_qmp_failure("guest shutdown", error))
+    }
+
     pub fn peripheral_ids(&mut self) -> Result<Vec<String>, ProviderError> {
         self.execute(&qom_list_request(PERIPHERAL_PATH))
             .map(|value| parse_peripheral_ids(&value))

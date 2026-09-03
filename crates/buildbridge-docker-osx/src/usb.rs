@@ -91,10 +91,56 @@ pub struct HostUsbStatus {
 }
 
 /// What a container needs at creation to reach USB devices without `--privileged`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainerUsbOptions {
     pub plugdev_gid: u32,
+    /// A phone placed on QEMU's command line before macOS boots, rather than hot-plugged into
+    /// a running guest. macOS enumerates it during its own start-up USB scan, which is the one
+    /// moment it is allowed to reset the port, so the phone comes up the way a cable into a
+    /// real Mac would. Changing it means recreating the container.
+    pub boot_device: Option<BootUsbDevice>,
+}
+
+/// A phone identified the way QEMU takes it: by the host port it is plugged into, so replugging
+/// the same socket keeps working. Validated on the way in, because it is word-split into
+/// `EXTRA` by the image's launch script and can never be quoted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootUsbDevice {
+    bus: u8,
+    port: String,
+}
+
+impl BootUsbDevice {
+    pub fn new(bus: u8, port: &str) -> Result<Self, ProviderError> {
+        if !valid_usb_port_path(port) {
+            return Err(ProviderError::UsbPassthrough(format!(
+                "{port} is not a USB port path"
+            )));
+        }
+
+        Ok(Self {
+            bus,
+            port: port.to_string(),
+        })
+    }
+
+    pub fn bus(&self) -> u8 {
+        self.bus
+    }
+
+    pub fn port(&self) -> &str {
+        &self.port
+    }
+}
+
+/// The phone a container was created with, as the interface reads it back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootUsbSummary {
+    pub bus: u8,
+    pub port: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -116,6 +162,9 @@ pub struct MachineUsbStatus {
     pub container_issue: Option<String>,
     pub qmp_reachable: bool,
     pub attached: Option<AttachedUsbDevice>,
+    /// The phone this container was created with, if any. Letting that one go means recreating
+    /// the container, which is a different action from unplugging a hot-plugged phone.
+    pub boot_usb: Option<BootUsbSummary>,
 }
 
 /// Apple's mobile devices in normal mode: vendor `05ac`, products `1290`–`12af`. Recovery
@@ -239,7 +288,10 @@ pub fn resolve_usb_options() -> Option<ContainerUsbOptions> {
     }
     let groups = fs::read_to_string("/etc/group").ok()?;
 
-    parse_group_id(&groups, PLUGDEV_GROUP).map(|plugdev_gid| ContainerUsbOptions { plugdev_gid })
+    parse_group_id(&groups, PLUGDEV_GROUP).map(|plugdev_gid| ContainerUsbOptions {
+        plugdev_gid,
+        boot_device: None,
+    })
 }
 
 /// Every Apple mobile device on the host, with what stands between it and the guest.
@@ -565,10 +617,18 @@ pub fn machine_usb_status(
         ContainerState::Missing | ContainerState::Unavailable => None,
         _ => inspect_container_layout(container_name).ok().flatten(),
     };
-    let disk_on_host = layout.is_some_and(|layout| layout.disk_on_host);
+    let disk_on_host = layout.as_ref().is_some_and(|layout| layout.disk_on_host);
     let container_ready = layout
+        .as_ref()
         .is_some_and(|layout| layout.disk_on_host && layout.usb_access && layout.control_socket);
-    let container_issue = match (state, layout) {
+    let boot_usb = layout
+        .as_ref()
+        .and_then(|layout| layout.boot_usb.clone())
+        .map(|device| BootUsbSummary {
+            bus: device.bus(),
+            port: device.port().to_string(),
+        });
+    let container_issue = match (state, layout.as_ref()) {
         (ContainerState::Unavailable, _) => {
             Some("Docker is unavailable, so the container cannot be inspected.".to_string())
         }
@@ -591,6 +651,7 @@ pub fn machine_usb_status(
         container_issue,
         qmp_reachable,
         attached,
+        boot_usb,
     }
 }
 
@@ -716,6 +777,22 @@ mod tests {
         );
         for arg in args.iter().chain(remove_rule_args().iter()) {
             assert!(!arg.contains(';') && !arg.contains("$(") && !arg.contains(' '));
+        }
+    }
+
+    #[test]
+    fn a_boot_device_takes_only_a_real_port_path() {
+        let device = BootUsbDevice::new(3, "9").expect("a plain port");
+        assert_eq!(device.bus(), 3);
+        assert_eq!(device.port(), "9");
+        assert!(BootUsbDevice::new(3, "2.3.1").is_ok());
+        // EXTRA is word-split by the launch script, so nothing that could become a second
+        // argument or a shell fragment may pass.
+        for rejected in ["", "9 -drive", "9;rm", "0", "9.0", "-1", "$(id)"] {
+            assert!(
+                BootUsbDevice::new(3, rejected).is_err(),
+                "{rejected} must be refused"
+            );
         }
     }
 
