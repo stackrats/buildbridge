@@ -12,7 +12,7 @@ import {
     saveSidebarWidth,
 } from '../lib/prefs';
 
-export type LogSource = 'activity' | 'build' | 'archive' | 'console';
+export type LogSource = 'activity' | 'build' | 'archive' | 'device' | 'console';
 
 export type Route =
     | { kind: 'home' }

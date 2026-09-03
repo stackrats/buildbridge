@@ -19,6 +19,7 @@ const {
     state = 'running',
     stoppable = false,
     stopping = false,
+    stopTitle = 'Stop this operation. Nothing already retained is affected.',
 } = defineProps<{
     label: string;
     detail?: string | null;
@@ -32,6 +33,8 @@ const {
     /** Shows a Stop button that emits `stop`; the operation ends as stopped, not failed. */
     stoppable?: boolean;
     stopping?: boolean;
+    /** What Stop does here, when it is not the default "nothing retained is affected". */
+    stopTitle?: string;
 }>();
 
 const emit = defineEmits<{ stop: [] }>();
@@ -62,7 +65,7 @@ const emit = defineEmits<{ stop: [] }>();
                 size="sm"
                 class="shrink-0"
                 :disabled="stopping"
-                title="Stop this operation. Nothing already retained is affected."
+                :title="stopTitle"
                 @click="emit('stop')"
             >
                 <Spinner v-if="stopping" />

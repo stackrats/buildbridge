@@ -54,9 +54,14 @@ const summaries = computed<Partial<Record<StepPhase, string>>>(() => {
         ]
             .filter(Boolean)
             .join(' · '),
-        build: current.archive
-            ? `${current.archive.marketingVersion} (${current.archive.buildNumber}) · IPA ${formatBytes(current.archive.ipa.bytes)}`
-            : '',
+        build: [
+            current.archive
+                ? `${current.archive.marketingVersion} (${current.archive.buildNumber}) · IPA ${formatBytes(current.archive.ipa.bytes)}`
+                : null,
+            current.deviceRun ? `ran on ${current.deviceRun.device.name}` : null,
+        ]
+            .filter(Boolean)
+            .join(' · '),
     };
 });
 const runningSeconds = computed(() =>
@@ -76,7 +81,14 @@ const selected = computed<JourneyStepId | null>({
         if (chosen && steps.value.some((step) => step.id === chosen)) {
             return chosen as JourneyStepId;
         }
-        return focus.value?.id ?? steps.value.at(-1)?.id ?? null;
+        // With nothing to do, land on the last thing achieved or the last required step, so a
+        // finished machine opens on its artifacts rather than on an optional experiment.
+        return (
+            focus.value?.id ??
+            [...steps.value].reverse().find((step) => step.status === 'done' || !step.optional)
+                ?.id ??
+            null
+        );
     },
     set: (value) => ui.selectStep(machineId, value),
 });

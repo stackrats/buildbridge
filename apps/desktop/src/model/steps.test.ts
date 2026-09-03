@@ -64,6 +64,7 @@ function baseView(overrides: Partial<MacBuilderView> = {}): MacBuilderView {
                 xcodeSelected: false,
                 issue: null,
             },
+            devices: [],
         },
         appleWorkspace: null,
         signing: null,
@@ -71,6 +72,24 @@ function baseView(overrides: Partial<MacBuilderView> = {}): MacBuilderView {
         archiveEnvSet: null,
         archiveError: null,
         logs: [],
+        usb: {
+            host: {
+                supported: true,
+                rule: 'missing',
+                rulePath: '/etc/udev/rules.d/40-buildbridge-iphone.rules',
+                usbmuxdActive: true,
+                plugdevGid: 46,
+                devices: [],
+                issues: [],
+            },
+            diskOnHost: false,
+            containerReady: false,
+            containerIssue: null,
+            qmpReachable: false,
+            attached: null,
+        },
+        deviceRun: null,
+        deviceRunError: null,
         ...overrides,
     };
 }
@@ -220,6 +239,7 @@ function provisionedView(): MacBuilderView {
         developmentTeam: 'TEAM123456',
         bundleIdentifier: 'com.example.app',
         profiles: [],
+        developmentIdentity: null,
     };
     return view;
 }
@@ -259,6 +279,7 @@ describe('deriveBuildSteps', () => {
             ['signing-kit', 'active'],
             ['provision', 'pending'],
             ['archive', 'pending'],
+            ['run-device', 'pending'],
         ]);
         expect(focusStep(steps)?.id).toBe('signing-kit');
         expect(steps.find((step) => step.id === 'provision')?.summary).toBe(
@@ -295,6 +316,9 @@ describe('deriveBuildSteps', () => {
             guestKeychainConfigured: true,
             createdAtEpochSeconds: 0,
             attachedMachines: ['Local macOS builder'],
+            developmentCertificateConfigured: false,
+            developmentCertificateName: null,
+            developmentCertificatePasswordStored: false,
         };
         view.signing = {
             keychainPath: '/k',
@@ -305,6 +329,7 @@ describe('deriveBuildSteps', () => {
             developmentTeam: 'TEAM123456',
             bundleIdentifier: 'nz.co.example.app',
             profiles: [],
+            developmentIdentity: null,
         };
 
         const steps = deriveBuildSteps(view, { runningStep: null });
@@ -380,6 +405,9 @@ describe('deriveBuildSteps', () => {
             guestKeychainConfigured: true,
             createdAtEpochSeconds: 0,
             attachedMachines: ['macOS builder'],
+            developmentCertificateConfigured: false,
+            developmentCertificateName: null,
+            developmentCertificatePasswordStored: false,
         };
 
         const steps = deriveBuildSteps(view, { runningStep: null });
@@ -393,7 +421,7 @@ describe('deriveJourney', () => {
     it('is thirteen steps, setup then build, each tagged with its phase', () => {
         const steps = deriveJourney(baseView(), { runningStep: null });
 
-        expect(steps).toHaveLength(13);
+        expect(steps).toHaveLength(14);
         expect(steps.slice(0, 7).every((step) => step.phase === 'setup')).toBe(true);
         expect(steps.slice(7).every((step) => step.phase === 'build')).toBe(true);
     });
@@ -442,6 +470,8 @@ function summary(overrides: Partial<MachineSummary> = {}): MachineSummary {
         signingIdentity: null,
         archiveRetained: false,
         envSetName: null,
+        usbReady: false,
+        deviceRunRetained: false,
         ...overrides,
     };
 }
@@ -450,7 +480,7 @@ describe('summarizeJourney', () => {
     it('reads a fresh machine as ready to start', () => {
         const steps = summarizeJourney(summary(), readyHost);
 
-        expect(steps).toHaveLength(13);
+        expect(steps).toHaveLength(14);
         expect(focusStep(steps)?.id).toBe('launch');
         expect(steps.filter((step) => step.status === 'done').map((step) => step.id)).toEqual([
             'host',
@@ -471,6 +501,7 @@ describe('summarizeJourney', () => {
                 signingProvisioned: true,
                 signingIdentity: 'iPhone Distribution: Example',
                 archiveRetained: true,
+                deviceRunRetained: true,
             }),
             readyHost,
         );
@@ -531,9 +562,138 @@ describe('journeyHeadline', () => {
             guestKeychainConfigured: true,
             createdAtEpochSeconds: 0,
             attachedMachines: ['Local macOS builder'],
+            developmentCertificateConfigured: false,
+            developmentCertificateName: null,
+            developmentCertificatePasswordStored: false,
         };
         expect(journeyHeadline(deriveJourney(view, { runningStep: null }))).toBe(
             'signed 3.2.0 (15)',
         );
+    });
+});
+
+describe('run on the device', () => {
+    const at = (view: MacBuilderView, runningStep: string | null = null) =>
+        deriveJourney(view, { runningStep }).find((step) => step.id === 'run-device')!;
+    /** Provisioned with a complete kit attached, so the archive is the only required step left. */
+    const kittedView = () => {
+        const view = provisionedView();
+        view.signingKit = {
+            id: 'team',
+            name: 'Example team',
+            appStoreConnectConfigured: true,
+            appStoreConnectKeyId: 'KEYID12345',
+            signingCertificateConfigured: true,
+            signingCertificateName: 'dist.p12',
+            signingCertificatePasswordStored: true,
+            provisioningProfileNames: ['app.mobileprovision'],
+            guestKeychainConfigured: true,
+            createdAtEpochSeconds: 0,
+            attachedMachines: ['Local macOS builder'],
+            developmentCertificateConfigured: false,
+            developmentCertificateName: null,
+            developmentCertificatePasswordStored: false,
+        };
+        return view;
+    };
+
+    it('waits for signing like the archive does', () => {
+        const step = at(baseView());
+        expect(step.status).toBe('pending');
+        expect(step.summary).toBe('after signing is provisioned');
+        expect(step.optional).toBe(true);
+        expect(step.experimental).toBe(true);
+    });
+
+    it('opens with the archive but never takes the focus from it', () => {
+        const view = kittedView();
+        const steps = deriveJourney(view, { runningStep: null });
+        const step = steps.find((candidate) => candidate.id === 'run-device')!;
+        expect(step.status).toBe('active');
+        expect(step.summary).toContain('udev rule');
+        expect(focusStep(steps)?.id).toBe('archive');
+    });
+
+    it('leaves the headline to the signed archive once that is retained', () => {
+        const view = kittedView();
+        view.archive = {
+            scheme: 'App',
+            configuration: 'Release',
+            exportMethod: 'app-store-connect',
+            bundleIdentifier: 'com.example.app',
+            developmentTeam: 'TEAM123456',
+            marketingVersion: '3.2.0',
+            buildNumber: '15',
+            provisioningProfileUuid: 'uuid',
+            ipa: { path: '/a.ipa', bytes: 10, sha256: 'a' },
+            archive: { path: '/a.zip', bytes: 20, sha256: 'b' },
+            outputTail: [],
+        };
+        const steps = deriveJourney(view, { runningStep: null });
+        expect(steps.find((step) => step.id === 'run-device')?.status).toBe('active');
+        expect(focusStep(steps)).toBeNull();
+        expect(journeyHeadline(steps)).toBe('signed 3.2.0 (15)');
+    });
+
+    it('describes the running operation from the facts', () => {
+        const step = at(provisionedView(), 'run-device');
+        expect(step.status).toBe('running');
+        expect(step.summary).toContain('udev rule');
+    });
+
+    it('is done with the last run and failed when the last run failed', () => {
+        const view = provisionedView();
+        view.deviceRun = {
+            device: {
+                identifier: 'E3F1A2B4-5C6D-4E7F-8A9B-0C1D2E3F4A5B',
+                udid: '00008030-000A1B2C3D4E5F6A',
+                name: 'Matt’s iPhone',
+                osVersion: '18.6',
+                model: 'iPhone 15 Pro',
+                developerMode: 'enabled',
+                pairingState: 'paired',
+                tunnelState: 'connected',
+                transportType: 'wired',
+                ready: true,
+                issue: null,
+            },
+            bundleIdentifier: 'com.example.app',
+            appPath: '/Users/builder/App.app',
+            marketingVersion: '3.2.0',
+            buildNumber: '15',
+            provisioningProfileUuid: '22222222-3333-4444-5555-666666666666',
+            installedAtEpochSeconds: Math.floor(Date.now() / 1000) - 120,
+            consoleEnd: 'stopped',
+            exitStatus: null,
+            reattached: false,
+            buildTail: [],
+            consoleTail: [],
+        };
+        const done = at(view);
+        expect(done.status).toBe('done');
+        expect(done.summary).toContain('Matt’s iPhone · 3.2.0 (15)');
+
+        view.deviceRunError = 'devicectl: install failed';
+        const steps = deriveJourney(view, { runningStep: null });
+        expect(steps.find((step) => step.id === 'run-device')?.status).toBe('failed');
+        expect(focusStep(steps)?.id).toBe('run-device');
+    });
+
+    it('is blocked with the archive when the kit is gone', () => {
+        const view = provisionedView();
+        view.signingHealth = 'kit_missing';
+        expect(at(view).summary).toContain('Blocked');
+    });
+
+    it('is the last coarse row, pending until a run was retained', () => {
+        const fresh = summarizeJourney(summary(), readyHost).at(-1)!;
+        expect(fresh.id).toBe('run-device');
+        expect(fresh.optional).toBe(true);
+        expect(fresh.status).toBe('pending');
+        expect(fresh.summary).toBe('after signing is provisioned');
+
+        const retained = summarizeJourney(summary({ deviceRunRetained: true }), readyHost).at(-1)!;
+        expect(retained.status).toBe('done');
+        expect(retained.summary).toBe('Ran on the iPhone');
     });
 });

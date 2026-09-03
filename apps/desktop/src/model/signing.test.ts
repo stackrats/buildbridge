@@ -23,6 +23,9 @@ function storedKit(overrides: Partial<SigningKitSummary> = {}): SigningKitSummar
         guestKeychainConfigured: false,
         createdAtEpochSeconds: 0,
         attachedMachines: [],
+        developmentCertificateConfigured: false,
+        developmentCertificateName: null,
+        developmentCertificatePasswordStored: false,
         ...overrides,
     };
 }

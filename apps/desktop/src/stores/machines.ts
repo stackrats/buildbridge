@@ -11,7 +11,10 @@ import type { LogLine } from '../components/ui/LogView.vue';
 import { deriveJourney, summarizeJourney, type JourneyStep } from '../model/steps';
 import type {
     AppleArchiveProgress,
+    AppleDeviceRunProgress,
     AppleProjectProgress,
+    DeviceSigningProgress,
+    DiskMigrationProgress,
     GuestOptimizationsView,
     ImportMacXcodeResult,
     LaunchProgress,
@@ -46,7 +49,14 @@ export type OperationId =
     | 'clear-archive'
     | 'discard'
     | 'delete'
-    | 'optimize';
+    | 'optimize'
+    | 'usb-rule'
+    | 'usb-migrate'
+    | 'usb-attach'
+    | 'usb-detach'
+    | 'device-signing'
+    | 'run-device'
+    | 'clear-device-run';
 
 /** Maps the native busy key (see src-tauri/src/lib.rs) to the step it blocks. */
 const busyKeyStep: Record<string, string> = {
@@ -61,6 +71,12 @@ const busyKeyStep: Record<string, string> = {
     archiving: 'archive',
     deleting: 'launch',
     discarding: 'launch',
+    migrating_usb: 'run-device',
+    attaching_usb: 'run-device',
+    detaching_usb: 'run-device',
+    listing_devices: 'run-device',
+    preparing_device_signing: 'run-device',
+    running_on_device: 'run-device',
 };
 
 export const busyKeyLabel: Record<string, string> = {
@@ -76,6 +92,12 @@ export const busyKeyLabel: Record<string, string> = {
     deleting: 'Deleting the machine',
     discarding: 'Discarding the container',
     optimizing: 'Applying an optimization',
+    migrating_usb: 'Enabling USB on the machine',
+    attaching_usb: 'Attaching the iPhone',
+    detaching_usb: 'Detaching the iPhone',
+    listing_devices: 'Reading the phones the guest sees',
+    preparing_device_signing: 'Preparing device signing',
+    running_on_device: 'Running on the device',
 };
 
 const operationStep: Partial<Record<OperationId, string>> = {
@@ -88,6 +110,12 @@ const operationStep: Partial<Record<OperationId, string>> = {
     provision: 'provision',
     'clear-signing': 'provision',
     archive: 'archive',
+    'usb-rule': 'run-device',
+    'usb-migrate': 'run-device',
+    'usb-attach': 'run-device',
+    'usb-detach': 'run-device',
+    'device-signing': 'run-device',
+    'run-device': 'run-device',
 };
 
 const LOG_LIMIT = 600;
@@ -113,8 +141,13 @@ export interface MachineSession {
     signing: SigningProvisioningProgress | null;
     project: AppleProjectProgress | null;
     archive: AppleArchiveProgress | null;
+    usbMigration: DiskMigrationProgress | null;
+    deviceSigning: DeviceSigningProgress | null;
+    device: AppleDeviceRunProgress | null;
     buildLog: LogLine[];
     archiveLog: LogLine[];
+    /** The app's own console while it runs on the phone. */
+    deviceLog: LogLine[];
     activity: LogLine[];
     lastFailure: { operation: OperationId; message: string; at: number } | null;
 }
@@ -151,8 +184,12 @@ function createSession(id: string): MachineSession {
         signing: null,
         project: null,
         archive: null,
+        usbMigration: null,
+        deviceSigning: null,
+        device: null,
         buildLog: [],
         archiveLog: [],
+        deviceLog: [],
         activity: [],
         lastFailure: null,
     };
@@ -228,7 +265,12 @@ async function runOperation<R extends OperationResult>(
     id: string,
     operation: OperationId,
     work: () => Promise<R>,
-    options: { started?: string; finished?: string | ((result: R) => string) } = {},
+    options: {
+        started?: string;
+        finished?: string | ((result: R) => string);
+        /** What a stop means for this operation, when it is not "nothing changed". */
+        stopped?: string;
+    } = {},
 ): Promise<R | null> {
     const target = session(id);
     if (target.operation !== null) {
@@ -257,7 +299,7 @@ async function runOperation<R extends OperationResult>(
         const message = describeError(error);
         if (target.cancelling || message === 'Stopped.') {
             // A stop the user asked for is an outcome, not a failure.
-            target.notice = 'Stopped. Nothing already retained was changed.';
+            target.notice = options.stopped ?? 'Stopped. Nothing already retained was changed.';
             note(target, 'Stopped by request.');
             return null;
         }
@@ -329,6 +371,38 @@ async function listenForEvents(): Promise<void> {
                 }
                 if (event.logLine) {
                     pushBounded(target.archiveLog, { text: event.logLine }, LOG_LIMIT);
+                }
+            }),
+            backend.onUsbMigrationProgress((event) => {
+                const target = session(event.machineId);
+                const phaseChanged = target.usbMigration?.phase !== event.phase;
+                target.usbMigration = event;
+                if (phaseChanged) {
+                    note(target, event.detail);
+                }
+            }),
+            backend.onDeviceSigningProgress((event) => {
+                const target = session(event.machineId);
+                const phaseChanged = target.deviceSigning?.phase !== event.phase;
+                target.deviceSigning = event;
+                if (phaseChanged) {
+                    note(target, event.detail);
+                }
+            }),
+            backend.onDeviceProgress((event) => {
+                const target = session(event.machineId);
+                const phaseChanged = target.device?.phase !== event.phase;
+                target.device = event;
+                if (phaseChanged) {
+                    pushBounded(
+                        target.deviceLog,
+                        { text: `— ${event.detail}`, tone: 'system' },
+                        LOG_LIMIT,
+                    );
+                }
+                // The app console is not throttled like build output: every line lands.
+                for (const line of event.logLines) {
+                    pushBounded(target.deviceLog, { text: line }, LOG_LIMIT);
                 }
             }),
             backend.onDragDrop((event: DragDropEvent) => {
@@ -639,6 +713,122 @@ export function useMachinesStore() {
             runOperation(id, 'discard', () => useBackend().discardMachineContainer(id), {
                 finished: 'Container discarded. The next start creates a fresh macOS disk.',
             }),
+        installUsbRule: (id: string) =>
+            runOperation(
+                id,
+                'usb-rule',
+                async () => {
+                    await useBackend().installUsbReleaseRule();
+                    return useBackend().getMachine(id);
+                },
+                {
+                    started:
+                        'Installing the USB release rule; a system prompt asks for authorization',
+                    finished:
+                        'USB release rule installed. Unplug the iPhone and plug it in again so it applies.',
+                },
+            ),
+        removeUsbRule: (id: string) =>
+            runOperation(
+                id,
+                'usb-rule',
+                async () => {
+                    await useBackend().removeUsbReleaseRule();
+                    return useBackend().getMachine(id);
+                },
+                {
+                    finished:
+                        'USB release rule removed. usbmuxd handles iPhones on this host again.',
+                },
+            ),
+        migrateForUsb: async (id: string) => {
+            session(id).usbMigration = null;
+            return runOperation(id, 'usb-migrate', () => useBackend().migrateMachineForUsb(id), {
+                started: 'Moving the macOS disk to this host and recreating the container',
+                finished:
+                    'USB access enabled. The machine restarted from its disk on this host with its identity and signing intact.',
+            });
+        },
+        attachUsb: (id: string, bus: number, port: string) =>
+            runOperation(id, 'usb-attach', () => useBackend().attachUsbDevice(id, bus, port), {
+                started: 'Passing the iPhone into the guest',
+                finished: (view) =>
+                    view.usb.attached?.enumerated
+                        ? 'iPhone attached. Unlock it and tap Trust when it asks about this computer.'
+                        : 'The port is handed to the guest, but the phone has not shown up in it yet.',
+            }),
+        detachUsb: (id: string) =>
+            runOperation(id, 'usb-detach', () => useBackend().detachUsbDevice(id), {
+                finished: 'iPhone returned to this host. The app stays installed on it.',
+            }),
+        /** A probe like refreshMachine, not an operation: the drawer and rows do not react. */
+        refreshDevices: async (id: string) => {
+            const target = session(id);
+            if (target.operation !== null || target.refreshing) {
+                return;
+            }
+            target.refreshing = true;
+            try {
+                applyView(target, await useBackend().listGuestDevices(id));
+                target.error = null;
+            } catch (error) {
+                target.error = describeError(error);
+            } finally {
+                target.refreshing = false;
+            }
+        },
+        prepareDeviceSigning: async (id: string, udid: string, deviceName: string) => {
+            const target = session(id);
+            target.deviceSigning = null;
+            target.signing = null;
+            return runOperation(
+                id,
+                'device-signing',
+                () => useBackend().prepareAppleDeviceSigning(id, udid, deviceName),
+                {
+                    started:
+                        'Registering the iPhone at Apple and provisioning a development identity',
+                    finished: (result) =>
+                        `${deviceName} is registered and signed for. ${
+                            result.profileCreated
+                                ? 'A development profile was created.'
+                                : 'An existing development profile lists it.'
+                        }`,
+                },
+            );
+        },
+        runOnDevice: async (id: string, udid: string) => {
+            const target = session(id);
+            target.device = null;
+            target.deviceLog = [];
+            return runOperation(
+                id,
+                'run-device',
+                () => useBackend().runAppleDeviceBuild(id, udid),
+                {
+                    started: 'Building the Debug configuration for the iPhone',
+                    finished: (result) =>
+                        `${result.run.marketingVersion} (${result.run.buildNumber}) ran on ${result.run.device.name}.`,
+                    stopped:
+                        'Stopped. The app stays installed on the iPhone and the run is retained.',
+                },
+            ).then((result) => {
+                // Lines already streamed; the tail only fills a log that never saw them.
+                if (result && target.deviceLog.length === 0) {
+                    for (const line of result.run.consoleTail) {
+                        pushBounded(target.deviceLog, { text: line }, LOG_LIMIT);
+                    }
+                }
+                return result;
+            });
+        },
+        clearDeviceRun: (id: string) =>
+            runOperation(id, 'clear-device-run', () => useBackend().clearAppleDeviceRun(id), {
+                finished: 'Last device run cleared.',
+            }),
+        clearDeviceLog(id: string): void {
+            session(id).deviceLog = [];
+        },
         clearMessages(id: string): void {
             const target = session(id);
             target.error = null;

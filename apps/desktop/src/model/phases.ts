@@ -3,11 +3,47 @@
 
 import type {
     AppleArchivePhase,
+    AppleDeviceRunPhase,
     AppleProjectPhase,
+    DeviceSigningPhase,
+    DiskMigrationPhase,
     LaunchPhase,
     SigningProvisioningPhase,
     XcodeImportPhase,
 } from '../types/backend';
+
+export const usbMigrationPhaseLabel: Record<DiskMigrationPhase, string> = {
+    checking_space: 'Measuring the disk and the free space',
+    stopping: 'Stopping the machine',
+    copying_disk: 'Copying the macOS disk to this host',
+    removing: 'Removing the old container',
+    creating: 'Creating the container with USB access',
+    starting: 'Starting',
+    completed: 'USB enabled',
+};
+
+export const deviceSigningPhaseLabel: Record<DeviceSigningPhase, string> = {
+    checking_kit: 'Checking the signing kit',
+    creating_certificate: 'Creating the development identity at Apple',
+    registering_device: 'Registering the iPhone with the team',
+    checking_profiles: 'Checking development profiles',
+    creating_profile: 'Creating the development profile',
+    downloading_profile: 'Downloading the profile',
+    provisioning: 'Provisioning into the guest keychain',
+    completed: 'Ready to sign for this iPhone',
+};
+
+export const devicePhaseLabel: Record<AppleDeviceRunPhase, string> = {
+    preparing: 'Preparing the recipe',
+    building_web_assets: 'Rebuilding web assets with the env set',
+    resolving_target: 'Reading the Debug build settings',
+    building: 'Compiling for the iPhone',
+    verifying: 'Verifying the signature',
+    installing: 'Installing on the iPhone',
+    launching: 'Launching',
+    running: 'Running; console streaming',
+    completed: 'Stopped',
+};
 
 export const launchPhaseLabel: Record<LaunchPhase, string> = {
     preparing: 'Checking the host',

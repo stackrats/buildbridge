@@ -74,6 +74,24 @@ export interface Backend {
     revealArchive(machineId: string): Promise<void>;
     clearArchive(machineId: string): Promise<T.MacBuilderView>;
 
+    /** Installs the host udev rule that keeps usbmuxd off iPhones; one authorization prompt. */
+    installUsbReleaseRule(): Promise<T.HostUsbStatus>;
+    removeUsbReleaseRule(): Promise<T.HostUsbStatus>;
+    /** Moves the container's disk to the host and recreates it with USB access. */
+    migrateMachineForUsb(machineId: string): Promise<T.MacBuilderView>;
+    attachUsbDevice(machineId: string, bus: number, port: string): Promise<T.MacBuilderView>;
+    detachUsbDevice(machineId: string): Promise<T.MacBuilderView>;
+    /** Asks the guest which phones it sees; the returned view carries the fresh list. */
+    listGuestDevices(machineId: string): Promise<T.MacBuilderView>;
+    prepareAppleDeviceSigning(
+        machineId: string,
+        udid: string,
+        deviceName: string,
+    ): Promise<T.PrepareDeviceSigningResult>;
+    /** Returns when the console session ends; a Stop while running is the normal end. */
+    runAppleDeviceBuild(machineId: string, udid: string): Promise<T.RunAppleDeviceResult>;
+    clearAppleDeviceRun(machineId: string): Promise<T.MacBuilderView>;
+
     listSigningKits(): Promise<T.SigningKitSummary[]>;
     saveSigningKit(input: T.SigningKitInput): Promise<T.SigningKitSummary[]>;
     deleteSigningKit(kitId: string): Promise<T.SigningKitSummary[]>;
@@ -119,6 +137,15 @@ export interface Backend {
     ): Promise<Unlisten>;
     onArchiveProgress(
         handler: (event: T.MachineEvent<T.AppleArchiveProgress>) => void,
+    ): Promise<Unlisten>;
+    onUsbMigrationProgress(
+        handler: (event: T.MachineEvent<T.DiskMigrationProgress>) => void,
+    ): Promise<Unlisten>;
+    onDeviceSigningProgress(
+        handler: (event: T.MachineEvent<T.DeviceSigningProgress>) => void,
+    ): Promise<Unlisten>;
+    onDeviceProgress(
+        handler: (event: T.MachineEvent<T.AppleDeviceRunProgress>) => void,
     ): Promise<Unlisten>;
     onDragDrop(handler: (event: DragDropEvent) => void): Promise<Unlisten>;
 
@@ -187,6 +214,23 @@ async function createTauriBackend(): Promise<Backend> {
         revealArchive: (machineId) => invoke('reveal_apple_archive', { machineId }),
         clearArchive: (machineId) => invoke('clear_apple_archive', { machineId }),
 
+        installUsbReleaseRule: () => invoke('install_usb_release_rule'),
+        removeUsbReleaseRule: () => invoke('remove_usb_release_rule'),
+        migrateMachineForUsb: (machineId) =>
+            invoke('migrate_machine_for_usb', { machineId, input: { confirmed: true } }),
+        attachUsbDevice: (machineId, bus, port) =>
+            invoke('attach_usb_device', { machineId, input: { bus, port } }),
+        detachUsbDevice: (machineId) => invoke('detach_usb_device', { machineId }),
+        listGuestDevices: (machineId) => invoke('list_guest_devices', { machineId }),
+        prepareAppleDeviceSigning: (machineId, udid, deviceName) =>
+            invoke('prepare_apple_device_signing', {
+                machineId,
+                input: { udid, deviceName, confirmed: true },
+            }),
+        runAppleDeviceBuild: (machineId, udid) =>
+            invoke('run_apple_device_build', { machineId, input: { udid } }),
+        clearAppleDeviceRun: (machineId) => invoke('clear_apple_device_run', { machineId }),
+
         listSigningKits: () => invoke('list_signing_kits'),
         saveSigningKit: (input) => invoke('save_signing_kit', { input }),
         deleteSigningKit: (kitId) =>
@@ -229,6 +273,9 @@ async function createTauriBackend(): Promise<Backend> {
         onSigningProgress: subscribe('machine-signing-progress'),
         onProjectProgress: subscribe('machine-project-progress'),
         onArchiveProgress: subscribe('machine-archive-progress'),
+        onUsbMigrationProgress: subscribe('machine-usb-migration-progress'),
+        onDeviceSigningProgress: subscribe('machine-device-signing-progress'),
+        onDeviceProgress: subscribe('machine-device-progress'),
         pickPaths: async (request) => {
             const selection = await open({
                 title: request.title,

@@ -115,7 +115,7 @@ const wellClass =
             class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
         >
             <h2 class="text-[15px] font-semibold text-zinc-900 dark:text-zinc-50">
-                Three phases, thirteen steps, one machine
+                Two phases, fourteen steps, one machine
             </h2>
             <p class="mt-1 max-w-xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                 The machine is prepared once and then builds any number of projects. Every step says

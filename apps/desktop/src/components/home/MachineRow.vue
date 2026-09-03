@@ -5,7 +5,7 @@ import { ArrowRight, Play } from '@lucide/vue';
 import { computed } from 'vue';
 
 import { machineStateBadge, machineStateLabel } from '../../lib/status';
-import { focusStep, groupByPhase } from '../../model/steps';
+import { focusStep } from '../../model/steps';
 import { busyKeyLabel, useMachinesStore } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
 import type { MachineSummary } from '../../types/backend';
@@ -21,7 +21,6 @@ const machines = useMachinesStore();
 const host = computed(() => machines.host.value);
 const steps = computed(() => machines.journey(machine.id));
 const focus = computed(() => focusStep(steps.value));
-const complete = computed(() => groupByPhase(steps.value).every((group) => group.complete));
 const archive = computed(() => steps.value.find((step) => step.id === 'archive') ?? null);
 
 const canStart = computed(
@@ -40,7 +39,9 @@ const next = computed(() => {
         };
     }
     if (!focus.value) {
-        return complete.value && archive.value
+        // No focus with the archive done is the golden path complete; the optional device
+        // step never holds the row.
+        return archive.value?.status === 'done'
             ? {
                   title: `signed ${archive.value.summary.split(' · ')[0]}`,
                   note: 'ready to build again',

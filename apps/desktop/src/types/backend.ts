@@ -135,6 +135,73 @@ export interface MacGuestAccessView {
     publicKey: string | null;
     ssh: GuestSshStatus;
     diagnostics: GuestDiagnostics;
+    /** The phones the guest saw at its last listing; empty until one is requested. */
+    devices: GuestDevice[];
+}
+
+export interface HostUsbDevice {
+    bus: number;
+    /** The sysfs port path, which is also what QEMU is handed. */
+    port: string;
+    vendorId: string;
+    productId: string;
+    product: string | null;
+    serial: string | null;
+    manufacturer: string | null;
+    deviceNode: string;
+    /** This user can open the node, which is what the container's QEMU needs. */
+    nodeReady: boolean;
+    heldBy: 'usbmuxd' | 'this_machine' | 'other' | null;
+}
+
+export type UdevRuleState = 'missing' | 'installed' | 'modified';
+
+export interface HostUsbStatus {
+    supported: boolean;
+    rule: UdevRuleState;
+    rulePath: string;
+    usbmuxdActive: boolean;
+    plugdevGid: number | null;
+    devices: HostUsbDevice[];
+    issues: string[];
+}
+
+export interface AttachedUsbDevice {
+    bus: number;
+    port: string;
+    /** The guest has enumerated the phone; until then QEMU holds only the port. */
+    enumerated: boolean;
+    issue: string | null;
+}
+
+/** USB passthrough for one machine: the host's phones and rule, the container, the attachment. */
+export interface MachineUsbStatus {
+    host: HostUsbStatus;
+    diskOnHost: boolean;
+    containerReady: boolean;
+    containerIssue: string | null;
+    qmpReachable: boolean;
+    attached: AttachedUsbDevice | null;
+}
+
+export type DeveloperModeState = 'enabled' | 'disabled' | 'unknown';
+export type DevicePairingState = 'paired' | 'unpaired' | 'unknown';
+export type DeviceTunnelState = 'connected' | 'disconnected' | 'unavailable' | 'unknown';
+export type DeviceTransportType = 'wired' | 'local_network' | 'unknown';
+
+/** One row of `xcrun devicectl list devices` as the guest reports it. */
+export interface GuestDevice {
+    identifier: string;
+    udid: string | null;
+    name: string;
+    osVersion: string | null;
+    model: string | null;
+    developerMode: DeveloperModeState;
+    pairingState: DevicePairingState;
+    tunnelState: DeviceTunnelState;
+    transportType: DeviceTransportType;
+    ready: boolean;
+    issue: string | null;
 }
 
 /** What is safe to show about one stored signing kit: names and counts, never a secret. */
@@ -151,6 +218,10 @@ export interface SigningKitSummary {
     createdAtEpochSeconds: number;
     /** Display names of the machines attached to this kit. */
     attachedMachines: string[];
+    /** The optional development identity, for Debug builds on registered phones. */
+    developmentCertificateConfigured: boolean;
+    developmentCertificateName: string | null;
+    developmentCertificatePasswordStored: boolean;
 }
 
 /**
@@ -235,12 +306,25 @@ export interface WorkspaceSource {
     commit: string | null;
 }
 
+/** What a profile is for, read from its entitlements; null on records made before kinds existed. */
+export type ProfileKind = 'app_store' | 'development' | 'ad_hoc' | 'enterprise';
+
 export interface ProvisioningProfileSummary {
     uuid: string;
     teamIdentifier: string;
     applicationIdentifier: string;
     expiresAt: string;
     developerCertificateSha256: string[];
+    kind: ProfileKind | null;
+    provisionedDeviceUdids: string[];
+    getTaskAllow: boolean;
+}
+
+export interface ProvisionedIdentity {
+    identityName: string;
+    identitySha1: string;
+    certificateSha256: string;
+    certificateExpiresAt: string;
 }
 
 export interface SigningProvisioningResult {
@@ -252,6 +336,8 @@ export interface SigningProvisioningResult {
     developmentTeam: string;
     bundleIdentifier: string;
     profiles: ProvisioningProfileSummary[];
+    /** The development identity in the same keychain, when the kit holds one. */
+    developmentIdentity: ProvisionedIdentity | null;
 }
 
 export interface AppleArchiveArtifact {
@@ -295,6 +381,11 @@ export interface MacBuilderView {
     archiveEnvSet: string | null;
     archiveError: string | null;
     logs: string[];
+    usb: MachineUsbStatus;
+    /** The last run on a phone, kept until cleared. */
+    deviceRun: AppleDeviceRunResult | null;
+    /** The last failed device run, retained like `archiveError` until cleared. */
+    deviceRunError: string | null;
 }
 
 export interface MachineSummary {
@@ -312,6 +403,9 @@ export interface MachineSummary {
     signingIdentity: string | null;
     archiveRetained: boolean;
     envSetName: string | null;
+    /** The container keeps its disk on the host and can be handed USB devices. */
+    usbReady: boolean;
+    deviceRunRetained: boolean;
 }
 
 export interface MachineListView {
@@ -447,6 +541,88 @@ export interface RunAppleSmokeBuildResult {
 export interface RunAppleArchiveResult {
     view: MacBuilderView;
     archive: AppleArchiveResult;
+}
+
+export type DiskMigrationPhase =
+    | 'checking_space'
+    | 'stopping'
+    | 'copying_disk'
+    | 'removing'
+    | 'creating'
+    | 'starting'
+    | 'completed';
+
+export interface DiskMigrationProgress {
+    phase: DiskMigrationPhase;
+    completedBytes: number;
+    totalBytes: number;
+    elapsedSeconds: number;
+    detail: string;
+}
+
+export type DeviceSigningPhase =
+    | 'checking_kit'
+    | 'creating_certificate'
+    | 'registering_device'
+    | 'checking_profiles'
+    | 'creating_profile'
+    | 'downloading_profile'
+    | 'provisioning'
+    | 'completed';
+
+export interface DeviceSigningProgress {
+    phase: DeviceSigningPhase;
+    elapsedSeconds: number;
+    detail: string;
+}
+
+export interface PrepareDeviceSigningResult {
+    view: MacBuilderView;
+    certificateCreated: boolean;
+    deviceAlreadyRegistered: boolean;
+    profileCreated: boolean;
+}
+
+export type AppleDeviceRunPhase =
+    | 'preparing'
+    | 'building_web_assets'
+    | 'resolving_target'
+    | 'building'
+    | 'verifying'
+    | 'installing'
+    | 'launching'
+    | 'running'
+    | 'completed';
+
+/** Console lines arrive in batches: an app console must not drop lines between ticks. */
+export interface AppleDeviceRunProgress {
+    phase: AppleDeviceRunPhase;
+    elapsedSeconds: number;
+    detail: string;
+    logLines: string[];
+}
+
+/** How the console session ended; any of these is a run that happened, not a failure. */
+export type ConsoleEnd = 'stopped' | 'exited' | 'disconnected';
+
+export interface AppleDeviceRunResult {
+    device: GuestDevice;
+    bundleIdentifier: string;
+    appPath: string;
+    marketingVersion: string;
+    buildNumber: string;
+    provisioningProfileUuid: string;
+    installedAtEpochSeconds: number;
+    consoleEnd: ConsoleEnd;
+    exitStatus: number | null;
+    reattached: boolean;
+    buildTail: string[];
+    consoleTail: string[];
+}
+
+export interface RunAppleDeviceResult {
+    view: MacBuilderView;
+    run: AppleDeviceRunResult;
 }
 
 export interface AppleProvisioningProfile {

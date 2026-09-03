@@ -18,6 +18,7 @@ import {
     type StepStatus,
 } from '../../model/steps';
 import { cn } from '../../lib/utils';
+import Badge from './Badge.vue';
 import Meter from './Meter.vue';
 import Spinner from './Spinner.vue';
 
@@ -43,7 +44,9 @@ const focus = computed(() => focusStep(steps));
 
 /** How many steps in a phase still need the person: said once here, not on every row. */
 function yoursRemaining(phaseSteps: Step<Id>[]): number {
-    return phaseSteps.filter((step) => step.kind !== 'automatic' && step.status !== 'done').length;
+    return phaseSteps.filter(
+        (step) => step.kind !== 'automatic' && step.status !== 'done' && !step.optional,
+    ).length;
 }
 
 // A finished phase folds to its header so the timeline stays short; it reopens on click, and
@@ -359,6 +362,15 @@ function meta(step: Step<Id>): string {
                                         class="cursor-help font-medium text-zinc-600 underline decoration-zinc-300 decoration-dotted underline-offset-2 dark:text-zinc-300 dark:decoration-zinc-600"
                                         v-tip="stepKindDescription[step.kind]"
                                         >{{ stepKindLabel[step.kind] }}</span
+                                    >
+                                    <Badge
+                                        v-if="step.experimental"
+                                        tone="outline"
+                                        class="ml-2 align-middle"
+                                        v-tip="
+                                            'Self-hosted and experimental: USB passthrough into a Docker-OSX guest is not a route Apple supports.'
+                                        "
+                                        >experimental</Badge
                                     >
                                 </p>
                                 <slot name="detail" :step="step" />

@@ -30,6 +30,84 @@ class Emitter {
 const sleep = (milliseconds: number) =>
     new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 
+// `?device=ready` seeds the prepared machine with a phone attached, paired, and signed for, so
+// the last rungs of the device step can be previewed without walking the ladder; `?usbRule=1`
+// starts with the host rule installed.
+const query =
+    typeof window === 'undefined'
+        ? new URLSearchParams()
+        : new URLSearchParams(window.location.search);
+const deviceReady = query.get('device') === 'ready';
+let usbRuleInstalled = query.has('usbRule') || deviceReady;
+
+const hostUsbDevices: T.HostUsbDevice[] = [
+    {
+        bus: 1,
+        port: '3',
+        vendorId: '05ac',
+        productId: '12a8',
+        product: 'iPhone',
+        serial: '00008030000A1B2C3D4E5F6A',
+        manufacturer: 'Apple Inc.',
+        deviceNode: '/dev/bus/usb/001/007',
+        nodeReady: true,
+        heldBy: null,
+    },
+    {
+        bus: 1,
+        port: '4.2',
+        vendorId: '05ac',
+        productId: '12ab',
+        product: 'iPad',
+        serial: '000081100000000000000A2C',
+        manufacturer: 'Apple Inc.',
+        deviceNode: '/dev/bus/usb/001/009',
+        nodeReady: true,
+        heldBy: null,
+    },
+];
+
+const DEVICE_UDID = '00008030-000A1B2C3D4E5F6A';
+const DEVELOPMENT_CERT_SHA256 = 'bbbb1111cccc2222dddd3333eeee4444ffff5555aaaa6666bbbb7777cccc8888';
+
+function readyPhone(): T.GuestDevice {
+    return {
+        identifier: 'E3F1A2B4-5C6D-4E7F-8A9B-0C1D2E3F4A5B',
+        udid: DEVICE_UDID,
+        name: 'Matt’s iPhone',
+        osVersion: '18.6',
+        model: 'iPhone 15 Pro',
+        developerMode: 'enabled',
+        pairingState: 'paired',
+        tunnelState: 'connected',
+        transportType: 'wired',
+        ready: true,
+        issue: null,
+    };
+}
+
+function developmentProfile(udid: string): T.ProvisioningProfileSummary {
+    return {
+        uuid: '22222222-3333-4444-5555-666666666666',
+        teamIdentifier: 'TEAM123456',
+        applicationIdentifier: 'TEAM123456.com.example.app',
+        expiresAt: '2027-09-02T10:14:00Z',
+        developerCertificateSha256: [DEVELOPMENT_CERT_SHA256],
+        kind: 'development',
+        provisionedDeviceUdids: [udid],
+        getTaskAllow: true,
+    };
+}
+
+function developmentIdentity(): T.ProvisionedIdentity {
+    return {
+        identityName: 'Apple Development: Example Developer (TEAM123456)',
+        identitySha1: '2222333344445555666677778888999900001111',
+        certificateSha256: DEVELOPMENT_CERT_SHA256,
+        certificateExpiresAt: '2027-09-02T10:14:00Z',
+    };
+}
+
 const hostReady: T.HostPrerequisites = {
     supportedHost: true,
     dockerCli: true,
@@ -66,6 +144,15 @@ interface MockMachine {
     archiveEnvSet?: string | null;
     busy: string | null;
     logs: string[];
+    /** The container was created with its disk on the host, the control socket, and USB. */
+    usbContainer: boolean;
+    attached: T.AttachedUsbDevice | null;
+    guestDevices: T.GuestDevice[];
+    /** Listings since the phone was attached: the mock pairs on the first, enables Developer Mode on the second. */
+    deviceRefreshes: number;
+    deviceRun: T.AppleDeviceRunResult | null;
+    deviceRunError: string | null;
+    cancelRequested: boolean;
 }
 
 function readyMachine(): MockMachine {
@@ -129,8 +216,13 @@ function readyMachine(): MockMachine {
                     developerCertificateSha256: [
                         'aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888',
                     ],
+                    kind: 'app_store',
+                    provisionedDeviceUdids: [],
+                    getTaskAllow: false,
                 },
+                ...(deviceReady ? [developmentProfile(DEVICE_UDID)] : []),
             ],
+            developmentIdentity: deviceReady ? developmentIdentity() : null,
         },
         archive: {
             scheme: 'App',
@@ -155,6 +247,13 @@ function readyMachine(): MockMachine {
         },
         archiveError: null,
         busy: null,
+        usbContainer: deviceReady,
+        attached: deviceReady ? { bus: 1, port: '3', enumerated: true, issue: null } : null,
+        guestDevices: deviceReady ? [readyPhone()] : [],
+        deviceRefreshes: deviceReady ? 2 : 0,
+        deviceRun: null,
+        deviceRunError: null,
+        cancelRequested: false,
         logs: [
             'Docker-OSX: booting OpenCore with generated serial C02X1234ABCD',
             'qemu-system-x86_64: -display gtk,zoom-to-fit=on',
@@ -193,6 +292,14 @@ function freshMachine(): MockMachine {
         archive: null,
         archiveError: null,
         busy: null,
+        // A new machine's container is created with USB access from the start.
+        usbContainer: true,
+        attached: null,
+        guestDevices: [],
+        deviceRefreshes: 0,
+        deviceRun: null,
+        deviceRunError: null,
+        cancelRequested: false,
         logs: [],
     };
 }
@@ -284,6 +391,9 @@ export function createMockBackend(): Backend {
             guestKeychainConfigured: true,
             createdAtEpochSeconds: 1_756_700_000,
             attachedMachines: ['Local macOS builder'],
+            developmentCertificateConfigured: deviceReady,
+            developmentCertificateName: deviceReady ? 'development.p12' : null,
+            developmentCertificatePasswordStored: deviceReady,
         },
         {
             id: 'client-app',
@@ -297,6 +407,9 @@ export function createMockBackend(): Backend {
             guestKeychainConfigured: false,
             createdAtEpochSeconds: 1_756_900_000,
             attachedMachines: [],
+            developmentCertificateConfigured: false,
+            developmentCertificateName: null,
+            developmentCertificatePasswordStored: false,
         },
     ];
     const attachments: Record<string, string | null> = {
@@ -431,6 +544,7 @@ export function createMockBackend(): Backend {
                             ? 'SSH authentication failed; add the BuildBridge public key to the guest user'
                             : null,
                 },
+                devices: running ? machine.guestDevices.map((device) => ({ ...device })) : [],
             },
             appleWorkspace: machine.workspace ? { ...machine.workspace } : null,
             signing: machine.signing ? { ...machine.signing } : null,
@@ -438,6 +552,40 @@ export function createMockBackend(): Backend {
             archiveEnvSet: machine.archiveEnvSet ?? null,
             archiveError: machine.archiveError,
             logs: [...machine.logs],
+            usb: {
+                host: {
+                    supported: true,
+                    rule: usbRuleInstalled ? 'installed' : 'missing',
+                    rulePath: '/etc/udev/rules.d/40-buildbridge-iphone.rules',
+                    usbmuxdActive: !usbRuleInstalled,
+                    plugdevGid: 46,
+                    devices: hostUsbDevices.map((device) => ({
+                        ...device,
+                        nodeReady: usbRuleInstalled,
+                        heldBy: usbRuleInstalled
+                            ? machine.attached?.port === device.port
+                                ? 'this_machine'
+                                : null
+                            : 'usbmuxd',
+                    })),
+                    issues: usbRuleInstalled
+                        ? []
+                        : [
+                              'Install the BuildBridge iPhone rule so usbmuxd releases phones to the machine.',
+                          ],
+                },
+                diskOnHost: machine.usbContainer,
+                containerReady: machine.usbContainer && machine.state !== 'missing',
+                containerIssue: machine.usbContainer
+                    ? machine.state === 'missing'
+                        ? 'The container gets USB access and a host-side disk when the machine is next started.'
+                        : null
+                    : 'Enable USB on this machine to recreate its container with USB access; the macOS disk is kept.',
+                qmpReachable: machine.usbContainer && running,
+                attached: running && machine.attached ? { ...machine.attached } : null,
+            },
+            deviceRun: machine.deviceRun ? { ...machine.deviceRun } : null,
+            deviceRunError: machine.deviceRunError,
         };
     };
 
@@ -459,6 +607,8 @@ export function createMockBackend(): Backend {
             signingProvisioned: machine.signing !== null,
             signingIdentity: machine.signing?.identityName ?? null,
             archiveRetained: machine.archive !== null,
+            usbReady: machine.usbContainer && machine.state !== 'missing',
+            deviceRunRetained: machine.deviceRun !== null,
         })),
     });
 
@@ -898,13 +1048,273 @@ export function createMockBackend(): Backend {
             });
         },
         async revealArchive() {},
-        async cancelMachineOperation() {
-            // The preview's operations are short timers; there is nothing to interrupt.
+        async cancelMachineOperation(machineId) {
+            // Every preview operation is a short timer except the device console, which streams
+            // until asked to stop.
+            find(machineId).cancelRequested = true;
         },
         async clearArchive(machineId) {
             const machine = find(machineId);
             machine.archive = null;
             machine.archiveError = null;
+            return view(machine);
+        },
+
+        async installUsbReleaseRule() {
+            await sleep(600);
+            usbRuleInstalled = true;
+            changed(null);
+            return view(machines[0]!).usb.host;
+        },
+        async removeUsbReleaseRule() {
+            await sleep(300);
+            usbRuleInstalled = false;
+            changed(null);
+            return view(machines[0]!).usb.host;
+        },
+        async migrateMachineForUsb(machineId) {
+            const machine = find(machineId);
+            return busy(machine, 'Enabling USB on the machine', async () => {
+                const total = 34_526_003_200;
+                const phases: [T.DiskMigrationPhase, number, string][] = [
+                    [
+                        'checking_space',
+                        0,
+                        'Measuring the container and the free space on this host',
+                    ],
+                    ['stopping', 0, 'Stopping the machine so its disk is consistent'],
+                    ['copying_disk', total / 3, 'Copying the macOS disk to this host'],
+                    ['copying_disk', (total * 2) / 3, 'Copying the macOS disk to this host'],
+                    ['copying_disk', total, 'Copying the macOS disk to this host'],
+                    ['removing', total, 'Removing the old container; its disk is now on this host'],
+                    [
+                        'creating',
+                        total,
+                        'Creating the container with the host disk, the control socket, and USB access',
+                    ],
+                    ['starting', total, 'Starting the machine'],
+                    ['completed', total, 'The machine is running from the host disk'],
+                ];
+                for (const [index, [phase, completedBytes, detail]] of phases.entries()) {
+                    emitter.emit<T.MachineEvent<T.DiskMigrationProgress>>(
+                        'machine-usb-migration-progress',
+                        {
+                            machineId,
+                            phase,
+                            completedBytes,
+                            totalBytes: total,
+                            elapsedSeconds: index * 20,
+                            detail,
+                        },
+                    );
+                    await sleep(phase === 'copying_disk' ? 900 : 500);
+                }
+                machine.usbContainer = true;
+                machine.containerId = `${Date.now().toString(16)}c9f4d1e2a7b3c9f4d1e2a7b3`;
+                machine.startedAt = new Date().toISOString();
+                machine.state = 'running';
+                return view(machine);
+            });
+        },
+        async attachUsbDevice(machineId, bus, port) {
+            const machine = find(machineId);
+            return busy(machine, 'Attaching the iPhone', async () => {
+                await sleep(700);
+                const device = hostUsbDevices.find(
+                    (candidate) => candidate.bus === bus && candidate.port === port,
+                );
+                if (!device) {
+                    throw new Error(
+                        'No Apple device is plugged into that port. Plug the phone in and refresh.',
+                    );
+                }
+                machine.attached = {
+                    bus: device.bus,
+                    port: device.port,
+                    enumerated: true,
+                    issue: null,
+                };
+                machine.guestDevices = [
+                    {
+                        ...readyPhone(),
+                        name: device.product ?? 'iPhone',
+                        developerMode: 'unknown',
+                        pairingState: 'unpaired',
+                        tunnelState: 'disconnected',
+                        ready: false,
+                        issue: 'Unlock the phone and tap Trust when it asks about this computer.',
+                    },
+                ];
+                machine.deviceRefreshes = 0;
+                return view(machine);
+            });
+        },
+        async detachUsbDevice(machineId) {
+            const machine = find(machineId);
+            return busy(machine, 'Detaching the iPhone', async () => {
+                await sleep(300);
+                machine.attached = null;
+                machine.guestDevices = [];
+                return view(machine);
+            });
+        },
+        async listGuestDevices(machineId) {
+            const machine = find(machineId);
+            await sleep(400);
+            machine.deviceRefreshes += 1;
+            const device = machine.guestDevices[0];
+            if (device) {
+                if (machine.deviceRefreshes >= 1) {
+                    device.pairingState = 'paired';
+                    device.tunnelState = 'connected';
+                    device.name = 'Matt’s iPhone';
+                    device.developerMode = 'disabled';
+                    device.issue =
+                        'Turn on Developer Mode on the phone (Settings › Privacy & Security), then restart it if asked.';
+                }
+                if (machine.deviceRefreshes >= 2) {
+                    device.developerMode = 'enabled';
+                    device.ready = true;
+                    device.issue = null;
+                }
+            }
+            return view(machine);
+        },
+        async prepareAppleDeviceSigning(machineId, udid, deviceName) {
+            const machine = find(machineId);
+            const kit = storedKits().find((candidate) => candidate.id === attachments[machine.id]);
+            if (!kit?.appStoreConnectConfigured) {
+                throw new Error(
+                    'The attached kit has no App Store Connect Team key, so the iPhone cannot be registered.',
+                );
+            }
+            return busy(machine, 'Preparing device signing', async () => {
+                const created = !kit.developmentCertificateConfigured;
+                const phases: T.DeviceSigningPhase[] = [
+                    'checking_kit',
+                    ...(created ? (['creating_certificate'] as const) : []),
+                    'registering_device',
+                    'checking_profiles',
+                    'creating_profile',
+                    'provisioning',
+                    'completed',
+                ];
+                for (const [index, phase] of phases.entries()) {
+                    emitter.emit<T.MachineEvent<T.DeviceSigningProgress>>(
+                        'machine-device-signing-progress',
+                        {
+                            machineId,
+                            phase,
+                            elapsedSeconds: index * 6,
+                            detail: `${phase.replace(/_/g, ' ')} for ${deviceName}`,
+                        },
+                    );
+                    await sleep(600);
+                }
+                kit.developmentCertificateConfigured = true;
+                kit.developmentCertificateName = 'development.p12';
+                kit.developmentCertificatePasswordStored = true;
+                if (machine.signing) {
+                    machine.signing.developmentIdentity = developmentIdentity();
+                    machine.signing.profiles = [
+                        ...machine.signing.profiles.filter(
+                            (profile) => profile.kind !== 'development',
+                        ),
+                        developmentProfile(udid.toUpperCase()),
+                    ];
+                }
+                return {
+                    view: view(machine),
+                    certificateCreated: created,
+                    deviceAlreadyRegistered: false,
+                    profileCreated: true,
+                };
+            });
+        },
+        async runAppleDeviceBuild(machineId, udid) {
+            const machine = find(machineId);
+            machine.cancelRequested = false;
+            return busy(machine, 'Running on the device', async () => {
+                const device =
+                    machine.guestDevices.find((candidate) => candidate.udid === udid) ??
+                    machine.guestDevices[0];
+                if (!device) {
+                    throw new Error('The phone is no longer listed by the guest.');
+                }
+                const started = Date.now();
+                const emit = (
+                    phase: T.AppleDeviceRunPhase,
+                    detail: string,
+                    logLines: string[] = [],
+                ) =>
+                    emitter.emit<T.MachineEvent<T.AppleDeviceRunProgress>>(
+                        'machine-device-progress',
+                        {
+                            machineId,
+                            phase,
+                            elapsedSeconds: Math.floor((Date.now() - started) / 1000),
+                            detail,
+                            logLines,
+                        },
+                    );
+                emit('preparing', 'Preparing the recipe');
+                await sleep(500);
+                emit('resolving_target', 'Reading the Debug build settings');
+                await sleep(400);
+                emit('building', 'Compiling for the iPhone', [
+                    'CompileSwift normal arm64 App/AppDelegate.swift',
+                ]);
+                await sleep(700);
+                emit('building', 'Compiling for the iPhone', [
+                    'Ld App.app/App normal',
+                    '** BUILD SUCCEEDED **',
+                ]);
+                await sleep(600);
+                emit('verifying', 'Verifying the signature');
+                await sleep(400);
+                emit('installing', 'Installing on the iPhone', ['App installed: com.example.app']);
+                await sleep(700);
+                emit('launching', 'Launching', [
+                    'Launched application with com.example.app bundle identifier and pid 4211',
+                ]);
+                await sleep(500);
+                const consoleLines = [
+                    '[App] scene did become active',
+                    'Capacitor: loading app at capacitor://localhost',
+                    '[Network] GET /v1/session 200 (84 ms)',
+                ];
+                let tick = 0;
+                while (!machine.cancelRequested && Date.now() - started < 5 * 60_000) {
+                    emit('running', 'Running; console streaming', [
+                        consoleLines[tick % consoleLines.length]!,
+                    ]);
+                    tick += 1;
+                    await sleep(700);
+                }
+                emit('completed', 'Stopped');
+                machine.deviceRun = {
+                    device: { ...device },
+                    bundleIdentifier: 'com.example.app',
+                    appPath:
+                        '/Users/builder/BuildBridge/workspaces/active/.buildbridge/DerivedData/Build/Products/Debug-iphoneos/App.app',
+                    marketingVersion: '3.2.0',
+                    buildNumber: '15',
+                    provisioningProfileUuid: '22222222-3333-4444-5555-666666666666',
+                    installedAtEpochSeconds: Math.floor(Date.now() / 1000),
+                    consoleEnd: 'stopped',
+                    exitStatus: null,
+                    reattached: false,
+                    buildTail: ['** BUILD SUCCEEDED **'],
+                    consoleTail: consoleLines,
+                };
+                machine.deviceRunError = null;
+                return { view: view(machine), run: machine.deviceRun };
+            });
+        },
+        async clearAppleDeviceRun(machineId) {
+            const machine = find(machineId);
+            machine.deviceRun = null;
+            machine.deviceRunError = null;
             return view(machine);
         },
 
@@ -996,6 +1406,11 @@ export function createMockBackend(): Backend {
             const merged: T.SigningKitSummary = {
                 id: existing?.id ?? slug(name),
                 name,
+                developmentCertificateConfigured:
+                    existing?.developmentCertificateConfigured ?? false,
+                developmentCertificateName: existing?.developmentCertificateName ?? null,
+                developmentCertificatePasswordStored:
+                    existing?.developmentCertificatePasswordStored ?? false,
                 appStoreConnectConfigured:
                     existing?.appStoreConnectConfigured || input.appStoreConnectKeyId.trim() !== '',
                 appStoreConnectKeyId:
@@ -1199,6 +1614,11 @@ export function createMockBackend(): Backend {
         onSigningProgress: async (handler) => emitter.on('machine-signing-progress', handler),
         onProjectProgress: async (handler) => emitter.on('machine-project-progress', handler),
         onArchiveProgress: async (handler) => emitter.on('machine-archive-progress', handler),
+        onUsbMigrationProgress: async (handler) =>
+            emitter.on('machine-usb-migration-progress', handler),
+        onDeviceSigningProgress: async (handler) =>
+            emitter.on('machine-device-signing-progress', handler),
+        onDeviceProgress: async (handler) => emitter.on('machine-device-progress', handler),
         onDragDrop: async (handler: (event: DragDropEvent) => void) => {
             void handler;
             return () => {};

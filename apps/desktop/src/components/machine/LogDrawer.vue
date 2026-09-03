@@ -37,6 +37,7 @@ const sources = computed<{ value: LogSource; label: string; count: number }[]>((
     { value: 'activity', label: 'Activity', count: session.activity.length },
     { value: 'build', label: 'Test build', count: session.buildLog.length },
     { value: 'archive', label: 'Signed archive', count: session.archiveLog.length },
+    { value: 'device', label: 'Device console', count: session.deviceLog.length },
     { value: 'console', label: 'Machine console', count: consoleLines.value.length },
 ]);
 
@@ -48,6 +49,8 @@ const lines = computed<LogLine[]>(() => {
             return session.buildLog;
         case 'archive':
             return session.archiveLog;
+        case 'device':
+            return session.deviceLog;
         default:
             return session.activity;
     }
@@ -61,6 +64,8 @@ const emptyText = computed(() => {
             return 'Diagnostic lines from the unsigned test build appear here while it runs.';
         case 'archive':
             return 'Diagnostic lines from the signed archive appear here while it runs.';
+        case 'device':
+            return 'The app’s console appears here while it runs on the iPhone.';
         default:
             return 'Operations started from this desktop and their results are recorded here.';
     }
@@ -73,6 +78,9 @@ function sourceFor(step: string | null): LogSource {
     }
     if (step === 'archive') {
         return 'archive';
+    }
+    if (step === 'run-device') {
+        return 'device';
     }
     return 'activity';
 }
@@ -99,6 +107,9 @@ const runningLabel = computed(() => {
 });
 const phaseDetail = computed(
     () =>
+        session.device?.detail ??
+        session.deviceSigning?.detail ??
+        session.usbMigration?.detail ??
         session.archive?.detail ??
         session.project?.detail ??
         session.signing?.detail ??
@@ -124,6 +135,8 @@ function clear(): void {
         machines.clearBuildLog(session.id);
     } else if (source.value === 'archive') {
         machines.clearArchiveLog(session.id);
+    } else if (source.value === 'device') {
+        machines.clearDeviceLog(session.id);
     } else if (source.value === 'activity') {
         machines.clearActivity(session.id);
     }
@@ -243,8 +256,11 @@ onBeforeUnmount(() => {
                     @clear="clear"
                 />
                 <p class="mt-1.5 text-[11px] leading-4 text-zinc-500 dark:text-zinc-400">
-                    Build logs are bounded and filtered to diagnostic lines; the complete Xcode
-                    output stays in the guest. Secret values never appear here.
+                    {{
+                        source === 'device'
+                            ? 'The device console keeps the last 600 lines the app printed. Secret values never appear here.'
+                            : 'Build logs are bounded and filtered to diagnostic lines; the complete Xcode output stays in the guest. Secret values never appear here.'
+                    }}
                 </p>
             </div>
         </Transition>

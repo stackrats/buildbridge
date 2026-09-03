@@ -6,8 +6,9 @@
 // tests rather than by clicking through a macOS installation.
 
 import type { HostPrerequisites, MacBuilderView, MachineSummary } from '../types/backend';
-import { formatBytes, formatElapsed, secondsSince } from '../lib/format';
+import { formatBytes, formatElapsed, relativeTime, secondsSince } from '../lib/format';
 import { isLive } from '../lib/status';
+import { deviceNextSummary, deviceReadiness, deviceWorkingSummary } from './device';
 
 export type StepStatus = 'done' | 'active' | 'running' | 'pending' | 'failed';
 
@@ -36,6 +37,10 @@ export interface Step<Id extends string> {
     summary: string;
     /** The usual duration of a long step, shown beside "next" so nobody is surprised. */
     expected?: string;
+    /** Off the golden path: never the focus while merely available, only when it needs someone. */
+    optional?: boolean;
+    /** Self-hosted and experimental; the timeline says so beside the kind. */
+    experimental?: boolean;
 }
 
 export type SetupStepId =
@@ -53,7 +58,8 @@ export type BuildStepId =
     | 'test-build'
     | 'signing-kit'
     | 'provision'
-    | 'archive';
+    | 'archive'
+    | 'run-device';
 
 export type JourneyStepId = SetupStepId | BuildStepId;
 
@@ -75,7 +81,7 @@ export const stepKindLabel: Record<StepKind, string> = {
 export const stepKindDescription: Record<StepKind, string> = {
     automatic: 'BuildBridge performs this step end to end.',
     manual: 'BuildBridge cannot do this for you; follow the instructions and it verifies the result.',
-    assisted: 'BuildBridge starts this step and you confirm inside macOS.',
+    assisted: 'BuildBridge starts this step and you confirm inside macOS or on the device.',
 };
 
 /** Short, lowercase names for places with room for a few words, such as the sidebar. */
@@ -93,6 +99,7 @@ export const stepShortTitle: Record<JourneyStepId, string> = {
     'signing-kit': 'attach a signing kit',
     provision: 'provision signing',
     archive: 'signed archive',
+    'run-device': 'run on the device',
 };
 
 /** What a pending step is waiting for. A pending row never just says "waiting". */
@@ -110,6 +117,7 @@ const unlockedBy: Record<JourneyStepId, string> = {
     'signing-kit': 'after the test build passes',
     provision: 'after a complete kit is attached',
     archive: 'after signing is provisioned',
+    'run-device': 'after signing is provisioned',
 };
 
 export interface StepContext {
@@ -452,10 +460,44 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
                     : unlockedBy.archive,
     });
 
+    // Off the golden path: a Debug build on a phone plugged into this host. It opens on the
+    // archive's gate rather than on the archive, and a failed run outranks an earlier success
+    // because the backend keeps both until the run is cleared.
+    const readiness = deviceReadiness(view);
+    const run = view.deviceRun;
+    steps.push({
+        id: 'run-device',
+        phase: 'build',
+        title: 'Run on the device',
+        kind: 'assisted',
+        optional: true,
+        experimental: true,
+        status: isRunning('run-device')
+            ? 'running'
+            : view.deviceRunError
+              ? 'failed'
+              : run
+                ? 'done'
+                : provisioned && built && !credentialsLost
+                  ? 'active'
+                  : 'pending',
+        summary: isRunning('run-device')
+            ? deviceWorkingSummary(readiness)
+            : view.deviceRunError
+              ? 'The last device run failed; the diagnostic is kept below'
+              : run
+                ? `${run.device.name} · ${run.marketingVersion} (${run.buildNumber}) · installed ${relativeTime(new Date(run.installedAtEpochSeconds * 1000).toISOString(), context.now)}`
+                : credentialsLost
+                  ? 'Blocked: the signing kit is missing, and its keychain password is needed to sign'
+                  : provisioned && built
+                    ? deviceNextSummary(readiness, view)
+                    : unlockedBy['run-device'],
+    });
+
     return steps;
 }
 
-/** The whole journey for one machine: setup first, then build, thirteen steps in all. */
+/** The whole journey for one machine: setup first, then build, fourteen steps in all. */
 export function deriveJourney(view: MacBuilderView, context: StepContext): JourneyStep[] {
     return [...deriveSetupSteps(view, context), ...deriveBuildSteps(view, context)];
 }
@@ -489,6 +531,8 @@ export function summarizeJourney(
         done: boolean;
         fact: string;
         expected?: string;
+        optional?: boolean;
+        experimental?: boolean;
     }> = [
         {
             id: 'host',
@@ -601,6 +645,16 @@ export function summarizeJourney(
             done: archived,
             fact: 'IPA retained',
         },
+        {
+            id: 'run-device',
+            phase: 'build',
+            title: 'Run on the device',
+            kind: 'assisted',
+            done: summary.deviceRunRetained,
+            fact: 'Ran on the iPhone',
+            optional: true,
+            experimental: true,
+        },
     ];
 
     let blocked = false;
@@ -632,16 +686,22 @@ export function summarizeJourney(
             summary:
                 status === 'done' ? row.fact : status === 'failed' ? row.fact : unlockedBy[row.id],
             ...(row.expected ? { expected: row.expected } : {}),
+            ...(row.optional ? { optional: true } : {}),
+            ...(row.experimental ? { experimental: true } : {}),
         };
     });
 }
 
-/** The first step a person should look at: failed, then running, then active. */
+/**
+ * The first step a person should look at: failed, then running, then active. An optional step
+ * that is merely available is skipped, so the golden path keeps the headline; one that failed
+ * or is running still needs someone.
+ */
 export function focusStep<Id extends string>(steps: Step<Id>[]): Step<Id> | null {
     return (
         steps.find((step) => step.status === 'failed') ??
         steps.find((step) => step.status === 'running') ??
-        steps.find((step) => step.status === 'active') ??
+        steps.find((step) => step.status === 'active' && !step.optional) ??
         null
     );
 }

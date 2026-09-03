@@ -11,6 +11,7 @@ import HostStep from './steps/HostStep.vue';
 import InstallStep from './steps/InstallStep.vue';
 import LaunchStep from './steps/LaunchStep.vue';
 import ProvisionStep from './steps/ProvisionStep.vue';
+import RunDeviceStep from './steps/RunDeviceStep.vue';
 import SigningKitStep from './steps/SigningKitStep.vue';
 import SyncStep from './steps/SyncStep.vue';
 import TestBuildStep from './steps/TestBuildStep.vue';
@@ -34,5 +35,6 @@ defineProps<{ session: MachineSession; step: JourneyStep }>();
     <TestBuildStep v-else-if="step.id === 'test-build'" :session="session" :step="step" />
     <SigningKitStep v-else-if="step.id === 'signing-kit'" :session="session" :step="step" />
     <ProvisionStep v-else-if="step.id === 'provision'" :session="session" :step="step" />
-    <ArchiveStep v-else :session="session" :step="step" />
+    <ArchiveStep v-else-if="step.id === 'archive'" :session="session" :step="step" />
+    <RunDeviceStep v-else :session="session" :step="step" />
 </template>

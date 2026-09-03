@@ -15,10 +15,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+mod device_run;
 mod disk;
 mod qmp;
 mod usb;
 
+pub use device_run::{
+    DeveloperModeState, GuestDevice, PairingState, TransportType, TunnelState, list_guest_devices,
+};
 pub use disk::{
     ContainerLayout, DISK_IMAGE_NAME, DISK_NVRAM_NAME, DiskMigrationPhase, DiskMigrationProgress,
     MachineDisk, ensure_machine_disk, inspect_container_layout, migrate_disk_to_host,
@@ -4811,6 +4815,22 @@ fn parse_profile_summaries(output: &str) -> Result<Vec<ProvisioningProfileSummar
     Ok(profiles)
 }
 
+/// A device UDID as Apple prints it: 40 hex characters on older phones, or 8 hex characters,
+/// a hyphen and 16 more on phones since the iPhone XS. Case does not matter.
+pub fn valid_device_udid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+
+    match bytes.len() {
+        40 => bytes.iter().all(u8::is_ascii_hexdigit),
+        25 => {
+            bytes[8] == b'-'
+                && bytes[..8].iter().all(u8::is_ascii_hexdigit)
+                && bytes[9..].iter().all(u8::is_ascii_hexdigit)
+        }
+        _ => false,
+    }
+}
+
 fn valid_profile_uuid(value: &str) -> bool {
     value.len() == 36
         && value.chars().enumerate().all(|(index, character)| {
@@ -6322,6 +6342,27 @@ mod tests {
                 || normalized.contains("private_key")
                 || normalized.contains("secret")
         }));
+    }
+
+    #[test]
+    fn device_udids_are_accepted_in_both_of_apples_shapes() {
+        for udid in [
+            "0123456789abcdef0123456789abcdef01234567",
+            "00008030-001A2B3C4D5E6F00",
+            "00008030-001a2b3c4d5e6f00",
+        ] {
+            assert!(valid_device_udid(udid), "{udid}");
+        }
+        for udid in [
+            "",
+            "0123456789abcdef0123456789abcdef0123456",
+            "00008030_001A2B3C4D5E6F00",
+            "00008030-001A2B3C4D5E6F0G",
+            "../x",
+            "00008030-001A2B3C4D5E6F00 ",
+        ] {
+            assert!(!valid_device_udid(udid), "{udid}");
+        }
     }
 
     #[test]

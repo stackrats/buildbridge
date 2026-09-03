@@ -65,6 +65,9 @@ struct AppState {
     /// Why the phone a machine holds has not shown up in the guest yet, from the last attach.
     /// Cleared once the guest enumerates it or the phone is detached.
     usb_attach_issues: Mutex<HashMap<String, String>>,
+    /// The phones each guest reported at its last listing. Probing `devicectl` costs seconds,
+    /// so the view serves this and the listing command refreshes it.
+    guest_devices: Mutex<HashMap<String, Vec<buildbridge_docker_osx::GuestDevice>>>,
 }
 
 /// Marks the host busy with a privileged USB change until dropped.
@@ -688,6 +691,8 @@ struct MacGuestAccessView {
     public_key: Option<String>,
     ssh: GuestSshStatus,
     diagnostics: GuestDiagnostics,
+    /// The phones the guest saw at its last listing; empty until one is requested.
+    devices: Vec<buildbridge_docker_osx::GuestDevice>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1574,6 +1579,45 @@ fn clear_usb_attach_issue(app: &AppHandle, machine_id: &str) {
     if let Ok(mut issues) = app.state::<AppState>().usb_attach_issues.lock() {
         issues.remove(machine_id);
     }
+}
+
+/// Asks the guest which phones it sees and serves the answer from the view until the next
+/// listing. Holds the machine so the probe cannot interleave with a build.
+#[tauri::command]
+async fn list_guest_devices(app: AppHandle, machine_id: String) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let access = load_mac_guest_access(&paths)?
+        .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
+    let current = build_mac_builder_view(&app, &paths).await?;
+    ensure_apple_project_guest_ready(&current)?;
+    let guard = begin_machine_operation(&app, &machine_id, "listing_devices")?;
+    let identity_path = paths.guest_identity();
+    let known_hosts_path = paths.known_hosts();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        buildbridge_docker_osx::list_guest_devices(
+            profile.ssh_port,
+            &access.username,
+            &identity_path,
+            &known_hosts_path,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string());
+    drop(guard);
+    let devices = finish_operation(&cancel_probe, joined)?;
+    if let Ok(mut cache) = app.state::<AppState>().guest_devices.lock() {
+        cache.insert(machine_id.clone(), devices);
+    }
+
+    build_mac_builder_view(&app, &paths).await
 }
 
 #[tauri::command]
@@ -3447,6 +3491,13 @@ async fn build_mac_builder_view(
     let busy_operation = busy_operation(app, &paths.id)?;
     let probe_paths = paths.clone();
     let probe_profile = profile.clone();
+    let cached_devices = app
+        .state::<AppState>()
+        .guest_devices
+        .lock()
+        .ok()
+        .and_then(|devices| devices.get(&paths.id).cloned())
+        .unwrap_or_default();
     let (runtime, logs, guest, mut usb) = tauri::async_runtime::spawn_blocking(move || {
         let runtime = buildbridge_docker_osx::status(&probe_paths.container_name)
             .map_err(|error| error.to_string())?;
@@ -3457,6 +3508,7 @@ async fn build_mac_builder_view(
             &runtime,
             guest_access.as_ref(),
             &probe_paths,
+            cached_devices,
         )?;
         let usb = buildbridge_docker_osx::machine_usb_status(
             &probe_paths.container_name,
@@ -3536,6 +3588,7 @@ fn build_mac_guest_view(
     runtime: &RuntimeStatus,
     access: Option<&StoredMacGuestAccess>,
     paths: &MachinePaths,
+    devices: Vec<buildbridge_docker_osx::GuestDevice>,
 ) -> Result<MacGuestAccessView, String> {
     let username = access.map(|value| value.username.clone());
     let public_key = read_optional_text(&paths.guest_public_key())?;
@@ -3549,6 +3602,7 @@ fn build_mac_guest_view(
                 ..GuestSshStatus::default()
             },
             diagnostics: GuestDiagnostics::default(),
+            devices: Vec::new(),
         });
     }
 
@@ -3578,6 +3632,7 @@ fn build_mac_guest_view(
         public_key,
         ssh,
         diagnostics,
+        devices,
     })
 }
 
@@ -5040,6 +5095,7 @@ pub fn run() {
             migrate_machine_for_usb,
             attach_usb_device,
             detach_usb_device,
+            list_guest_devices,
             list_signing_kits,
             save_signing_kit,
             delete_signing_kit,
