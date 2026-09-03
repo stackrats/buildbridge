@@ -5,7 +5,12 @@
 // Keeping this pure keeps it testable: the guided flows in the desktop are covered by unit
 // tests rather than by clicking through a macOS installation.
 
-import type { HostPrerequisites, MacBuilderView, MachineSummary } from '../types/backend';
+import type {
+    HostPrerequisites,
+    MacBuilderView,
+    MachineSummary,
+    UnsignedBuildTarget,
+} from '../types/backend';
 import { formatBytes, formatElapsed, relativeTime, secondsSince } from '../lib/format';
 import { isLive } from '../lib/status';
 import { deviceNextSummary, deviceReadiness, deviceWorkingSummary } from './device';
@@ -134,6 +139,23 @@ function xcodeLabel(version: string | null | undefined): string {
         return 'Xcode';
     }
     return value.toLowerCase().startsWith('xcode') ? value : `Xcode ${value}`;
+}
+
+/** What the unsigned build compiled against, in the words the interface uses. */
+export const unsignedBuildTargetLabel: Record<UnsignedBuildTarget, string> = {
+    device_sdk: 'device SDK',
+    simulator: 'Simulator',
+};
+
+/** `Built with Xcode 26.6 · device SDK`; records from before the choice existed name no target. */
+function builtWith(workspace: {
+    lastXcodeVersion: string | null;
+    lastBuildTarget: UnsignedBuildTarget | null;
+}): string {
+    const base = `Built with ${xcodeLabel(workspace.lastXcodeVersion)}`;
+    return workspace.lastBuildTarget
+        ? `${base} · ${unsignedBuildTargetLabel[workspace.lastBuildTarget]}`
+        : base;
 }
 
 /** Guest setup: everything that prepares one machine to build any project. */
@@ -367,13 +389,13 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
                 ? 'active'
                 : 'pending',
         summary: isRunning('test-build')
-            ? 'Preparing tools, dependencies, and the Simulator build'
+            ? 'Preparing tools, dependencies, and the unsigned build'
             : built
               ? workspace.lastNativeLockUpdated
-                  ? `Built with ${xcodeLabel(workspace.lastXcodeVersion)} · the guest refreshed Podfile.lock`
-                  : `Built with ${xcodeLabel(workspace.lastXcodeVersion)}`
+                  ? `${builtWith(workspace)} · the guest refreshed Podfile.lock`
+                  : builtWith(workspace)
               : synced
-                ? 'Compile the App scheme for the iOS Simulator without signing'
+                ? 'Compile the App scheme without signing, against the device SDK or the Simulator'
                 : unlockedBy['test-build'],
     });
 

@@ -23,6 +23,7 @@ import type {
     MachineListView,
     SigningProvisioningProgress,
     XcodeImportProgress,
+    UnsignedBuildTarget,
 } from '../types/backend';
 
 export type OperationId =
@@ -597,16 +598,21 @@ export function useMachinesStore() {
                     `Synchronized ${result.sync.sourceFileCount} files into ${result.sync.guestPath}.`,
             });
         },
-        testBuild: async (id: string) => {
+        testBuild: async (id: string, buildTarget: UnsignedBuildTarget = 'device_sdk') => {
             const target = session(id);
             target.project = null;
-            return runOperation(id, 'test-build', () => useBackend().runSmokeBuild(id), {
-                started: 'Running the unsigned test build',
-                finished: (result) =>
-                    result.build.nativeLockfileUpdated
-                        ? `Unsigned build succeeded with Xcode ${result.build.xcodeVersion}. The guest refreshed Podfile.lock; review it before a signed build.`
-                        : `Unsigned build succeeded with Xcode ${result.build.xcodeVersion}.`,
-            }).then((result) => {
+            return runOperation(
+                id,
+                'test-build',
+                () => useBackend().runSmokeBuild(id, buildTarget),
+                {
+                    started: 'Running the unsigned test build',
+                    finished: (result) =>
+                        result.build.nativeLockfileUpdated
+                            ? `Unsigned build succeeded with Xcode ${result.build.xcodeVersion}. The guest refreshed Podfile.lock; review it before a signed build.`
+                            : `Unsigned build succeeded with Xcode ${result.build.xcodeVersion}.`,
+                },
+            ).then((result) => {
                 if (result) {
                     for (const line of result.build.outputTail) {
                         pushBounded(target.buildLog, { text: line }, LOG_LIMIT);

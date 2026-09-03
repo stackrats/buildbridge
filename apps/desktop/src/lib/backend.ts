@@ -68,7 +68,10 @@ export interface Backend {
     approveWorkspace(machineId: string, path: string): Promise<T.MacBuilderView>;
     clearWorkspace(machineId: string): Promise<T.MacBuilderView>;
     syncWorkspace(machineId: string): Promise<T.SyncAppleWorkspaceResult>;
-    runSmokeBuild(machineId: string): Promise<T.RunAppleSmokeBuildResult>;
+    runSmokeBuild(
+        machineId: string,
+        target: T.UnsignedBuildTarget,
+    ): Promise<T.RunAppleSmokeBuildResult>;
     /** `envSetId` null builds without an env set; the step defaults it to the attached one. */
     runSignedArchive(machineId: string, envSetId: string | null): Promise<T.RunAppleArchiveResult>;
     revealArchive(machineId: string): Promise<void>;
@@ -210,7 +213,8 @@ async function createTauriBackend(): Promise<Backend> {
             invoke('approve_apple_workspace', { machineId, input: { path } }),
         clearWorkspace: (machineId) => invoke('clear_apple_workspace', { machineId }),
         syncWorkspace: (machineId) => invoke('sync_apple_workspace', { machineId }),
-        runSmokeBuild: (machineId) => invoke('run_apple_smoke_build', { machineId }),
+        runSmokeBuild: (machineId, target) =>
+            invoke('run_apple_smoke_build', { machineId, input: { target } }),
         runSignedArchive: (machineId, envSetId) =>
             invoke('run_apple_signed_archive', { machineId, envSetId }),
         revealArchive: (machineId) => invoke('reveal_apple_archive', { machineId }),

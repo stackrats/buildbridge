@@ -272,6 +272,8 @@ pub struct GuestDiagnostics {
     pub xcode_version: Option<String>,
     pub xcode_path: Option<String>,
     pub xcode_selected: bool,
+    /// The iOS Simulator runtime version the guest holds, when Xcode is ready and one is installed.
+    pub ios_simulator_runtime: Option<String>,
     pub issue: Option<String>,
 }
 
@@ -466,9 +468,22 @@ pub struct AppleWorkspaceSyncResult {
     pub archive_bytes: u64,
 }
 
+/// Which SDK the unsigned test build compiles against. The device SDK ships inside Xcode and is
+/// what a signed archive and a device run use, so it needs nothing downloaded; the Simulator is
+/// the only target that can be run on screen inside the guest, and Xcode lacks its runtime until
+/// Apple's iOS platform — several gigabytes — has been downloaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnsignedBuildTarget {
+    #[default]
+    DeviceSdk,
+    Simulator,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppleSmokeBuildResult {
+    pub target: UnsignedBuildTarget,
     pub xcode_version: String,
     pub native_lockfile_updated: bool,
     pub output_tail: Vec<String>,
@@ -1244,6 +1259,7 @@ pub fn guest_diagnostics(
         "/usr/bin/xcodebuild -version",
     );
 
+    let mut ios_simulator_runtime = None;
     let (xcode_version, xcode_path, xcode_selected, issue) = match selected_xcode {
         Ok(version) => {
             let selected_path = run_guest_command(
@@ -1262,6 +1278,17 @@ pub fn guest_diagnostics(
                 "/usr/bin/xcodebuild -checkFirstLaunchStatus",
             )
             .is_ok();
+            if first_launch_ready {
+                ios_simulator_runtime = run_guest_command(
+                    ssh_port,
+                    username,
+                    identity_path,
+                    known_hosts_path,
+                    SIMULATOR_RUNTIME_PROBE,
+                )
+                .ok()
+                .and_then(|output| parse_simulator_runtime(&output));
+            }
 
             (
                 Some(parse_xcode_version(&version)),
@@ -1313,7 +1340,52 @@ pub fn guest_diagnostics(
         xcode_version,
         xcode_path,
         xcode_selected,
+        ios_simulator_runtime,
         issue,
+    }
+}
+
+/// The first iOS runtime CoreSimulator lists, or nothing; `true` keeps the exit status clean when
+/// there is none. Fixed text, so it can be handed to the guest shell as is.
+const SIMULATOR_RUNTIME_PROBE: &str = "/usr/bin/xcrun simctl list runtimes 2>/dev/null | /usr/bin/grep '^iOS ' | /usr/bin/head -1; /usr/bin/true";
+
+/// `iOS 26.0 (26.0 - 23A339) - com.apple.CoreSimulator.SimRuntime.iOS-26-0` → `26.0`. Anything
+/// that is not a dotted version is dropped rather than shown.
+fn parse_simulator_runtime(output: &str) -> Option<String> {
+    output.lines().map(str::trim).find_map(|line| {
+        let version = line.strip_prefix("iOS ")?.split_whitespace().next()?;
+        let dotted = !version.is_empty()
+            && version.len() <= 16
+            && version
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '.')
+            && version
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_digit());
+        dotted.then(|| version.to_string())
+    })
+}
+
+/// The `xcodebuild` SDK and destination for an unsigned build of one target. Both stay unsigned;
+/// only the SDK differs.
+fn unsigned_build_destination_args(target: UnsignedBuildTarget) -> &'static str {
+    match target {
+        UnsignedBuildTarget::DeviceSdk => "-sdk iphoneos -destination 'generic/platform=iOS'",
+        UnsignedBuildTarget::Simulator => {
+            "-sdk iphonesimulator -destination 'generic/platform=iOS Simulator'"
+        }
+    }
+}
+
+fn unsigned_build_completed_detail(target: UnsignedBuildTarget) -> &'static str {
+    match target {
+        UnsignedBuildTarget::DeviceSdk => {
+            "The unsigned iOS build against the device SDK completed successfully."
+        }
+        UnsignedBuildTarget::Simulator => {
+            "The unsigned iOS Simulator build completed successfully."
+        }
     }
 }
 
@@ -2597,6 +2669,7 @@ pub fn run_apple_smoke_build<F>(
     username: &str,
     identity_path: &Path,
     known_hosts_path: &Path,
+    target: UnsignedBuildTarget,
     mut on_progress: F,
 ) -> Result<AppleSmokeBuildResult, ProviderError>
 where
@@ -2604,6 +2677,11 @@ where
 {
     validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
     let started_at = Instant::now();
+    let needs_simulator = match target {
+        UnsignedBuildTarget::Simulator => "1",
+        UnsignedBuildTarget::DeviceSdk => "0",
+    };
+    let build_destination = unsigned_build_destination_args(target);
     let guest_home = format!("/Users/{username}");
     let workspace = format!("{guest_home}/BuildBridge/workspaces/active");
     let GuestToolchain {
@@ -2698,7 +2776,7 @@ if /bin/test ! -x "{pod}"; then
     /bin/test -x "{pod}"
 fi
 platform_installed=0
-if ! /usr/bin/xcrun simctl list runtimes 2>/dev/null | /usr/bin/grep -q '^iOS '; then
+if /bin/test "{needs_simulator}" -eq 1 && ! /usr/bin/xcrun simctl list runtimes 2>/dev/null | /usr/bin/grep -q '^iOS '; then
     phase preparing_platform
     platform_assets="/System/Library/AssetsV2/com_apple_MobileAsset_iOSSimulatorRuntime"
     platform_catalog="$platform_assets/com_apple_MobileAsset_iOSSimulatorRuntime.xml"
@@ -2761,7 +2839,7 @@ fi
 
 phase building
 build_ios() {{
-    /usr/bin/xcodebuild -workspace "{workspace}/ios/App/App.xcworkspace" -scheme App -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "{workspace}/.buildbridge/DerivedData" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO COMPILER_INDEX_STORE_ENABLE=NO build
+    /usr/bin/xcodebuild -workspace "{workspace}/ios/App/App.xcworkspace" -scheme App -configuration Debug {build_destination} -derivedDataPath "{workspace}/.buildbridge/DerivedData" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO COMPILER_INDEX_STORE_ENABLE=NO build
 }}
 build_status=0
 build_ios || build_status=$?
@@ -2969,11 +3047,12 @@ exit "$job_result"
         0,
         0,
         started_at,
-        "The unsigned iOS Simulator build completed successfully.",
+        unsigned_build_completed_detail(target),
         None,
     ));
 
     Ok(AppleSmokeBuildResult {
+        target,
         xcode_version,
         native_lockfile_updated,
         output_tail,
@@ -4328,7 +4407,7 @@ where
         developer_dir,
         path,
         ..
-    } = guest_toolchain(&guest_home);
+    } = guest_toolchain(guest_home);
 
     run_guest_command(
         ssh_port,
@@ -5480,7 +5559,7 @@ fn phase_detail(phase: AppleProjectPhase) -> &'static str {
         AppleProjectPhase::BuildingWebAssets => "Building web assets",
         AppleProjectPhase::SyncingIos => "Synchronizing the Capacitor iOS project",
         AppleProjectPhase::ResolvingPods => "Resolving locked CocoaPods",
-        AppleProjectPhase::Building => "Compiling the unsigned iOS Simulator app",
+        AppleProjectPhase::Building => "Compiling the unsigned iOS app",
         AppleProjectPhase::Completed => "Unsigned test build complete",
     }
 }
@@ -7105,6 +7184,46 @@ mod tests {
             ))
         );
         assert!(apple_platform_progress("Finding content...").is_none());
+    }
+
+    #[test]
+    fn unsigned_build_targets_pick_the_sdk_and_default_to_the_device() {
+        assert_eq!(
+            UnsignedBuildTarget::default(),
+            UnsignedBuildTarget::DeviceSdk
+        );
+        assert_eq!(
+            unsigned_build_destination_args(UnsignedBuildTarget::DeviceSdk),
+            "-sdk iphoneos -destination 'generic/platform=iOS'"
+        );
+        assert_eq!(
+            unsigned_build_destination_args(UnsignedBuildTarget::Simulator),
+            "-sdk iphonesimulator -destination 'generic/platform=iOS Simulator'"
+        );
+        assert_eq!(
+            serde_json::to_string(&UnsignedBuildTarget::DeviceSdk).unwrap(),
+            "\"device_sdk\""
+        );
+        assert_eq!(
+            serde_json::from_str::<UnsignedBuildTarget>("\"simulator\"").unwrap(),
+            UnsignedBuildTarget::Simulator
+        );
+    }
+
+    #[test]
+    fn simulator_runtime_probe_reads_the_ios_version_and_ignores_other_platforms() {
+        assert_eq!(
+            parse_simulator_runtime(
+                "iOS 26.0 (26.0 - 23A339) - com.apple.CoreSimulator.SimRuntime.iOS-26-0\n"
+            ),
+            Some("26.0".to_string())
+        );
+        assert_eq!(
+            parse_simulator_runtime("== Runtimes ==\nwatchOS 26.0 (26.0 - 23R356) - runtime\n"),
+            None
+        );
+        assert_eq!(parse_simulator_runtime(""), None);
+        assert_eq!(parse_simulator_runtime("iOS $(rm -rf /) - runtime"), None);
     }
 
     #[test]

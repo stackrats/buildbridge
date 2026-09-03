@@ -127,6 +127,8 @@ export interface GuestDiagnostics {
     xcodeVersion: string | null;
     xcodePath: string | null;
     xcodeSelected: boolean;
+    /** The iOS Simulator runtime the guest holds, when Xcode is ready and one is installed. */
+    iosSimulatorRuntime: string | null;
     issue: string | null;
 }
 
@@ -285,6 +287,9 @@ export interface EnvSetInput {
     variables: EnvVariableInput[];
 }
 
+/** Which SDK the unsigned test build compiles against. */
+export type UnsignedBuildTarget = 'device_sdk' | 'simulator';
+
 export interface StoredAppleWorkspace {
     localPath: string;
     name: string;
@@ -298,6 +303,8 @@ export interface StoredAppleWorkspace {
     lastBuildSucceeded: boolean;
     lastXcodeVersion: string | null;
     lastNativeLockUpdated: boolean;
+    /** Which SDK the last unsigned build compiled against; null before the choice existed. */
+    lastBuildTarget: UnsignedBuildTarget | null;
     /** What the last snapshot came from: the approved folder, or a fetched revision of it. */
     lastSource: WorkspaceSource | null;
 }
@@ -530,6 +537,7 @@ export interface SyncAppleWorkspaceResult {
 }
 
 export interface AppleSmokeBuildResult {
+    target: UnsignedBuildTarget;
     xcodeVersion: string;
     nativeLockfileUpdated: boolean;
     outputTail: string[];

@@ -62,6 +62,7 @@ function baseView(overrides: Partial<MacBuilderView> = {}): MacBuilderView {
                 xcodeVersion: null,
                 xcodePath: null,
                 xcodeSelected: false,
+                iosSimulatorRuntime: null,
                 issue: null,
             },
             devices: [],
@@ -115,6 +116,7 @@ function readyView(): MacBuilderView {
         xcodeVersion: '26.6',
         xcodePath: '/Users/builder/Applications/Xcode.app',
         xcodeSelected: true,
+        iosSimulatorRuntime: '26.5',
         issue: null,
     };
     return view;
@@ -228,6 +230,7 @@ function provisionedView(): MacBuilderView {
         lastBuildSucceeded: true,
         lastXcodeVersion: '26.6',
         lastNativeLockUpdated: false,
+        lastBuildTarget: 'device_sdk',
         lastSource: null,
     };
     view.signing = {
@@ -267,6 +270,7 @@ describe('deriveBuildSteps', () => {
             lastBuildSucceeded: true,
             lastXcodeVersion: '26.6',
             lastNativeLockUpdated: false,
+            lastBuildTarget: 'device_sdk',
             lastSource: null,
         };
 
@@ -302,6 +306,7 @@ describe('deriveBuildSteps', () => {
             lastBuildSucceeded: true,
             lastXcodeVersion: '26.6',
             lastNativeLockUpdated: true,
+            lastBuildTarget: 'simulator',
             lastSource: null,
         };
         view.signingKit = {
@@ -414,6 +419,27 @@ describe('deriveBuildSteps', () => {
 
         expect(steps.find((step) => step.id === 'signing-kit')?.status).toBe('done');
         expect(steps.find((step) => step.id === 'archive')?.status).toBe('active');
+    });
+});
+
+describe('unsigned build target', () => {
+    it('names the SDK the test build compiled against, and nothing for older records', () => {
+        const view = provisionedView();
+        view.appleWorkspace!.lastBuildTarget = 'device_sdk';
+        expect(
+            deriveBuildSteps(view, { runningStep: null }).find((step) => step.id === 'test-build')
+                ?.summary,
+        ).toBe('Built with Xcode 26.6 · device SDK');
+        view.appleWorkspace!.lastBuildTarget = 'simulator';
+        expect(
+            deriveBuildSteps(view, { runningStep: null }).find((step) => step.id === 'test-build')
+                ?.summary,
+        ).toBe('Built with Xcode 26.6 · Simulator');
+        view.appleWorkspace!.lastBuildTarget = null;
+        expect(
+            deriveBuildSteps(view, { runningStep: null }).find((step) => step.id === 'test-build')
+                ?.summary,
+        ).toBe('Built with Xcode 26.6');
     });
 });
 

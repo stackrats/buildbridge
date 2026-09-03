@@ -16,7 +16,8 @@ use buildbridge_docker_osx::{
     AppleDeviceRunResult, AppleProjectProgress, AppleSmokeBuildResult, AppleWorkspaceSyncResult,
     ContainerState, GuestDiagnostics, GuestEnvFiles, GuestOptimization, GuestSshStatus,
     GuestTrustState, HostPrerequisites, MacBuilderConfig, OperationScope, RuntimeStatus,
-    SigningProvisioningProgress, SigningProvisioningResult, XcodeImportProgress,
+    SigningProvisioningProgress, SigningProvisioningResult, UnsignedBuildTarget,
+    XcodeImportProgress,
 };
 use buildbridge_runner::{ApiClient, execute};
 use keyring::Entry;
@@ -662,6 +663,9 @@ struct StoredAppleWorkspace {
     last_xcode_version: Option<String>,
     #[serde(default)]
     last_native_lock_updated: bool,
+    /// Which SDK the last unsigned build compiled against; None on records from before the choice.
+    #[serde(default)]
+    last_build_target: Option<UnsignedBuildTarget>,
     /// What the last snapshot was taken from: the approved folder as it was, or a checked-out
     /// revision of it requested by a remote build.
     #[serde(default)]
@@ -767,6 +771,13 @@ struct ImportMacXcodeResult {
 struct SyncAppleWorkspaceResult {
     view: MacBuilderView,
     sync: AppleWorkspaceSyncResult,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunAppleSmokeBuildInput {
+    #[serde(default)]
+    target: UnsignedBuildTarget,
 }
 
 #[derive(Debug, Serialize)]
@@ -1278,7 +1289,7 @@ async fn run_remote_apple_archive(
     );
 
     sync_apple_workspace_from(app, &payload.machine_id, source).await?;
-    run_apple_smoke_build(app.clone(), payload.machine_id.clone()).await?;
+    run_apple_smoke_build(app.clone(), payload.machine_id.clone(), None).await?;
     let archived =
         run_apple_signed_archive(app.clone(), payload.machine_id.clone(), env_set_id).await?;
 
@@ -3790,6 +3801,7 @@ async fn sync_apple_workspace_from(
     workspace.last_build_succeeded = false;
     workspace.last_xcode_version = None;
     workspace.last_native_lock_updated = false;
+    workspace.last_build_target = None;
     workspace.last_source = Some(source);
     save_apple_workspace(&paths, &workspace)?;
     let view = build_mac_builder_view(app, &paths).await?;
@@ -3801,7 +3813,9 @@ async fn sync_apple_workspace_from(
 async fn run_apple_smoke_build(
     app: AppHandle,
     machine_id: String,
+    input: Option<RunAppleSmokeBuildInput>,
 ) -> Result<RunAppleSmokeBuildResult, String> {
+    let target = input.unwrap_or_default().target;
     let paths = MachinePaths::resolve(&app, &machine_id)?;
     let profile = machines::load_registry(&app)?
         .find(&machine_id)?
@@ -3822,6 +3836,7 @@ async fn run_apple_smoke_build(
     workspace.last_build_succeeded = false;
     workspace.last_xcode_version = None;
     workspace.last_native_lock_updated = false;
+    workspace.last_build_target = None;
     if let Err(error) = save_apple_workspace(&paths, &workspace) {
         drop(guard);
         return Err(error);
@@ -3838,6 +3853,7 @@ async fn run_apple_smoke_build(
             &access.username,
             &identity_path,
             &known_hosts_path,
+            target,
             |progress: AppleProjectProgress| {
                 emit_machine_progress(
                     &event_app,
@@ -3857,6 +3873,7 @@ async fn run_apple_smoke_build(
     workspace.last_build_succeeded = true;
     workspace.last_xcode_version = Some(build.xcode_version.clone());
     workspace.last_native_lock_updated = build.native_lockfile_updated;
+    workspace.last_build_target = Some(build.target);
     save_apple_workspace(&paths, &workspace)?;
     let view = build_mac_builder_view(&app, &paths).await?;
 
@@ -5097,6 +5114,7 @@ fn inspect_apple_workspace(path: &str) -> Result<StoredAppleWorkspace, String> {
         last_build_succeeded: false,
         last_xcode_version: None,
         last_native_lock_updated: false,
+        last_build_target: None,
         last_source: None,
     })
 }

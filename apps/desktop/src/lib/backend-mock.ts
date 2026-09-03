@@ -137,6 +137,7 @@ interface MockMachine {
     macosVersion: string | null;
     xcodeVersion: string | null;
     xcodeSelected: boolean;
+    iosSimulatorRuntime: string | null;
     workspace: T.StoredAppleWorkspace | null;
     signing: T.SigningProvisioningResult | null;
     archive: T.AppleArchiveResult | null;
@@ -180,6 +181,7 @@ function readyMachine(): MockMachine {
         macosVersion: '26.6.2',
         xcodeVersion: '26.6',
         xcodeSelected: true,
+        iosSimulatorRuntime: '26.5',
         workspace: {
             localPath: '/home/you/projects/example-app',
             name: 'com.example.app',
@@ -198,6 +200,7 @@ function readyMachine(): MockMachine {
             lastBuildSucceeded: true,
             lastXcodeVersion: '26.6',
             lastNativeLockUpdated: false,
+            lastBuildTarget: 'simulator',
         },
         signing: {
             keychainPath: '/Users/builder/Library/Keychains/buildbridge-signing.keychain-db',
@@ -287,6 +290,7 @@ function freshMachine(): MockMachine {
         macosVersion: null,
         xcodeVersion: null,
         xcodeSelected: false,
+        iosSimulatorRuntime: null,
         workspace: null,
         signing: null,
         archive: null,
@@ -539,6 +543,10 @@ export function createMockBackend(): Backend {
                             : null,
                     xcodeSelected:
                         trust === 'trusted' && machine.authenticated && machine.xcodeSelected,
+                    iosSimulatorRuntime:
+                        trust === 'trusted' && machine.authenticated && machine.xcodeSelected
+                            ? machine.iosSimulatorRuntime
+                            : null,
                     issue:
                         trust === 'trusted' && machine.username && !machine.authenticated
                             ? 'SSH authentication failed; add the BuildBridge public key to the guest user'
@@ -978,10 +986,16 @@ export function createMockBackend(): Backend {
                 };
             });
         },
-        async runSmokeBuild(machineId) {
+        async runSmokeBuild(machineId, target) {
             const machine = find(machineId);
+            // The Simulator target downloads Apple's platform once; the device SDK never does.
+            const downloadsPlatform =
+                target === 'simulator' && machine.iosSimulatorRuntime === null;
+            const phases: T.AppleProjectPhase[] = downloadsPlatform
+                ? ['preparing_tools', 'preparing_platform', ...projectPhases.slice(1)]
+                : projectPhases;
             return busy(machine, 'Running the test build', async () => {
-                for (const [index, phase] of projectPhases.entries()) {
+                for (const [index, phase] of phases.entries()) {
                     emitter.emit<T.MachineEvent<T.AppleProjectProgress>>(
                         'machine-project-progress',
                         {
@@ -999,13 +1013,18 @@ export function createMockBackend(): Backend {
                     );
                     await sleep(500);
                 }
+                if (downloadsPlatform) {
+                    machine.iosSimulatorRuntime = '26.5';
+                }
                 if (machine.workspace) {
                     machine.workspace.lastBuildSucceeded = true;
                     machine.workspace.lastXcodeVersion = machine.xcodeVersion;
+                    machine.workspace.lastBuildTarget = target;
                 }
                 return {
                     view: view(machine),
                     build: {
+                        target,
                         xcodeVersion: machine.xcodeVersion ?? '26.6',
                         nativeLockfileUpdated: false,
                         outputTail: ['** BUILD SUCCEEDED **'],

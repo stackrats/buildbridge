@@ -129,9 +129,9 @@ const commands = computed(() => {
 
             <Callout tone="neutral" title="If Xcode shows a component chooser">
                 The first time Xcode's graphical app opens it may ask which platforms to install.
-                Keep iOS selected, leave other platforms unchecked, and confirm Download &amp;
-                Install once. The iOS Simulator runtime is otherwise installed automatically during
-                the first project build.
+                You can leave every platform unchecked, iOS included: signed archives and phone
+                builds use the SDK inside Xcode, and the test build downloads the iOS Simulator
+                runtime only if you choose the Simulator target there.
             </Callout>
 
             <div>
