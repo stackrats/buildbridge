@@ -21,6 +21,10 @@ mod qmp;
 mod usb;
 
 pub use device_run::{
+    AppleDeviceRunPhase, AppleDeviceRunProgress, AppleDeviceRunResult, ConsoleEnd, DeviceSigning,
+    run_apple_device_build,
+};
+pub use device_run::{
     DeveloperModeState, GuestDevice, PairingState, TransportType, TunnelState, list_guest_devices,
 };
 pub use disk::{
@@ -80,19 +84,20 @@ const APPLE_WORKSPACE_MAX_FILES: u64 = 50_000;
 const APPLE_WORKSPACE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const APPLE_BUILD_OUTPUT_TAIL_LINES: usize = 80;
 const APPLE_BUILD_DIAGNOSTIC_LINES: usize = 24;
+const APPLE_BUILD_FAILURE_TAIL_LINES: usize = 12;
 const APPLE_ARCHIVE_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const NODE_VERSION: &str = "24.20.0";
 const NODE_DARWIN_X64_SHA256: &str =
     "9e5b2644cf107befb6aefca676b96d3296bc10138096f022ed378d6233ed81f4";
 const PNPM_VERSION: &str = "11.5.0";
+/// Homebrew's relocatable Ruby build for Intel macOS. CocoaPods is installed with it rather
+/// than the guest's system Ruby: that one is Ruby 2.6, its headers ship only inside the SDK
+/// for the running macOS release, which a newer Xcode no longer carries, and its universal
+/// platform makes RubyGems pick arm64 binary gems on an x86_64 guest.
+const PORTABLE_RUBY_VERSION: &str = "3.4.6";
+const PORTABLE_RUBY_DARWIN_X64_SHA256: &str =
+    "99bec6d4440dc4f114754f7b9e18d79258a6dacc4089a9a50638e22a1e8665d0";
 const COCOAPODS_VERSION: &str = "1.16.2";
-const ACTIVESUPPORT_VERSION: &str = "6.1.7.10";
-const CONCURRENT_RUBY_VERSION: &str = "1.3.5";
-const I18N_VERSION: &str = "1.14.7";
-const MINITEST_VERSION: &str = "5.24.1";
-const TZINFO_VERSION: &str = "2.0.6";
-const ZEITWERK_VERSION: &str = "2.6.18";
-const FFI_VERSION: &str = "1.17.0";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -352,6 +357,18 @@ pub struct SigningProvisioningProgress {
     pub detail: String,
 }
 
+/// What a profile is for, read from its entitlements rather than from a name. The plist has no
+/// explicit type; the combination of `get-task-allow`, `ProvisionedDevices`, and
+/// `ProvisionsAllDevices` is unambiguous.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileKind {
+    AppStore,
+    Development,
+    AdHoc,
+    Enterprise,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvisioningProfileSummary {
@@ -360,6 +377,23 @@ pub struct ProvisioningProfileSummary {
     pub application_identifier: String,
     pub expires_at: String,
     pub developer_certificate_sha256: Vec<String>,
+    /// `None` on records written before kinds were read; the archive treats that as App Store.
+    #[serde(default)]
+    pub kind: Option<ProfileKind>,
+    #[serde(default)]
+    pub provisioned_device_udids: Vec<String>,
+    #[serde(default)]
+    pub get_task_allow: bool,
+}
+
+/// One certificate/private-key pair in the guest keychain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvisionedIdentity {
+    pub identity_name: String,
+    pub identity_sha1: String,
+    pub certificate_sha256: String,
+    pub certificate_expires_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -373,6 +407,26 @@ pub struct SigningProvisioningResult {
     pub development_team: String,
     pub bundle_identifier: String,
     pub profiles: Vec<ProvisioningProfileSummary>,
+    /// The development identity in the same keychain, when the kit holds one.
+    #[serde(default)]
+    pub development_identity: Option<ProvisionedIdentity>,
+}
+
+/// The files and passphrases a provisioning run imports: the distribution identity every kit
+/// has, the development identity a kit may hold for device builds, and the profiles.
+pub struct SigningMaterial<'a> {
+    pub certificate_path: &'a Path,
+    pub certificate_password: &'a str,
+    pub development_certificate: Option<(&'a Path, &'a str)>,
+    pub profile_paths: &'a [PathBuf],
+    pub keychain_password: &'a str,
+}
+
+/// Whether the helper creates the keychain or adds to the one a previous import created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelperImportMode {
+    Create,
+    Add,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -1921,10 +1975,7 @@ fn verify_xcode_activation(
 
 #[allow(clippy::too_many_arguments)]
 pub fn provision_signing<F>(
-    certificate_path: &Path,
-    certificate_password: &str,
-    profile_paths: &[PathBuf],
-    keychain_password: &str,
+    material: &SigningMaterial<'_>,
     development_team: &str,
     bundle_identifier: &str,
     ssh_port: u16,
@@ -1938,12 +1989,38 @@ where
 {
     validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
     validate_signing_target(development_team, bundle_identifier)?;
+    let certificate_password = material.certificate_password;
+    let keychain_password = material.keychain_password;
     let (certificate_path, profile_paths, total_bytes) = validate_signing_material(
-        certificate_path,
+        material.certificate_path,
         certificate_password,
-        profile_paths,
+        material.profile_paths,
         keychain_password,
     )?;
+    let development = material
+        .development_certificate
+        .map(|(path, password)| -> Result<(PathBuf, &str), ProviderError> {
+            if password.is_empty() || password.len() > 512 {
+                return Err(ProviderError::GuestBridge(
+                    "store the development certificate passphrase in the operating-system vault first"
+                        .to_string(),
+                ));
+            }
+            let path = validate_signing_file(
+                path,
+                &["p12", "pfx"],
+                SIGNING_CERTIFICATE_MAX_BYTES,
+                "development certificate",
+            )?;
+            Ok((path, password))
+        })
+        .transpose()?;
+    let total_bytes = total_bytes
+        + development
+            .as_ref()
+            .and_then(|(path, _)| fs::metadata(path).ok())
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
     let started_at = Instant::now();
     let guest_home = format!("/Users/{username}");
     let guest_tools = format!("{guest_home}/.buildbridge/tools");
@@ -2075,6 +2152,7 @@ where
             &xcodebuild,
             keychain_password,
             certificate_password,
+            HelperImportMode::Create,
         )?;
 
         on_progress(signing_progress(
@@ -2124,6 +2202,79 @@ where
             known_hosts_path,
         )?;
 
+        // The development identity goes into the same keychain, so one unlock serves both
+        // the archive and a device build; it gets the same team check and signing probe.
+        let development_identity = match &development {
+            Some((development_path, development_password)) => {
+                let guest_development = format!("{staging}/development.p12");
+                let guest_development_der = format!("{staging}/development.der");
+                stream_signing_file(
+                    development_path,
+                    &guest_development,
+                    total_bytes,
+                    &mut completed_bytes,
+                    started_at,
+                    ssh_port,
+                    username,
+                    identity_path,
+                    known_hosts_path,
+                    &mut on_progress,
+                )?;
+                on_progress(signing_progress(
+                    SigningProvisioningPhase::ImportingCertificate,
+                    total_bytes,
+                    total_bytes,
+                    started_at,
+                    "Importing the development identity into the same keychain.",
+                ));
+                run_signing_helper(
+                    ssh_port,
+                    username,
+                    identity_path,
+                    known_hosts_path,
+                    &helper_binary,
+                    &keychain_path,
+                    &guest_development,
+                    &guest_development_der,
+                    &xcodebuild,
+                    keychain_password,
+                    development_password,
+                    HelperImportMode::Add,
+                )?;
+                let output = run_guest_command(
+                    ssh_port,
+                    username,
+                    identity_path,
+                    known_hosts_path,
+                    &certificate_metadata_command(&guest_development_der),
+                )?;
+                let (expires_at, sha1, sha256, team, name) = parse_certificate_metadata(&output)?;
+                if team != development_team {
+                    return Err(ProviderError::GuestBridge(format!(
+                        "the development certificate belongs to team {team}, but the project uses team {development_team}"
+                    )));
+                }
+                verify_code_signing_identity(
+                    &sha1,
+                    &helper_binary,
+                    &keychain_path,
+                    &staging,
+                    keychain_password,
+                    ssh_port,
+                    username,
+                    identity_path,
+                    known_hosts_path,
+                )?;
+                Some(ProvisionedIdentity {
+                    identity_name: name,
+                    identity_sha1: sha1,
+                    certificate_sha256: sha256,
+                    certificate_expires_at: expires_at,
+                })
+            }
+            None => None,
+        };
+
         on_progress(signing_progress(
             SigningProvisioningPhase::InspectingProfiles,
             total_bytes,
@@ -2157,13 +2308,32 @@ where
                     profile.uuid, profile.application_identifier, bundle_identifier
                 )));
             }
+            // Development profiles carry the development certificate; App Store, ad hoc and
+            // enterprise profiles all carry the distribution one.
+            let (required_fingerprint, identity_label) =
+                if profile.kind == Some(ProfileKind::Development) {
+                    (
+                        development_identity
+                            .as_ref()
+                            .map(|identity| identity.certificate_sha256.as_str()),
+                        "development",
+                    )
+                } else {
+                    (Some(certificate_sha256.as_str()), "distribution")
+                };
+            let Some(required_fingerprint) = required_fingerprint else {
+                return Err(ProviderError::GuestBridge(format!(
+                    "provisioning profile {} is a development profile, but the kit has no development identity",
+                    profile.uuid
+                )));
+            };
             if !profile
                 .developer_certificate_sha256
                 .iter()
-                .any(|fingerprint| fingerprint == &certificate_sha256)
+                .any(|fingerprint| fingerprint == required_fingerprint)
             {
                 return Err(ProviderError::GuestBridge(format!(
-                    "provisioning profile {} does not include the selected signing certificate",
+                    "provisioning profile {} does not include the kit's {identity_label} certificate",
                     profile.uuid
                 )));
             }
@@ -2204,6 +2374,7 @@ where
             development_team: development_team.to_string(),
             bundle_identifier: bundle_identifier.to_string(),
             profiles,
+            development_identity,
         })
     })();
 
@@ -2435,14 +2606,19 @@ where
     let started_at = Instant::now();
     let guest_home = format!("/Users/{username}");
     let workspace = format!("{guest_home}/BuildBridge/workspaces/active");
-    let tools = format!("{guest_home}/.buildbridge/tools");
+    let GuestToolchain {
+        tools,
+        node_root,
+        pnpm,
+        ruby_root,
+        gem_home,
+        pod,
+        developer_dir,
+        path,
+    } = guest_toolchain(&guest_home);
     let node_name = format!("node-v{NODE_VERSION}-darwin-x64");
-    let node_root = format!("{tools}/{node_name}");
     let node_archive = format!("{tools}/{node_name}.tar.gz");
-    let pnpm = format!("{tools}/pnpm/node_modules/.bin/pnpm");
-    let gem_home = format!("{tools}/gems");
-    let pod = format!("{gem_home}/bin/pod");
-    let developer_dir = format!("{guest_home}/Applications/Xcode.app/Contents/Developer");
+    let ruby_archive = format!("{tools}/portable-ruby-{PORTABLE_RUBY_VERSION}.tar.gz");
 
     let script = format!(
         r#"set -u
@@ -2486,12 +2662,11 @@ if /bin/test "$job_owner" -eq 1; then
         set -eu
 /bin/test -f "{workspace}/package.json"
 /bin/test -d "{workspace}/ios/App/App.xcworkspace"
-export PATH="{node_root}/bin:{tools}/pnpm/node_modules/.bin:{gem_home}/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="{path}"
 export GEM_HOME="{gem_home}"
 export GEM_PATH="{gem_home}"
 export DEVELOPER_DIR="{developer_dir}"
 export LANG="en_US.UTF-8"
-export RUBYOPT="-rlogger"
 export CYPRESS_INSTALL_BINARY=0
 if /bin/test -f "{workspace}/.buildbridge/env.sh"; then
     . "{workspace}/.buildbridge/env.sh"
@@ -2509,15 +2684,17 @@ fi
 if /bin/test ! -x "{pnpm}"; then
     "{node_root}/bin/npm" install --prefix "{tools}/pnpm" "pnpm@{PNPM_VERSION}" --no-audit --no-fund
 fi
+if /bin/test ! -x "{ruby_root}/bin/ruby"; then
+    /bin/rm -rf "{ruby_root}" "{ruby_archive}"
+    /usr/bin/curl --fail --location --show-error --silent "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/{PORTABLE_RUBY_VERSION}/portable-ruby-{PORTABLE_RUBY_VERSION}.el_capitan.bottle.tar.gz" --output "{ruby_archive}"
+    /usr/bin/shasum -a 256 "{ruby_archive}" | /usr/bin/grep -q "^{PORTABLE_RUBY_DARWIN_X64_SHA256}  "
+    /usr/bin/tar -xzf "{ruby_archive}" -C "{tools}"
+    /bin/rm -f "{ruby_archive}"
+    /bin/test -x "{ruby_root}/bin/ruby"
+fi
 if /bin/test ! -x "{pod}"; then
-    /usr/bin/gem install concurrent-ruby --version "{CONCURRENT_RUBY_VERSION}" --no-document --conservative --minimal-deps
-    /usr/bin/gem install i18n --version "{I18N_VERSION}" --no-document --conservative --minimal-deps
-    /usr/bin/gem install minitest --version "{MINITEST_VERSION}" --no-document --conservative --minimal-deps
-    /usr/bin/gem install tzinfo --version "{TZINFO_VERSION}" --no-document --conservative --minimal-deps
-    /usr/bin/gem install zeitwerk --version "{ZEITWERK_VERSION}" --no-document --conservative --minimal-deps
-    /usr/bin/gem install activesupport --version "{ACTIVESUPPORT_VERSION}" --no-document --conservative --minimal-deps
-    /usr/bin/gem install ffi --version "{FFI_VERSION}" --no-document --conservative --minimal-deps
-    /usr/bin/gem install cocoapods --version "{COCOAPODS_VERSION}" --no-document --conservative --minimal-deps
+    /bin/rm -rf "{gem_home}" "{tools}/gems"
+    "{ruby_root}/bin/gem" install cocoapods --version "{COCOAPODS_VERSION}" --no-document
     /bin/test -x "{pod}"
 fi
 platform_installed=0
@@ -2650,7 +2827,6 @@ exit "$job_result"
     let mut native_lockfile_updated = false;
     let mut output_tail = Vec::new();
     let mut diagnostic_lines = Vec::new();
-    let mut last_event = Instant::now() - Duration::from_secs(1);
     on_progress(apple_progress(
         phase,
         0,
@@ -2676,7 +2852,6 @@ exit "$job_result"
                 phase_detail(phase),
                 None,
             ));
-            last_event = Instant::now();
             continue;
         }
         if line == "__BUILDBRIDGE_NATIVE_LOCK_UPDATED__:yes" {
@@ -2717,7 +2892,6 @@ exit "$job_result"
                 retry_detail,
                 Some(message),
             ));
-            last_event = Instant::now();
             continue;
         }
         if let Some((completed_bytes, total_bytes, detail)) = apple_platform_progress(&line) {
@@ -2730,7 +2904,6 @@ exit "$job_result"
                 detail,
                 None,
             ));
-            last_event = Instant::now();
             continue;
         }
 
@@ -2749,17 +2922,14 @@ exit "$job_result"
         if output_tail.len() > APPLE_BUILD_OUTPUT_TAIL_LINES {
             output_tail.remove(0);
         }
-        if is_diagnostic || last_event.elapsed() >= Duration::from_millis(100) {
-            on_progress(apple_progress(
-                phase,
-                0,
-                0,
-                started_at,
-                phase_detail(phase),
-                Some(line),
-            ));
-            last_event = Instant::now();
-        }
+        on_progress(apple_progress(
+            phase,
+            0,
+            0,
+            started_at,
+            phase_detail(phase),
+            Some(line),
+        ));
     }
 
     let status = child.wait().map_err(|error| {
@@ -2776,18 +2946,7 @@ exit "$job_result"
         );
     }
     if !status.success() {
-        let context = if diagnostic_lines.is_empty() {
-            output_tail
-                .iter()
-                .rev()
-                .take(12)
-                .rev()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            diagnostic_lines.join("\n")
-        };
+        let context = build_failure_context(&diagnostic_lines, &output_tail);
         return Err(ProviderError::GuestBridge(if context.is_empty() {
             format!("the Apple test build failed during {}", phase_detail(phase))
         } else {
@@ -2859,27 +3018,12 @@ where
             "the provisioned signing identity is invalid".to_string(),
         ));
     }
-    let profile = signing
-        .profiles
-        .iter()
-        .find(|profile| {
-            valid_profile_uuid(&profile.uuid)
-                && profile.team_identifier == signing.development_team
-                && profile_allows_bundle(
-                    &profile.application_identifier,
-                    &signing.bundle_identifier,
-                )
-                && profile
-                    .developer_certificate_sha256
-                    .iter()
-                    .any(|fingerprint| fingerprint == &signing.certificate_sha256)
-        })
-        .ok_or_else(|| {
-            ProviderError::GuestBridge(
-                "no installed App Store profile matches the provisioned identity and project"
-                    .to_string(),
-            )
-        })?;
+    let profile = select_app_store_profile(signing).ok_or_else(|| {
+        ProviderError::GuestBridge(
+            "no installed App Store profile matches the provisioned distribution identity and project (development and ad hoc profiles are not used for App Store archives)"
+                .to_string(),
+        )
+    })?;
     let output_directory = validate_archive_output_directory(output_directory)?;
     let expected_keychain_path =
         format!("/Users/{username}/Library/Keychains/{SIGNING_KEYCHAIN_NAME}");
@@ -3439,7 +3583,6 @@ where
     let mut phase = AppleArchivePhase::Archiving;
     let mut output_tail = Vec::new();
     let mut diagnostic_lines = Vec::new();
-    let mut last_event = Instant::now() - Duration::from_secs(1);
 
     for line in BufReader::new(stdout).lines() {
         let line = line.map_err(|error| {
@@ -3464,7 +3607,6 @@ where
                 archive_phase_detail(phase),
                 None,
             ));
-            last_event = Instant::now();
             continue;
         }
 
@@ -3482,37 +3624,21 @@ where
         if output_tail.len() > APPLE_BUILD_OUTPUT_TAIL_LINES {
             output_tail.remove(0);
         }
-        if apple_archive_log_is_diagnostic(&line)
-            || last_event.elapsed() >= Duration::from_millis(100)
-        {
-            on_progress(archive_progress(
-                phase,
-                0,
-                0,
-                started_at,
-                archive_phase_detail(phase),
-                Some(line),
-            ));
-            last_event = Instant::now();
-        }
+        on_progress(archive_progress(
+            phase,
+            0,
+            0,
+            started_at,
+            archive_phase_detail(phase),
+            Some(line),
+        ));
     }
 
     let status = child.wait().map_err(|error| {
         ProviderError::GuestBridge(format!("could not finish the signed archive: {error}"))
     })?;
     if !status.success() {
-        let context = if diagnostic_lines.is_empty() {
-            output_tail
-                .iter()
-                .rev()
-                .take(12)
-                .rev()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            diagnostic_lines.join("\n")
-        };
+        let context = build_failure_context(&diagnostic_lines, &output_tail);
         return Err(ProviderError::GuestBridge(if context.is_empty() {
             format!(
                 "the signed archive failed during {}",
@@ -4197,10 +4323,12 @@ where
         None,
     ));
     let root = format!("{guest_home}/BuildBridge/workspaces/active");
-    let tools = format!("{guest_home}/.buildbridge/tools");
-    let node_root = format!("{tools}/node-v{NODE_VERSION}-darwin-x64");
-    let gem_home = format!("{tools}/gems");
-    let developer_dir = format!("{guest_home}/Applications/Xcode.app/Contents/Developer");
+    let GuestToolchain {
+        gem_home,
+        developer_dir,
+        path,
+        ..
+    } = guest_toolchain(&guest_home);
 
     run_guest_command(
         ssh_port,
@@ -4236,12 +4364,11 @@ where
         r#"set -u
 exec 2>&1
 set -e
-export PATH="{node_root}/bin:{tools}/pnpm/node_modules/.bin:{gem_home}/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="{path}"
 export GEM_HOME="{gem_home}"
 export GEM_PATH="{gem_home}"
 export DEVELOPER_DIR="{developer_dir}"
 export LANG="en_US.UTF-8"
-export RUBYOPT="-rlogger"
 export CYPRESS_INSTALL_BINARY=0
 /bin/test -f "{root}/package.json"
 /bin/test -x "{root}/node_modules/.bin/vp"
@@ -4615,10 +4742,15 @@ fn run_signing_helper(
     xcodebuild_path: &str,
     keychain_password: &str,
     certificate_password: &str,
+    mode: HelperImportMode,
 ) -> Result<(), ProviderError> {
     let remote_command = format!(
-        "{} {} {} {} {}",
+        "{}{} {} {} {} {}",
         shell_single_quote(helper_path),
+        match mode {
+            HelperImportMode::Create => "",
+            HelperImportMode::Add => " --add",
+        },
         shell_single_quote(keychain_path),
         shell_single_quote(certificate_path),
         shell_single_quote(certificate_der_path),
@@ -4701,7 +4833,7 @@ fn inspect_guest_profiles(
         let plist = shell_single_quote(&format!("{guest_profile}.plist"));
         let certificate = shell_single_quote(&format!("{guest_profile}.certificate.der"));
         command.push_str(&format!(
-            "; /usr/bin/security cms -D -i {profile} > {plist}; uuid=$(/usr/bin/plutil -extract UUID raw -o - {plist}); team=$(/usr/bin/plutil -extract TeamIdentifier.0 raw -o - {plist}); app_id=$(/usr/bin/plutil -extract Entitlements.application-identifier raw -o - {plist}); expires_at=$(/usr/bin/plutil -extract ExpirationDate raw -o - {plist}); if ! expiry_epoch=$(/bin/date -j -f '%Y-%m-%d %H:%M:%S %z' \"$expires_at\" +%s 2>/dev/null || /bin/date -j -f '%Y-%m-%dT%H:%M:%SZ' \"$expires_at\" +%s 2>/dev/null); then /usr/bin/printf 'invalid_profile_expiry:%s' \"$uuid\" >&2; exit 1; fi; if /bin/test \"$expiry_epoch\" -le \"$(/bin/date +%s)\"; then /usr/bin/printf 'expired_profile:%s' \"$uuid\" >&2; exit 1; fi; /usr/bin/printf '__BUILDBRIDGE_PROFILE__\\t%s\\t%s\\t%s\\t%s\\n' \"$uuid\" \"$team\" \"$app_id\" \"$expires_at\"; certificate_count=$(/usr/bin/plutil -extract DeveloperCertificates xml1 -o - {plist} | /usr/bin/grep -c '<data>'); certificate_index=0; while /bin/test \"$certificate_index\" -lt \"$certificate_count\"; do /usr/bin/plutil -extract \"DeveloperCertificates.$certificate_index\" raw -o - {plist} | /usr/bin/base64 -D > {certificate}; certificate_sha256=$(/usr/bin/openssl dgst -sha256 {certificate} | /usr/bin/awk '{{print $NF}}'); /usr/bin/printf '__BUILDBRIDGE_PROFILE_CERT__\\t%s\\t%s\\n' \"$uuid\" \"$certificate_sha256\"; certificate_index=$((certificate_index + 1)); done; /bin/rm -f {certificate} {plist}"
+            "; /usr/bin/security cms -D -i {profile} > {plist}; uuid=$(/usr/bin/plutil -extract UUID raw -o - {plist}); team=$(/usr/bin/plutil -extract TeamIdentifier.0 raw -o - {plist}); app_id=$(/usr/bin/plutil -extract Entitlements.application-identifier raw -o - {plist}); expires_at=$(/usr/bin/plutil -extract ExpirationDate raw -o - {plist}); if ! expiry_epoch=$(/bin/date -j -f '%Y-%m-%d %H:%M:%S %z' \"$expires_at\" +%s 2>/dev/null || /bin/date -j -f '%Y-%m-%dT%H:%M:%SZ' \"$expires_at\" +%s 2>/dev/null); then /usr/bin/printf 'invalid_profile_expiry:%s' \"$uuid\" >&2; exit 1; fi; if /bin/test \"$expiry_epoch\" -le \"$(/bin/date +%s)\"; then /usr/bin/printf 'expired_profile:%s' \"$uuid\" >&2; exit 1; fi; /usr/bin/printf '__BUILDBRIDGE_PROFILE__\\t%s\\t%s\\t%s\\t%s\\n' \"$uuid\" \"$team\" \"$app_id\" \"$expires_at\"; certificate_count=$(/usr/bin/plutil -extract DeveloperCertificates xml1 -o - {plist} | /usr/bin/grep -c '<data>'); certificate_index=0; while /bin/test \"$certificate_index\" -lt \"$certificate_count\"; do /usr/bin/plutil -extract \"DeveloperCertificates.$certificate_index\" raw -o - {plist} | /usr/bin/base64 -D > {certificate}; certificate_sha256=$(/usr/bin/openssl dgst -sha256 {certificate} | /usr/bin/awk '{{print $NF}}'); /usr/bin/printf '__BUILDBRIDGE_PROFILE_CERT__\\t%s\\t%s\\n' \"$uuid\" \"$certificate_sha256\"; certificate_index=$((certificate_index + 1)); done; get_task_allow=$(/usr/bin/plutil -extract Entitlements.get-task-allow raw -o - {plist} 2>/dev/null || /bin/echo false); provisions_all=$(/usr/bin/plutil -extract ProvisionsAllDevices raw -o - {plist} 2>/dev/null || /bin/echo false); /usr/bin/printf '__BUILDBRIDGE_PROFILE_FLAGS__\\t%s\\t%s\\t%s\\n' \"$uuid\" \"$get_task_allow\" \"$provisions_all\"; device_count=$(/usr/bin/plutil -extract ProvisionedDevices xml1 -o - {plist} 2>/dev/null | /usr/bin/grep -c '<string>' || /usr/bin/true); device_index=0; while /bin/test \"${{device_count:-0}}\" -gt \"$device_index\"; do device_udid=$(/usr/bin/plutil -extract \"ProvisionedDevices.$device_index\" raw -o - {plist}); /usr/bin/printf '__BUILDBRIDGE_PROFILE_DEVICE__\\t%s\\t%s\\n' \"$uuid\" \"$device_udid\"; device_index=$((device_index + 1)); done; /bin/rm -f {certificate} {plist}"
         ));
     }
 
@@ -4732,7 +4864,59 @@ fn inspect_guest_profiles(
 
 fn parse_profile_summaries(output: &str) -> Result<Vec<ProvisioningProfileSummary>, ProviderError> {
     let mut profiles: Vec<ProvisioningProfileSummary> = Vec::new();
+    // (get-task-allow, ProvisionsAllDevices) per profile, in the order the guest reported.
+    let mut flags: Vec<(String, bool, bool)> = Vec::new();
     for line in output.lines() {
+        if let Some(values) = line.strip_prefix("__BUILDBRIDGE_PROFILE_FLAGS__\t") {
+            let fields = values.split('\t').collect::<Vec<_>>();
+            let parse_flag = |value: &str| match value {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            };
+            let (Some(&uuid), Some(get_task_allow), Some(provisions_all)) = (
+                fields.first(),
+                fields.get(1).and_then(|value| parse_flag(value)),
+                fields.get(2).and_then(|value| parse_flag(value)),
+            ) else {
+                return Err(ProviderError::GuestBridge(
+                    "macOS returned invalid provisioning profile entitlement metadata".to_string(),
+                ));
+            };
+            if fields.len() != 3
+                || !profiles.iter().any(|profile| profile.uuid == uuid)
+                || flags.iter().any(|(seen, _, _)| seen == uuid)
+            {
+                return Err(ProviderError::GuestBridge(
+                    "macOS returned out-of-order provisioning profile metadata".to_string(),
+                ));
+            }
+            flags.push((uuid.to_string(), get_task_allow, provisions_all));
+            continue;
+        }
+        if let Some(values) = line.strip_prefix("__BUILDBRIDGE_PROFILE_DEVICE__\t") {
+            let Some((uuid, udid)) = values.split_once('\t') else {
+                return Err(ProviderError::GuestBridge(
+                    "macOS returned invalid provisioning profile device metadata".to_string(),
+                ));
+            };
+            let Some(profile) = profiles.iter_mut().find(|profile| profile.uuid == uuid) else {
+                return Err(ProviderError::GuestBridge(
+                    "macOS returned out-of-order provisioning profile metadata".to_string(),
+                ));
+            };
+            let udid = udid.to_ascii_uppercase();
+            if !valid_device_udid(&udid)
+                || profile.provisioned_device_udids.len() >= 400
+                || profile.provisioned_device_udids.contains(&udid)
+            {
+                return Err(ProviderError::GuestBridge(
+                    "macOS returned invalid provisioning profile device metadata".to_string(),
+                ));
+            }
+            profile.provisioned_device_udids.push(udid);
+            continue;
+        }
         if let Some(values) = line.strip_prefix("__BUILDBRIDGE_PROFILE_CERT__\t") {
             let Some((uuid, fingerprint)) = values.split_once('\t') else {
                 return Err(ProviderError::GuestBridge(
@@ -4801,6 +4985,9 @@ fn parse_profile_summaries(output: &str) -> Result<Vec<ProvisioningProfileSummar
             application_identifier: application_identifier.to_string(),
             expires_at: expires_at.to_string(),
             developer_certificate_sha256: Vec::new(),
+            kind: None,
+            provisioned_device_udids: Vec::new(),
+            get_task_allow: false,
         });
     }
     if profiles
@@ -4811,8 +4998,88 @@ fn parse_profile_summaries(output: &str) -> Result<Vec<ProvisioningProfileSummar
             "a provisioning profile contains no developer signing certificate".to_string(),
         ));
     }
+    for profile in &mut profiles {
+        let Some((_, get_task_allow, provisions_all)) =
+            flags.iter().find(|(uuid, _, _)| uuid == &profile.uuid)
+        else {
+            return Err(ProviderError::GuestBridge(
+                "macOS returned incomplete provisioning profile metadata".to_string(),
+            ));
+        };
+        profile.get_task_allow = *get_task_allow;
+        profile.kind = Some(classify_profile(
+            *get_task_allow,
+            *provisions_all,
+            profile.provisioned_device_udids.len(),
+        ));
+    }
 
     Ok(profiles)
+}
+
+/// What a profile is for. In-house profiles provision every device; App Store profiles name
+/// none and cannot be debugged; development profiles can be debugged; ad hoc ones name devices
+/// but cannot.
+pub fn classify_profile(
+    get_task_allow: bool,
+    provisions_all_devices: bool,
+    device_count: usize,
+) -> ProfileKind {
+    if provisions_all_devices {
+        ProfileKind::Enterprise
+    } else if get_task_allow {
+        ProfileKind::Development
+    } else if device_count == 0 {
+        ProfileKind::AppStore
+    } else {
+        ProfileKind::AdHoc
+    }
+}
+
+fn profile_matches_project(
+    profile: &ProvisioningProfileSummary,
+    signing: &SigningProvisioningResult,
+) -> bool {
+    valid_profile_uuid(&profile.uuid)
+        && profile.team_identifier == signing.development_team
+        && profile_allows_bundle(&profile.application_identifier, &signing.bundle_identifier)
+}
+
+/// The profile an App Store archive signs with: the project's, carrying the distribution
+/// certificate, and not a development or ad hoc profile that happens to match too. A record
+/// written before kinds were read counts as App Store, which is all a kit could hold then.
+pub fn select_app_store_profile(
+    signing: &SigningProvisioningResult,
+) -> Option<&ProvisioningProfileSummary> {
+    signing.profiles.iter().find(|profile| {
+        matches!(profile.kind, Some(ProfileKind::AppStore) | None)
+            && profile_matches_project(profile, signing)
+            && profile
+                .developer_certificate_sha256
+                .iter()
+                .any(|fingerprint| fingerprint == &signing.certificate_sha256)
+    })
+}
+
+/// The profile a device build signs with: a development profile carrying the development
+/// certificate and listing the phone.
+pub fn select_development_profile<'a>(
+    signing: &'a SigningProvisioningResult,
+    udid: &str,
+) -> Option<&'a ProvisioningProfileSummary> {
+    let identity = signing.development_identity.as_ref()?;
+    signing.profiles.iter().find(|profile| {
+        profile.kind == Some(ProfileKind::Development)
+            && profile_matches_project(profile, signing)
+            && profile
+                .developer_certificate_sha256
+                .iter()
+                .any(|fingerprint| fingerprint == &identity.certificate_sha256)
+            && profile
+                .provisioned_device_udids
+                .iter()
+                .any(|listed| listed.eq_ignore_ascii_case(udid))
+    })
 }
 
 /// A device UDID as Apple prints it: 40 hex characters on older phones, or 8 hex characters,
@@ -5129,11 +5396,66 @@ fn apple_build_log_is_diagnostic(line: &str) -> bool {
 
     normalized.starts_with("error:")
         || normalized.contains(": error:")
+        || normalized.starts_with("make: ***")
+        || normalized.contains("extconf failed")
+        || normalized.contains("mkmf.rb can't find header files")
         || normalized.contains("com.apple.actool.errors")
         || normalized.contains("failed with a nonzero exit code")
         || normalized.starts_with("** build failed **")
         || normalized.starts_with("the following build commands failed:")
         || normalized.trim_start().starts_with("compileassetcatalog")
+}
+
+/// What a failed guest build reports: every diagnostic line kept during the run, then the last
+/// lines the guest printed so the failing command is named even when its output matches no
+/// known diagnostic shape. Lines already in the tail are not repeated.
+fn build_failure_context(diagnostic_lines: &[String], output_tail: &[String]) -> String {
+    let tail = &output_tail[output_tail
+        .len()
+        .saturating_sub(APPLE_BUILD_FAILURE_TAIL_LINES)..];
+
+    diagnostic_lines
+        .iter()
+        .filter(|line| !tail.contains(line))
+        .chain(tail.iter())
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Where the pinned toolchain lives under the guest home directory. Every guest recipe derives
+/// its paths from here so the test build and the signed archive agree.
+struct GuestToolchain {
+    tools: String,
+    node_root: String,
+    pnpm: String,
+    ruby_root: String,
+    gem_home: String,
+    pod: String,
+    developer_dir: String,
+    /// The `PATH` the recipes export: pinned tools first, then only Apple's system directories.
+    path: String,
+}
+
+fn guest_toolchain(guest_home: &str) -> GuestToolchain {
+    let tools = format!("{guest_home}/.buildbridge/tools");
+    let node_root = format!("{tools}/node-v{NODE_VERSION}-darwin-x64");
+    let ruby_root = format!("{tools}/portable-ruby/{PORTABLE_RUBY_VERSION}");
+    let gem_home = format!("{tools}/gems-ruby-{PORTABLE_RUBY_VERSION}");
+    let path = format!(
+        "{node_root}/bin:{tools}/pnpm/node_modules/.bin:{ruby_root}/bin:{gem_home}/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    );
+
+    GuestToolchain {
+        pnpm: format!("{tools}/pnpm/node_modules/.bin/pnpm"),
+        pod: format!("{gem_home}/bin/pod"),
+        developer_dir: format!("{guest_home}/Applications/Xcode.app/Contents/Developer"),
+        tools,
+        node_root,
+        ruby_root,
+        gem_home,
+        path,
+    }
 }
 
 fn apple_build_retry_detail(value: &str) -> Option<&'static str> {
@@ -5150,7 +5472,7 @@ fn phase_detail(phase: AppleProjectPhase) -> &'static str {
         AppleProjectPhase::Snapshotting => "Creating the source snapshot",
         AppleProjectPhase::Transferring => "Synchronizing source",
         AppleProjectPhase::Extracting => "Preparing the guest workspace",
-        AppleProjectPhase::PreparingTools => "Preparing Node, pnpm, and CocoaPods",
+        AppleProjectPhase::PreparingTools => "Preparing Node, pnpm, Ruby, and CocoaPods",
         AppleProjectPhase::PreparingPlatform => {
             "Downloading and installing Apple's iOS Simulator platform"
         }
@@ -6794,6 +7116,8 @@ mod tests {
             "** BUILD FAILED **",
             "The following build commands failed:",
             "    CompileAssetCatalogVariant thinned /tmp/App.app /project/Assets.xcassets",
+            "make: *** No rule to make target `universal-darwin24/ruby/config.h', needed by `nkf.o'.  Stop.",
+            "ERROR: Failed to build gem native extension.",
         ] {
             assert!(
                 apple_build_log_is_diagnostic(line),
@@ -6801,9 +7125,54 @@ mod tests {
             );
         }
 
-        assert!(!apple_build_log_is_diagnostic(
-            "warning: Run script build phase will be run during every build"
-        ));
+        for line in [
+            "warning: Run script build phase will be run during every build",
+            "Building native extensions. This could take a while...",
+        ] {
+            assert!(
+                !apple_build_log_is_diagnostic(line),
+                "{line} is not a diagnostic"
+            );
+        }
+    }
+
+    #[test]
+    fn build_failures_report_the_diagnostics_and_the_last_lines_the_guest_printed() {
+        let tail = [
+            "Successfully installed ffi-1.17.0-arm64-darwin",
+            "Building native extensions. This could take a while...",
+            "current directory: /Users/builder/.buildbridge/tools/gems/gems/nkf-0.3.0/ext/nkf",
+            "make \"DESTDIR=\"",
+            "make: *** No rule to make target `universal-darwin24/ruby/config.h', needed by `nkf.o'.  Stop.",
+            "make failed, exit code 2",
+            "ERROR: Error installing cocoapods:",
+            "ERROR: Failed to build gem native extension.",
+        ]
+        .map(String::from);
+        let diagnostics = tail
+            .iter()
+            .filter(|line| apple_build_log_is_diagnostic(line))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 3);
+
+        // Every line once, in the order the guest printed it: the tail already holds the
+        // diagnostics, so they are not repeated ahead of it.
+        assert_eq!(build_failure_context(&diagnostics, &tail), tail.join("\n"));
+
+        // A diagnostic that scrolled out of the tail is kept ahead of the bounded tail.
+        let early = vec!["/project/App.swift:42:7: error: missing argument".to_string()];
+        let long_tail = (0..20)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>();
+        let context = build_failure_context(&early, &long_tail);
+        let lines = context.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), APPLE_BUILD_FAILURE_TAIL_LINES + 1);
+        assert_eq!(lines[0], early[0]);
+        assert_eq!(lines[1], "line 8");
+        assert_eq!(lines[APPLE_BUILD_FAILURE_TAIL_LINES], "line 19");
+
+        assert_eq!(build_failure_context(&[], &[]), "");
     }
 
     #[test]
@@ -6818,12 +7187,36 @@ mod tests {
     #[test]
     fn provisioning_profile_metadata_is_validated_and_matches_exact_or_wildcard_bundles() {
         let profiles = parse_profile_summaries(
-            "__BUILDBRIDGE_PROFILE__\t01234567-89AB-CDEF-0123-456789ABCDEF\tTEAM123456\tTEAM123456.com.example.app\t2027-09-02 12:00:00 +0000\n__BUILDBRIDGE_PROFILE_CERT__\t01234567-89AB-CDEF-0123-456789ABCDEF\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+            "__BUILDBRIDGE_PROFILE__\t01234567-89AB-CDEF-0123-456789ABCDEF\tTEAM123456\tTEAM123456.com.example.app\t2027-09-02 12:00:00 +0000\n__BUILDBRIDGE_PROFILE_CERT__\t01234567-89AB-CDEF-0123-456789ABCDEF\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n__BUILDBRIDGE_PROFILE_FLAGS__\t01234567-89AB-CDEF-0123-456789ABCDEF\tfalse\tfalse\n",
         )
         .expect("valid profile metadata should parse");
 
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].developer_certificate_sha256.len(), 1);
+        assert_eq!(profiles[0].kind, Some(ProfileKind::AppStore));
+        assert!(profiles[0].provisioned_device_udids.is_empty());
+
+        let development = parse_profile_summaries(
+            "__BUILDBRIDGE_PROFILE__\t22222222-3333-4444-5555-666666666666\tTEAM123456\tTEAM123456.com.example.app\t2027-09-02 12:00:00 +0000\n__BUILDBRIDGE_PROFILE_CERT__\t22222222-3333-4444-5555-666666666666\tbbbb1111cccc2222dddd3333eeee4444ffff5555aaaa6666bbbb7777cccc8888\n__BUILDBRIDGE_PROFILE_FLAGS__\t22222222-3333-4444-5555-666666666666\ttrue\tfalse\n__BUILDBRIDGE_PROFILE_DEVICE__\t22222222-3333-4444-5555-666666666666\t00008030-000a1b2c3d4e5f6a\n",
+        )
+        .expect("development profile metadata should parse");
+        assert_eq!(development[0].kind, Some(ProfileKind::Development));
+        assert!(development[0].get_task_allow);
+        assert_eq!(
+            development[0].provisioned_device_udids,
+            vec!["00008030-000A1B2C3D4E5F6A".to_string()]
+        );
+        assert!(
+            parse_profile_summaries(
+                "__BUILDBRIDGE_PROFILE__\t01234567-89AB-CDEF-0123-456789ABCDEF\tTEAM123456\tTEAM123456.com.example.app\t2027\n__BUILDBRIDGE_PROFILE_CERT__\t01234567-89AB-CDEF-0123-456789ABCDEF\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+            )
+            .is_err(),
+            "the entitlement flags are required"
+        );
+        assert_eq!(classify_profile(false, false, 0), ProfileKind::AppStore);
+        assert_eq!(classify_profile(true, false, 2), ProfileKind::Development);
+        assert_eq!(classify_profile(false, false, 2), ProfileKind::AdHoc);
+        assert_eq!(classify_profile(false, true, 0), ProfileKind::Enterprise);
         assert!(profile_allows_bundle(
             &profiles[0].application_identifier,
             "com.example.app"

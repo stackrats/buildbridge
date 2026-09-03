@@ -11,8 +11,182 @@ const APP_STORE_CONNECT_APPS_URL: &str = "https://api.appstoreconnect.apple.com/
 const APP_STORE_CONNECT_CERTIFICATES_URL: &str =
     "https://api.appstoreconnect.apple.com/v1/certificates";
 const APP_STORE_CONNECT_PROFILES_URL: &str = "https://api.appstoreconnect.apple.com/v1/profiles";
+const APP_STORE_CONNECT_DEVICES_URL: &str = "https://api.appstoreconnect.apple.com/v1/devices";
 const APP_STORE_CONNECT_AUDIENCE: &str = "appstoreconnect-v1";
 const TOKEN_LIFETIME_SECONDS: u64 = 5 * 60;
+const DEVICE_FIELDS: &str = "name,udid,platform,status,deviceClass,model,addedDate";
+/// Apple's yearly allowance per device class; a registration counts against it for the
+/// membership year even after the device is disabled.
+const DEVICE_LIMIT: usize = 100;
+
+/// The two identities a kit can hold. Apple's modern type names cover every platform; the
+/// older iOS-specific ones still appear on certificates issued years ago.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CertificateKind {
+    Distribution,
+    Development,
+}
+
+impl CertificateKind {
+    pub(crate) fn api_type(self) -> &'static str {
+        match self {
+            Self::Distribution => "DISTRIBUTION",
+            Self::Development => "DEVELOPMENT",
+        }
+    }
+
+    pub(crate) fn matches(self, certificate: &AppleCertificateSummary) -> bool {
+        match self {
+            Self::Distribution => matches!(
+                certificate.certificate_type.as_str(),
+                "DISTRIBUTION" | "IOS_DISTRIBUTION"
+            ),
+            Self::Development => matches!(
+                certificate.certificate_type.as_str(),
+                "DEVELOPMENT" | "IOS_DEVELOPMENT"
+            ),
+        }
+    }
+
+    /// The resource name Apple's refusals are phrased around.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Distribution => "distribution certificate",
+            Self::Development => "development certificate",
+        }
+    }
+
+    pub(crate) fn common_name(self) -> &'static str {
+        match self {
+            Self::Distribution => "BuildBridge Distribution",
+            Self::Development => "BuildBridge Development",
+        }
+    }
+
+    pub(crate) fn file_stem(self) -> &'static str {
+        match self {
+            Self::Distribution => "distribution",
+            Self::Development => "development",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AppleDeviceSummary {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) udid: String,
+    pub(crate) platform: String,
+    pub(crate) status: String,
+    pub(crate) device_class: String,
+    pub(crate) model: String,
+    pub(crate) added_date: String,
+}
+
+/// A device that is on the team after `register_device`: created just now, or found already.
+#[derive(Debug)]
+pub(crate) struct RegisteredAppleDevice {
+    pub(crate) device: AppleDeviceSummary,
+    pub(crate) already_registered: bool,
+}
+
+/// What a development profile search found: the newest usable profile that already lists the
+/// phone and carries the certificate, and the devices of the newest usable profile carrying the
+/// certificate at all, so a new profile keeps every phone that was already provisioned.
+#[derive(Debug)]
+pub(crate) struct DevelopmentProfileSearch {
+    pub(crate) matching: Option<AppleProvisioningProfileSummary>,
+    pub(crate) superseded_device_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DevicesResponse {
+    data: Vec<DeviceResource>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceResponse {
+    data: DeviceResource,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceResource {
+    id: String,
+    #[serde(default)]
+    attributes: Option<DeviceAttributes>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceAttributes {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    udid: Option<String>,
+    #[serde(default)]
+    platform: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    device_class: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    added_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileMembershipsResponse {
+    data: Vec<ProfileWithRelationships>,
+    #[serde(default)]
+    included: Vec<IncludedResource>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileWithRelationships {
+    id: String,
+    #[serde(default)]
+    relationships: Option<ProfileRelationships>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ProfileRelationships {
+    #[serde(default)]
+    devices: Option<RelationshipList>,
+    #[serde(default)]
+    certificates: Option<RelationshipList>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RelationshipList {
+    #[serde(default)]
+    data: Vec<ResourceIdentifier>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResourceIdentifier {
+    #[serde(rename = "type")]
+    kind: String,
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct IncludedResource {
+    #[serde(rename = "type")]
+    kind: String,
+    id: String,
+    #[serde(default)]
+    attributes: serde_json::Value,
+}
+
+/// Which devices and certificates a profile lists, by Apple id and, for devices, by UDID.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ProfileMembership {
+    pub(crate) device_ids: Vec<String>,
+    pub(crate) device_udids: Vec<String>,
+    pub(crate) certificate_ids: Vec<String>,
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +210,9 @@ pub(crate) struct AppleTeamVerificationResult {
     certificates_accessible: bool,
     certificates_issue: Option<String>,
     certificates: Vec<AppleCertificateSummary>,
+    devices_accessible: bool,
+    devices_issue: Option<String>,
+    devices: Vec<AppleDeviceSummary>,
     verified_at_epoch_seconds: u64,
 }
 
@@ -50,6 +227,9 @@ pub(crate) struct AppleProvisioningProfileSummary {
     pub(crate) uuid: String,
     pub(crate) created_date: String,
     pub(crate) expiration_date: String,
+    /// Filled for development and ad hoc profiles when the memberships were fetched.
+    pub(crate) device_udids: Vec<String>,
+    pub(crate) certificate_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -263,6 +443,30 @@ pub(crate) async fn verify_developer_team(
     };
     let (certificates, certificates_accessible, certificates_issue) =
         fetch_certificates(&client, &token).await?;
+    let (devices, devices_accessible, devices_issue) = fetch_devices(&client, &token).await?;
+    // Which phones the development and ad hoc profiles list; a key that cannot read them
+    // leaves the lists empty rather than failing the whole verification.
+    let mut profiles = profiles;
+    let membership_ids = profiles
+        .iter()
+        .filter(|profile| {
+            matches!(
+                profile.profile_type.as_str(),
+                "IOS_APP_DEVELOPMENT" | "IOS_APP_ADHOC"
+            )
+        })
+        .map(|profile| profile.id.clone())
+        .collect::<Vec<_>>();
+    if !membership_ids.is_empty()
+        && let Ok(memberships) = fetch_profile_memberships(&client, &token, &membership_ids).await
+    {
+        for profile in &mut profiles {
+            if let Some(membership) = memberships.get(&profile.id) {
+                profile.device_udids = membership.device_udids.clone();
+                profile.certificate_ids = membership.certificate_ids.clone();
+            }
+        }
+    }
 
     Ok(AppleTeamVerificationResult {
         key_id: key_id.to_string(),
@@ -284,8 +488,706 @@ pub(crate) async fn verify_developer_team(
         certificates_accessible,
         certificates_issue,
         certificates,
+        devices_accessible,
+        devices_issue,
+        devices,
         verified_at_epoch_seconds: now,
     })
+}
+
+fn api_client() -> Result<Client, String> {
+    Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent(concat!("BuildBridge/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| format!("Could not prepare the Apple API connection: {error}"))
+}
+
+fn device_summary(resource: DeviceResource) -> AppleDeviceSummary {
+    let attributes = resource.attributes.unwrap_or_default();
+    AppleDeviceSummary {
+        id: resource.id,
+        name: attributes
+            .name
+            .unwrap_or_else(|| "Unnamed device".to_string()),
+        udid: attributes.udid.unwrap_or_default().to_ascii_uppercase(),
+        platform: attributes.platform.unwrap_or_else(|| "UNKNOWN".to_string()),
+        status: attributes.status.unwrap_or_else(|| "UNKNOWN".to_string()),
+        device_class: attributes
+            .device_class
+            .unwrap_or_else(|| "UNKNOWN".to_string()),
+        model: attributes.model.unwrap_or_default(),
+        added_date: attributes.added_date.unwrap_or_default(),
+    }
+}
+
+async fn fetch_devices(
+    client: &Client,
+    token: &str,
+) -> Result<(Vec<AppleDeviceSummary>, bool, Option<String>), String> {
+    let response = client
+        .get(APP_STORE_CONNECT_DEVICES_URL)
+        .bearer_auth(token)
+        .query(&[
+            ("filter[platform]", "IOS"),
+            ("fields[devices]", DEVICE_FIELDS),
+            ("limit", "200"),
+            ("sort", "name"),
+        ])
+        .send()
+        .await
+        .map_err(|error| connection_error("registered devices", &error))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Could not read Apple's devices response: {error}"))?;
+    if status == StatusCode::FORBIDDEN {
+        return Ok((
+            Vec::new(),
+            false,
+            Some(apple_error_message(status, &body, "registered devices")),
+        ));
+    }
+    if !status.is_success() {
+        return Err(apple_error_message(status, &body, "registered devices"));
+    }
+    let response: DevicesResponse = serde_json::from_str(&body)
+        .map_err(|_| "Apple returned an unreadable devices response.".to_string())?;
+
+    Ok((
+        response.data.into_iter().map(device_summary).collect(),
+        true,
+        None,
+    ))
+}
+
+/// The exact filter first, then the inventory: Apple's filters have proved unreliable for
+/// bundle identifiers, and a UDID's case differs between what phones print and what Apple stores.
+async fn fetch_device_by_udid(
+    client: &Client,
+    token: &str,
+    udid: &str,
+) -> Result<Option<AppleDeviceSummary>, String> {
+    let response = client
+        .get(APP_STORE_CONNECT_DEVICES_URL)
+        .bearer_auth(token)
+        .query(&[
+            ("filter[udid]", udid),
+            ("fields[devices]", DEVICE_FIELDS),
+            ("limit", "1"),
+        ])
+        .send()
+        .await
+        .map_err(|error| connection_error("registered device", &error))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Could not read Apple's device response: {error}"))?;
+    if !status.is_success() {
+        return Err(apple_error_message(status, &body, "registered device"));
+    }
+    let response: DevicesResponse = serde_json::from_str(&body)
+        .map_err(|_| "Apple returned an unreadable device response.".to_string())?;
+    if let Some(device) = response.data.into_iter().map(device_summary).next() {
+        return Ok(Some(device));
+    }
+    let (devices, _, _) = fetch_devices(client, token).await?;
+
+    Ok(devices
+        .into_iter()
+        .find(|device| device.udid.eq_ignore_ascii_case(udid)))
+}
+
+fn device_registration_request(name: &str, udid: &str) -> serde_json::Value {
+    serde_json::json!({
+        "data": {
+            "type": "devices",
+            "attributes": {
+                "name": name,
+                "platform": "IOS",
+                "udid": udid,
+            }
+        }
+    })
+}
+
+pub(crate) fn validate_device_udid(udid: &str) -> Result<(), String> {
+    if !buildbridge_docker_osx::valid_device_udid(udid) {
+        return Err(
+            "The iPhone's UDID must be 40 hexadecimal characters, or 8 and 16 with a hyphen."
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_device_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 50 || name.chars().any(char::is_control) {
+        return Err("Give the iPhone a name of 1 to 50 characters.".to_string());
+    }
+
+    Ok(name.to_string())
+}
+
+/// Registers a phone with the team, or finds it if it is already there. Registration counts
+/// against Apple's yearly allowance and cannot be undone here, so the caller confirms first.
+pub(crate) async fn register_device(
+    key_id: &str,
+    issuer_id: &str,
+    private_key: &str,
+    udid: &str,
+    name: &str,
+) -> Result<RegisteredAppleDevice, String> {
+    validate_device_udid(udid)?;
+    let name = validate_device_name(name)?;
+    let now = unix_timestamp()?;
+    let token = create_token(key_id, issuer_id, private_key, now)?;
+    let client = api_client()?;
+
+    if let Some(device) = fetch_device_by_udid(&client, &token, udid).await? {
+        if device.status.eq_ignore_ascii_case("DISABLED") {
+            return Err(
+                "This iPhone is registered but disabled in the developer portal. Enable it under Devices, then try again."
+                    .to_string(),
+            );
+        }
+        return Ok(RegisteredAppleDevice {
+            device,
+            already_registered: true,
+        });
+    }
+
+    let response = client
+        .post(APP_STORE_CONNECT_DEVICES_URL)
+        .bearer_auth(&token)
+        .json(&device_registration_request(&name, udid))
+        .send()
+        .await
+        .map_err(|error| connection_error("device registration", &error))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Could not read Apple's device registration response: {error}"))?;
+    if status == StatusCode::CREATED {
+        let response: DeviceResponse = serde_json::from_str(&body).map_err(|_| {
+            "Apple registered the device but returned an unreadable response.".to_string()
+        })?;
+        let device = device_summary(response.data);
+        if !device.udid.eq_ignore_ascii_case(udid) {
+            return Err(
+                "Apple registered a device but returned a different UDID; verify the team's devices in the developer portal."
+                    .to_string(),
+            );
+        }
+        return Ok(RegisteredAppleDevice {
+            device,
+            already_registered: false,
+        });
+    }
+    if matches!(
+        status,
+        StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY
+    ) && let Some(device) = fetch_device_by_udid(&client, &token, udid).await?
+    {
+        // A race or an "already exists" refusal both mean the phone is on the team.
+        return Ok(RegisteredAppleDevice {
+            device,
+            already_registered: true,
+        });
+    }
+
+    Err(apple_error_message(status, &body, "device registration"))
+}
+
+/// The certificate on the team whose serial matches the kit's `.p12`, of the given kind.
+pub(crate) async fn find_certificate_by_serial(
+    key_id: &str,
+    issuer_id: &str,
+    private_key: &str,
+    serial: &str,
+    kind: CertificateKind,
+) -> Result<Option<AppleCertificateSummary>, String> {
+    let now = unix_timestamp()?;
+    let token = create_token(key_id, issuer_id, private_key, now)?;
+    let client = api_client()?;
+    let (certificates, accessible, issue) = fetch_certificates(&client, &token).await?;
+    if !accessible {
+        return Err(issue
+            .unwrap_or_else(|| "The Team key cannot access the team's certificates.".to_string()));
+    }
+
+    Ok(certificates.into_iter().find(|certificate| {
+        kind.matches(certificate)
+            && certificate_serial_matches(serial, &certificate.serial_number)
+            && rfc3339_is_after(&certificate.expiration_date, now)
+    }))
+}
+
+/// OpenSSL prints `serial=00AB…`; Apple stores the bare hex without leading zeros.
+pub(crate) fn certificate_serial_matches(local: &str, apple: &str) -> bool {
+    let normalize = |value: &str| {
+        let value = value.trim();
+        let value = value.strip_prefix("serial=").unwrap_or(value);
+        let value = value.trim().trim_start_matches('0');
+        value.to_ascii_uppercase()
+    };
+    let (local, apple) = (normalize(local), normalize(apple));
+
+    !local.is_empty() && local == apple
+}
+
+fn profile_is_usable_development(profile: &AppleProvisioningProfileSummary, now: u64) -> bool {
+    profile.profile_type == "IOS_APP_DEVELOPMENT"
+        && profile.profile_state == "ACTIVE"
+        && rfc3339_is_after(&profile.expiration_date, now)
+}
+
+/// The devices and certificates each profile lists, in one call per twenty profiles.
+async fn fetch_profile_memberships(
+    client: &Client,
+    token: &str,
+    profile_ids: &[String],
+) -> Result<std::collections::HashMap<String, ProfileMembership>, String> {
+    let mut memberships = std::collections::HashMap::new();
+    for chunk in profile_ids.chunks(20) {
+        for id in chunk {
+            validate_profile_id(id)?;
+        }
+        let response = client
+            .get(APP_STORE_CONNECT_PROFILES_URL)
+            .bearer_auth(token)
+            .query(&[
+                ("filter[id]", chunk.join(",").as_str()),
+                ("include", "devices,certificates"),
+                ("fields[profiles]", "name"),
+                ("fields[devices]", "udid,status"),
+                ("fields[certificates]", "certificateType"),
+                ("limit", "200"),
+            ])
+            .send()
+            .await
+            .map_err(|error| connection_error("profile devices", &error))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| format!("Could not read Apple's profile devices response: {error}"))?;
+        if !status.is_success() {
+            return Err(apple_error_message(status, &body, "profile devices"));
+        }
+        memberships.extend(parse_profile_memberships(&body)?);
+    }
+
+    Ok(memberships)
+}
+
+pub(crate) fn parse_profile_memberships(
+    body: &str,
+) -> Result<std::collections::HashMap<String, ProfileMembership>, String> {
+    let response: ProfileMembershipsResponse = serde_json::from_str(body)
+        .map_err(|_| "Apple returned an unreadable profile devices response.".to_string())?;
+    let udids: std::collections::HashMap<&str, String> = response
+        .included
+        .iter()
+        .filter(|item| item.kind == "devices")
+        .filter_map(|item| {
+            item.attributes
+                .get("udid")
+                .and_then(serde_json::Value::as_str)
+                .map(|udid| (item.id.as_str(), udid.to_ascii_uppercase()))
+        })
+        .collect();
+    let mut memberships = std::collections::HashMap::new();
+    for profile in response.data {
+        let relationships = profile.relationships.unwrap_or_default();
+        let device_ids = relationships
+            .devices
+            .map(|list| {
+                list.data
+                    .into_iter()
+                    .filter(|item| item.kind == "devices")
+                    .map(|item| item.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let device_udids = device_ids
+            .iter()
+            .filter_map(|id| udids.get(id.as_str()).cloned())
+            .collect();
+        let certificate_ids = relationships
+            .certificates
+            .map(|list| {
+                list.data
+                    .into_iter()
+                    .filter(|item| item.kind == "certificates")
+                    .map(|item| item.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        memberships.insert(
+            profile.id,
+            ProfileMembership {
+                device_ids,
+                device_udids,
+                certificate_ids,
+            },
+        );
+    }
+
+    Ok(memberships)
+}
+
+/// Looks for a usable development profile for the bundle that carries the kit's development
+/// certificate and lists the phone, and remembers the devices of the newest such profile
+/// without the phone so a replacement keeps them.
+pub(crate) async fn find_development_profile(
+    key_id: &str,
+    issuer_id: &str,
+    private_key: &str,
+    bundle_identifier: &str,
+    certificate_id: &str,
+    udid: &str,
+) -> Result<DevelopmentProfileSearch, String> {
+    validate_certificate_id(certificate_id)?;
+    validate_device_udid(udid)?;
+    let now = unix_timestamp()?;
+    let token = create_token(key_id, issuer_id, private_key, now)?;
+    let client = api_client()?;
+
+    let (bundle, accessible, issue, _) =
+        fetch_bundle_id(&client, &token, bundle_identifier).await?;
+    if !accessible {
+        return Err(issue.unwrap_or_else(|| {
+            "The Team key cannot access Developer provisioning resources.".to_string()
+        }));
+    }
+    let bundle = bundle.ok_or_else(|| {
+        format!(
+            "Apple did not return the existing Developer Bundle ID for {bundle_identifier}. Verify the team before preparing device signing."
+        )
+    })?;
+    let (profiles, profiles_accessible, profiles_issue) =
+        fetch_profiles(&client, &token, &bundle.id).await?;
+    if !profiles_accessible {
+        return Err(profiles_issue.unwrap_or_else(|| {
+            "The Team key cannot inspect the existing provisioning profiles.".to_string()
+        }));
+    }
+    let candidates = profiles
+        .into_iter()
+        .filter(|profile| profile_is_usable_development(profile, now))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(DevelopmentProfileSearch {
+            matching: None,
+            superseded_device_ids: Vec::new(),
+        });
+    }
+    let ids = candidates
+        .iter()
+        .map(|profile| profile.id.clone())
+        .collect::<Vec<_>>();
+    let memberships = fetch_profile_memberships(&client, &token, &ids).await?;
+    let with_certificate = candidates
+        .into_iter()
+        .filter_map(|mut profile| {
+            let membership = memberships.get(&profile.id)?.clone();
+            membership
+                .certificate_ids
+                .iter()
+                .any(|id| id == certificate_id)
+                .then(|| {
+                    profile.device_udids = membership.device_udids.clone();
+                    profile.certificate_ids = membership.certificate_ids.clone();
+                    (profile, membership)
+                })
+        })
+        .collect::<Vec<_>>();
+    // `fetch_profiles` sorts newest expiry first, so the first hit is the newest.
+    let matching = with_certificate
+        .iter()
+        .find(|(profile, _)| {
+            profile
+                .device_udids
+                .iter()
+                .any(|listed| listed.eq_ignore_ascii_case(udid))
+        })
+        .map(|(profile, _)| profile.clone());
+    let superseded_device_ids = with_certificate
+        .first()
+        .map(|(_, membership)| membership.device_ids.clone())
+        .unwrap_or_default();
+
+    Ok(DevelopmentProfileSearch {
+        matching,
+        superseded_device_ids,
+    })
+}
+
+/// Creates a development profile for the bundle listing the given devices. Unlike the App
+/// Store replacement it never refuses because a usable profile exists: usable here depends on
+/// which phones a profile lists, which the caller has already checked.
+pub(crate) async fn create_development_profile(
+    key_id: &str,
+    issuer_id: &str,
+    private_key: &str,
+    bundle_identifier: &str,
+    certificate_id: &str,
+    device_ids: &[String],
+) -> Result<CreatedAppleProfile, String> {
+    validate_certificate_id(certificate_id)?;
+    if device_ids.is_empty() || device_ids.len() > DEVICE_LIMIT {
+        return Err("A development profile needs between one and one hundred devices.".to_string());
+    }
+    for id in device_ids {
+        validate_resource_id(id, "Choose a valid registered device.")?;
+    }
+    let now = unix_timestamp()?;
+    let token = create_token(key_id, issuer_id, private_key, now)?;
+    let client = api_client()?;
+
+    let (bundle, accessible, issue, _) =
+        fetch_bundle_id(&client, &token, bundle_identifier).await?;
+    if !accessible {
+        return Err(issue.unwrap_or_else(|| {
+            "The Team key cannot access Developer provisioning resources.".to_string()
+        }));
+    }
+    let bundle = bundle.ok_or_else(|| {
+        format!(
+            "Apple did not return the existing Developer Bundle ID for {bundle_identifier}. Verify the team before creating a profile."
+        )
+    })?;
+    let (certificates, certificates_accessible, certificates_issue) =
+        fetch_certificates(&client, &token).await?;
+    if !certificates_accessible {
+        return Err(certificates_issue.unwrap_or_else(|| {
+            "The Team key cannot inspect the team's certificates.".to_string()
+        }));
+    }
+    let certificate = certificates
+        .into_iter()
+        .find(|certificate| certificate.id == certificate_id)
+        .ok_or_else(|| {
+            "The development certificate is no longer on the Apple team. Create one from the kit."
+                .to_string()
+        })?;
+    if !CertificateKind::Development.matches(&certificate)
+        || !rfc3339_is_after(&certificate.expiration_date, now)
+    {
+        return Err(
+            "The kit's development certificate is not an unexpired Apple Development certificate; create a new one from the kit."
+                .to_string(),
+        );
+    }
+
+    let profile_name = format!("BuildBridge Development {now}");
+    let request =
+        development_profile_request(&profile_name, &bundle.id, &certificate.id, device_ids);
+    let response = client
+        .post(APP_STORE_CONNECT_PROFILES_URL)
+        .bearer_auth(&token)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| connection_error("development provisioning profile", &error))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Could not read Apple's created-profile response: {error}"))?;
+    if status != StatusCode::CREATED {
+        return Err(apple_error_message(
+            status,
+            &body,
+            "development provisioning profile",
+        ));
+    }
+    let (profile, content) = finish_created_profile(
+        &client,
+        &token,
+        &body,
+        &profile_name,
+        "IOS_APP_DEVELOPMENT",
+        now,
+    )
+    .await?;
+
+    Ok(CreatedAppleProfile {
+        profile,
+        certificate,
+        content,
+    })
+}
+
+/// The part of profile creation after Apple says 201: fetch what the create response left out,
+/// decode the content, and refuse a profile of the wrong type or one that is not active.
+async fn finish_created_profile(
+    client: &Client,
+    token: &str,
+    body: &str,
+    profile_name: &str,
+    expected_type: &str,
+    now: u64,
+) -> Result<(AppleProvisioningProfileSummary, Vec<u8>), String> {
+    let response: ProfileResponse = serde_json::from_str(body).map_err(|_| {
+        "Apple created the profile but returned an unreadable response.".to_string()
+    })?;
+    let mut profile_resource = response.data;
+    let response_is_incomplete = match profile_resource.attributes.as_ref() {
+        Some(attributes) => {
+            attributes.profile_content.is_none()
+                || attributes.profile_type.is_none()
+                || attributes.profile_state.is_none()
+                || attributes.expiration_date.is_none()
+                || attributes.uuid.is_none()
+        }
+        None => true,
+    };
+    if response_is_incomplete {
+        profile_resource = fetch_created_profile(client, token, &profile_resource.id)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Apple created profile {profile_name}, but BuildBridge could not download it: {error}. It was not revoked; verify again before retrying."
+                )
+            })?;
+    }
+    let profile_id = profile_resource.id;
+    let mut attributes = profile_resource.attributes.unwrap_or_default();
+    let encoded_content = attributes.profile_content.take().ok_or_else(|| {
+        "Apple created the profile but did not return its downloadable content.".to_string()
+    })?;
+    let content = decode_profile_content(&encoded_content)?;
+    let profile = profile_summary(profile_id, attributes);
+    if profile.profile_type != expected_type {
+        return Err(
+            "Apple created a profile with an unexpected type; it was not retained locally."
+                .to_string(),
+        );
+    }
+    if profile.profile_state != "ACTIVE" || !rfc3339_is_after(&profile.expiration_date, now) {
+        return Err(
+            "Apple created the profile, but it is not active with a future expiry. It was not retained locally or revoked; verify the Apple inventory before retrying."
+                .to_string(),
+        );
+    }
+
+    Ok((profile, content))
+}
+
+fn validate_resource_id(value: &str, message: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    {
+        return Err(message.to_string());
+    }
+
+    Ok(())
+}
+
+/// The typed profile create request. App Store profiles name no devices; development ones
+/// list exactly the registered devices they are for.
+fn profile_request(
+    profile_name: &str,
+    profile_type: &str,
+    bundle_id: &str,
+    certificate_id: &str,
+    device_ids: Option<&[String]>,
+) -> serde_json::Value {
+    let mut relationships = serde_json::json!({
+        "bundleId": {
+            "data": { "type": "bundleIds", "id": bundle_id }
+        },
+        "certificates": {
+            "data": [{ "type": "certificates", "id": certificate_id }]
+        }
+    });
+    if let Some(device_ids) = device_ids {
+        relationships["devices"] = serde_json::json!({
+            "data": device_ids
+                .iter()
+                .map(|id| serde_json::json!({ "type": "devices", "id": id }))
+                .collect::<Vec<_>>()
+        });
+    }
+
+    serde_json::json!({
+        "data": {
+            "type": "profiles",
+            "attributes": {
+                "name": profile_name,
+                "profileType": profile_type
+            },
+            "relationships": relationships
+        }
+    })
+}
+
+fn development_profile_request(
+    profile_name: &str,
+    bundle_id: &str,
+    certificate_id: &str,
+    device_ids: &[String],
+) -> serde_json::Value {
+    profile_request(
+        profile_name,
+        "IOS_APP_DEVELOPMENT",
+        bundle_id,
+        certificate_id,
+        Some(device_ids),
+    )
+}
+
+/// Asks Apple to issue a certificate of one kind for a CSR whose private key was generated on
+/// this host, so no Mac is involved. Nothing at Apple is revoked or replaced: if the team is at
+/// its limit, Apple refuses and that refusal is shown as is.
+pub(crate) async fn create_certificate(
+    key_id: &str,
+    issuer_id: &str,
+    private_key: &str,
+    csr_pem: &str,
+    kind: CertificateKind,
+) -> Result<CreatedAppleCertificate, String> {
+    if !valid_csr_pem(csr_pem) {
+        return Err("BuildBridge generated an unreadable certificate signing request.".to_string());
+    }
+    let now = unix_timestamp()?;
+    let token = create_token(key_id, issuer_id, private_key, now)?;
+    let client = api_client()?;
+
+    // A key that cannot read certificates cannot create them either; say so before trying.
+    let (_, accessible, issue) = fetch_certificates(&client, &token).await?;
+    if !accessible {
+        return Err(issue
+            .unwrap_or_else(|| "The Team key cannot access the team's certificates.".to_string()));
+    }
+
+    let response = client
+        .post(APP_STORE_CONNECT_CERTIFICATES_URL)
+        .bearer_auth(&token)
+        .json(&certificate_request_for(csr_pem, kind))
+        .send()
+        .await
+        .map_err(|error| connection_error(kind.label(), &error))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Could not read Apple's created-certificate response: {error}"))?;
+    if status != StatusCode::CREATED {
+        return Err(apple_error_message(status, &body, kind.label()));
+    }
+
+    parse_created_certificate_for(&body, kind)
 }
 
 async fn fetch_bundle_id(
@@ -612,72 +1514,23 @@ pub(crate) async fn create_replacement_profile(
     })
 }
 
-/// Asks Apple to issue an Apple Distribution certificate for a CSR whose private key was
-/// generated on this host. This is the one step that used to need a Mac; with the key made here
-/// and the signature fetched from Apple, no Mac is involved at all. Nothing at Apple is revoked
-/// or replaced: if the team is at its limit, Apple refuses and that refusal is shown as is.
-pub(crate) async fn create_distribution_certificate(
-    key_id: &str,
-    issuer_id: &str,
-    private_key: &str,
-    csr_pem: &str,
-) -> Result<CreatedAppleCertificate, String> {
-    if !valid_csr_pem(csr_pem) {
-        return Err("BuildBridge generated an unreadable certificate signing request.".to_string());
-    }
-    let now = unix_timestamp()?;
-    let token = create_token(key_id, issuer_id, private_key, now)?;
-    let client = Client::builder()
-        .timeout(Duration::from_secs(20))
-        .user_agent(concat!("BuildBridge/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|error| format!("Could not prepare the Apple API connection: {error}"))?;
-
-    // A key that cannot read certificates cannot create them either; say so before trying.
-    let (_, accessible, issue) = fetch_certificates(&client, &token).await?;
-    if !accessible {
-        return Err(issue.unwrap_or_else(|| {
-            "The Team key cannot access distribution certificates.".to_string()
-        }));
-    }
-
-    let response = client
-        .post(APP_STORE_CONNECT_CERTIFICATES_URL)
-        .bearer_auth(&token)
-        .json(&certificate_request(csr_pem))
-        .send()
-        .await
-        .map_err(|error| connection_error("distribution certificate", &error))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|error| format!("Could not read Apple's created-certificate response: {error}"))?;
-    if status != StatusCode::CREATED {
-        return Err(apple_error_message(
-            status,
-            &body,
-            "distribution certificate",
-        ));
-    }
-
-    parse_created_certificate(&body)
-}
-
 /// The typed create request: one certificate type, one CSR, nothing else Apple could act on.
-fn certificate_request(csr_pem: &str) -> serde_json::Value {
+fn certificate_request_for(csr_pem: &str, kind: CertificateKind) -> serde_json::Value {
     serde_json::json!({
         "data": {
             "type": "certificates",
             "attributes": {
-                "certificateType": "DISTRIBUTION",
+                "certificateType": kind.api_type(),
                 "csrContent": csr_pem,
             }
         }
     })
 }
 
-fn parse_created_certificate(body: &str) -> Result<CreatedAppleCertificate, String> {
+fn parse_created_certificate_for(
+    body: &str,
+    kind: CertificateKind,
+) -> Result<CreatedAppleCertificate, String> {
     let response: CertificateResponse = serde_json::from_str(body).map_err(|_| {
         "Apple created the certificate but returned an unreadable response.".to_string()
     })?;
@@ -692,10 +1545,11 @@ fn parse_created_certificate(body: &str) -> Result<CreatedAppleCertificate, Stri
         })?;
     let content = decode_certificate_content(&encoded)?;
     let certificate = certificate_summary(resource);
-    if !is_distribution_certificate(&certificate) {
+    if !kind.matches(&certificate) {
         return Err(format!(
-            "Apple returned a {} certificate instead of a distribution certificate; it was not retained.",
-            certificate.certificate_type
+            "Apple returned a {} certificate instead of a {}; it was not retained.",
+            certificate.certificate_type,
+            kind.label()
         ));
     }
 
@@ -807,23 +1661,13 @@ fn replacement_profile_request(
     bundle_id: &str,
     certificate_id: &str,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "data": {
-            "type": "profiles",
-            "attributes": {
-                "name": profile_name,
-                "profileType": "IOS_APP_STORE"
-            },
-            "relationships": {
-                "bundleId": {
-                    "data": { "type": "bundleIds", "id": bundle_id }
-                },
-                "certificates": {
-                    "data": [{ "type": "certificates", "id": certificate_id }]
-                }
-            }
-        }
-    })
+    profile_request(
+        profile_name,
+        "IOS_APP_STORE",
+        bundle_id,
+        certificate_id,
+        None,
+    )
 }
 
 fn decode_profile_content(encoded_content: &str) -> Result<Vec<u8>, String> {
@@ -947,6 +1791,8 @@ fn profile_summary(id: String, attributes: ProfileAttributes) -> AppleProvisioni
         uuid: attributes.uuid.unwrap_or_default(),
         created_date: attributes.created_date.unwrap_or_default(),
         expiration_date: attributes.expiration_date.unwrap_or_default(),
+        device_udids: Vec::new(),
+        certificate_ids: Vec::new(),
     }
 }
 
@@ -1033,6 +1879,18 @@ fn apple_error_message(status: StatusCode, body: &str, resource: &str) -> String
             "Apple refused to issue another distribution certificate. Apple allows only a few active ones per team: revoke an unused one in the developer portal, or export an existing one from the Mac that holds its key."
                 .to_string()
         }
+        StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY
+            if resource == "development certificate" =>
+        {
+            "Apple refused to issue another development certificate. Apple allows only a few active ones per team: revoke an unused one in the developer portal, or store the .p12 of an existing one in the kit."
+                .to_string()
+        }
+        StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY
+            if resource == "device registration" =>
+        {
+            "Apple refused to register the iPhone. A team may register up to 100 iPhones per membership year, and removed devices still count until the membership renews; check Devices in the developer portal."
+                .to_string()
+        }
         StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY => format!(
             "Apple rejected the requested {resource}. Verify the Bundle ID and selected distribution certificate, then try again."
         ),
@@ -1070,7 +1928,7 @@ mod tests {
 
     #[test]
     fn a_created_certificate_is_read_with_its_content() {
-        let created = parse_created_certificate(
+        let created = parse_created_certificate_for(
             r#"{
                 "data": {
                     "type": "certificates",
@@ -1086,6 +1944,7 @@ mod tests {
                     }
                 }
             }"#,
+            CertificateKind::Distribution,
         )
         .expect("a created certificate decodes");
 
@@ -1096,13 +1955,15 @@ mod tests {
 
     #[test]
     fn a_certificate_of_the_wrong_kind_or_without_content_is_refused() {
-        let development = parse_created_certificate(
+        let development = parse_created_certificate_for(
             r#"{"data": {"type": "certificates", "id": "C1", "attributes": {"certificateType": "DEVELOPMENT", "certificateContent": "MIIBAQ=="}}}"#,
+            CertificateKind::Distribution,
         );
         assert!(development.is_err());
 
-        let empty = parse_created_certificate(
+        let empty = parse_created_certificate_for(
             r#"{"data": {"type": "certificates", "id": "C1", "attributes": {"certificateType": "DISTRIBUTION"}}}"#,
+            CertificateKind::Distribution,
         );
         assert!(empty.unwrap_err().contains("did not return its content"));
     }
@@ -1110,7 +1971,7 @@ mod tests {
     #[test]
     fn the_certificate_request_carries_only_a_type_and_the_csr() {
         let csr = "-----BEGIN CERTIFICATE REQUEST-----\nMIIB\n-----END CERTIFICATE REQUEST-----";
-        let request = certificate_request(csr);
+        let request = certificate_request_for(csr, CertificateKind::Distribution);
 
         assert_eq!(request["data"]["type"], "certificates");
         assert_eq!(

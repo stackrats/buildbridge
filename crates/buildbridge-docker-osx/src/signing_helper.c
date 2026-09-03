@@ -457,12 +457,124 @@ cleanup:
     return result;
 }
 
+static int open_and_unlock_keychain(
+    const char *path,
+    SecKeychainRef *keychain,
+    unsigned char *password,
+    uint32_t password_length
+) {
+    OSStatus status = SecKeychainOpen(path, keychain);
+    if (status != errSecSuccess || *keychain == NULL) {
+        return security_failure("open_keychain", status);
+    }
+    status = SecKeychainUnlock(*keychain, password_length, password, true);
+    if (status != errSecSuccess) {
+        return security_failure("unlock_keychain", status);
+    }
+    return 0;
+}
+
+static char *keychain_sign_flags(const char *keychain_path) {
+    size_t length = strlen(keychain_path) + 41;
+    char *value = calloc(length, 1);
+    if (value == NULL) return NULL;
+    snprintf(value, length, "--keychain %s", keychain_path);
+    char *setting = make_build_setting("OTHER_CODE_SIGN_FLAGS", value);
+    secure_zero(value, length);
+    free(value);
+    return setting;
+}
+
+/*
+ * A Debug build for a physical device, signed with the development identity in the same
+ * keychain the archive uses. No export: the product stays in DerivedData for devicectl.
+ */
+static int run_device_build(int argc, char **argv) {
+    if (argc != 8) {
+        fprintf(stderr, "invalid_device_build_arguments\n");
+        return 1;
+    }
+
+    uint32_t keychain_password_length = 0;
+    unsigned char *keychain_password = read_secret(&keychain_password_length);
+    if (keychain_password == NULL) {
+        fprintf(stderr, "invalid_secret_payload\n");
+        return 1;
+    }
+
+    int result = 1;
+    SecKeychainRef keychain = NULL;
+    char *keychain_flags = NULL;
+    int unlock = open_and_unlock_keychain(
+        argv[2], &keychain, keychain_password, keychain_password_length
+    );
+    if (unlock != 0) {
+        result = unlock;
+        goto cleanup;
+    }
+    keychain_flags = keychain_sign_flags(argv[2]);
+    if (keychain_flags == NULL) {
+        fprintf(stderr, "prepare_build_settings\n");
+        goto cleanup;
+    }
+
+    printf("__BUILDBRIDGE_DEVICE_BUILD__:building\n");
+    fflush(stdout);
+    char *build_arguments[] = {
+        argv[3],
+        "-workspace",
+        argv[4],
+        "-scheme",
+        argv[5],
+        "-configuration",
+        "Debug",
+        "-destination",
+        "generic/platform=iOS",
+        "-derivedDataPath",
+        argv[6],
+        "-xcconfig",
+        argv[7],
+        "build",
+        keychain_flags,
+        "COMPILER_INDEX_STORE_ENABLE=NO",
+        NULL,
+    };
+    if (!run_tool(argv[3], build_arguments)) {
+        fprintf(stderr, "xcode_device_build_failed\n");
+        goto cleanup;
+    }
+
+    printf("__BUILDBRIDGE_DEVICE_BUILD__:complete\n");
+    fflush(stdout);
+    result = 0;
+
+cleanup:
+    if (keychain != NULL) {
+        SecKeychainLock(keychain);
+        CFRelease(keychain);
+    }
+    if (keychain_flags != NULL) free(keychain_flags);
+    secure_zero(keychain_password, keychain_password_length);
+    free(keychain_password);
+    return result;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--probe") == 0) {
         return run_code_signing_probe(argc, argv);
     }
     if (argc > 1 && strcmp(argv[1], "--archive") == 0) {
         return run_signed_archive(argc, argv);
+    }
+    if (argc > 1 && strcmp(argv[1], "--device-build") == 0) {
+        return run_device_build(argc, argv);
+    }
+    /* --add imports a second identity into the keychain the first import created. */
+    int add_mode = 0;
+    if (argc > 1 && strcmp(argv[1], "--add") == 0) {
+        add_mode = 1;
+        argv++;
+        argc--;
     }
     if (argc != 5) {
         fprintf(stderr, "invalid_arguments\n");
@@ -501,46 +613,57 @@ int main(int argc, char **argv) {
     unsigned char *certificate_bytes = NULL;
     size_t certificate_length = 0;
 
-    OSStatus status = SecKeychainCreate(
-        argv[1], keychain_password_length, keychain_password, false, NULL, &keychain
-    );
-    if (status != errSecSuccess) {
-        result = security_failure("create_keychain", status);
-        goto cleanup;
-    }
+    OSStatus status;
+    if (add_mode) {
+        int unlock = open_and_unlock_keychain(
+            argv[1], &keychain, keychain_password, keychain_password_length
+        );
+        if (unlock != 0) {
+            result = unlock;
+            goto cleanup;
+        }
+    } else {
+        status = SecKeychainCreate(
+            argv[1], keychain_password_length, keychain_password, false, NULL, &keychain
+        );
+        if (status != errSecSuccess) {
+            result = security_failure("create_keychain", status);
+            goto cleanup;
+        }
 
-    SecKeychainSettings settings = {
-        SEC_KEYCHAIN_SETTINGS_VERS1,
-        true,
-        true,
-        21600,
-    };
-    status = SecKeychainSetSettings(keychain, &settings);
-    if (status != errSecSuccess) {
-        result = security_failure("configure_keychain", status);
-        goto cleanup;
-    }
+        SecKeychainSettings settings = {
+            SEC_KEYCHAIN_SETTINGS_VERS1,
+            true,
+            true,
+            21600,
+        };
+        status = SecKeychainSetSettings(keychain, &settings);
+        if (status != errSecSuccess) {
+            result = security_failure("configure_keychain", status);
+            goto cleanup;
+        }
 
-    status = SecKeychainCopySearchList(&search_list);
-    if (status != errSecSuccess || search_list == NULL) {
-        result = security_failure("read_keychain_search_list", status);
-        goto cleanup;
-    }
-    updated_search_list = CFArrayCreateMutableCopy(
-        NULL, CFArrayGetCount(search_list) + 1, search_list
-    );
-    if (updated_search_list == NULL) goto cleanup;
-    if (!CFArrayContainsValue(
-            updated_search_list,
-            CFRangeMake(0, CFArrayGetCount(updated_search_list)),
-            keychain
-        )) {
-        CFArrayAppendValue(updated_search_list, keychain);
-    }
-    status = SecKeychainSetSearchList(updated_search_list);
-    if (status != errSecSuccess) {
-        result = security_failure("update_keychain_search_list", status);
-        goto cleanup;
+        status = SecKeychainCopySearchList(&search_list);
+        if (status != errSecSuccess || search_list == NULL) {
+            result = security_failure("read_keychain_search_list", status);
+            goto cleanup;
+        }
+        updated_search_list = CFArrayCreateMutableCopy(
+            NULL, CFArrayGetCount(search_list) + 1, search_list
+        );
+        if (updated_search_list == NULL) goto cleanup;
+        if (!CFArrayContainsValue(
+                updated_search_list,
+                CFRangeMake(0, CFArrayGetCount(updated_search_list)),
+                keychain
+            )) {
+            CFArrayAppendValue(updated_search_list, keychain);
+        }
+        status = SecKeychainSetSearchList(updated_search_list);
+        if (status != errSecSuccess) {
+            result = security_failure("update_keychain_search_list", status);
+            goto cleanup;
+        }
     }
 
     status = SecTrustedApplicationCreateFromPath("/usr/bin/codesign", &codesign);

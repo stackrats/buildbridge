@@ -24,7 +24,7 @@ const DEVICE_LIST_TIMEOUT_SECONDS: u32 = 10;
 const NAME_MAX_CHARS: usize = 128;
 const MODEL_MAX_CHARS: usize = 64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeveloperModeState {
     Enabled,
@@ -32,7 +32,7 @@ pub enum DeveloperModeState {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PairingState {
     Paired,
@@ -40,7 +40,7 @@ pub enum PairingState {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TunnelState {
     Connected,
@@ -49,7 +49,7 @@ pub enum TunnelState {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {
     Wired,
@@ -99,7 +99,7 @@ impl TransportType {
 }
 
 /// A phone as the guest reports it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GuestDevice {
     /// CoreDevice's UUID for the device; what `devicectl` commands take as `--device`.
@@ -490,5 +490,1129 @@ mod tests {
         assert!(script.contains("devicectl list devices --json-output"));
         assert!(script.contains("--timeout 10"));
         assert!(script.contains("/bin/rm -f"));
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Building, installing and launching on one phone.
+// ---------------------------------------------------------------------------------------------
+
+use std::io::{BufRead, BufReader};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::{
+    APPLE_BUILD_DIAGNOSTIC_LINES, APPLE_BUILD_OUTPUT_TAIL_LINES, AppleArchiveProgress,
+    GuestEnvFiles, ProvisioningProfileSummary, SIGNING_HELPER_SOURCE, SIGNING_KEYCHAIN_NAME,
+    apple_archive_signing_xcconfig, apple_build_log_is_diagnostic, build_setting_value,
+    profile_allows_bundle, rebuild_web_assets_with_env, run_guest_command, sanitize_build_log_line,
+    stream_bytes_to_guest, valid_apple_scheme, valid_release_value, validate_signing_target,
+    write_secret_frame,
+};
+
+const DEVICE_RUN_JOB: &str = "apple-device-run";
+const CONSOLE_TAIL_LINES: usize = 400;
+const CONSOLE_BATCH_LINES: usize = 200;
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppleDeviceRunPhase {
+    Preparing,
+    BuildingWebAssets,
+    ResolvingTarget,
+    Building,
+    Verifying,
+    Installing,
+    Launching,
+    Running,
+    Completed,
+}
+
+/// Progress carries every console line since the last event rather than the latest one: an
+/// app console must not drop lines between ticks the way filtered build output may.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppleDeviceRunProgress {
+    pub phase: AppleDeviceRunPhase,
+    pub elapsed_seconds: u64,
+    pub detail: String,
+    pub log_lines: Vec<String>,
+}
+
+/// How the console session ended. Each of these is a run that happened, not a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleEnd {
+    Stopped,
+    Exited,
+    Disconnected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppleDeviceRunResult {
+    pub device: GuestDevice,
+    pub bundle_identifier: String,
+    pub app_path: String,
+    pub marketing_version: String,
+    pub build_number: String,
+    pub provisioning_profile_uuid: String,
+    pub installed_at_epoch_seconds: u64,
+    pub console_end: ConsoleEnd,
+    pub exit_status: Option<i32>,
+    pub reattached: bool,
+    pub build_tail: Vec<String>,
+    pub console_tail: Vec<String>,
+}
+
+/// What a device build signs with: the development identity and the profile that lists the
+/// phone, in the same keychain the archive uses.
+pub struct DeviceSigning<'a> {
+    pub keychain_path: &'a str,
+    pub identity_sha1: &'a str,
+    pub development_team: &'a str,
+    pub bundle_identifier: &'a str,
+    pub profile: &'a ProvisioningProfileSummary,
+}
+
+fn device_progress(
+    phase: AppleDeviceRunPhase,
+    started_at: Instant,
+    detail: &str,
+    log_lines: Vec<String>,
+) -> AppleDeviceRunProgress {
+    AppleDeviceRunProgress {
+        phase,
+        elapsed_seconds: started_at.elapsed().as_secs(),
+        detail: detail.to_string(),
+        log_lines,
+    }
+}
+
+fn device_phase_detail(phase: AppleDeviceRunPhase) -> &'static str {
+    match phase {
+        AppleDeviceRunPhase::Preparing => "Preparing the Debug recipe for the phone.",
+        AppleDeviceRunPhase::BuildingWebAssets => "Rebuilding the web assets with the env set.",
+        AppleDeviceRunPhase::ResolvingTarget => "Reading the Debug build settings.",
+        AppleDeviceRunPhase::Building => "Compiling the Debug configuration for the phone.",
+        AppleDeviceRunPhase::Verifying => "Verifying the built app's signature and profile.",
+        AppleDeviceRunPhase::Installing => "Installing the app on the phone.",
+        AppleDeviceRunPhase::Launching => "Launching the app.",
+        AppleDeviceRunPhase::Running => "The app is running; its console streams here.",
+        AppleDeviceRunPhase::Completed => "The console session ended.",
+    }
+}
+
+/// The Debug build target: its name, the bundle identifier it will carry, and where the
+/// product lands. The Debug bundle identifier can differ from the release one, which is why it
+/// is checked against the profile rather than assumed.
+pub(crate) struct DeviceBuildTarget {
+    target: String,
+    bundle_identifier: String,
+    product_path: String,
+}
+
+pub(crate) fn parse_device_build_target(
+    output: &str,
+    derived_data: &str,
+) -> Result<DeviceBuildTarget, ProviderError> {
+    let target = build_setting_value(output, "TARGET_NAME").ok_or_else(|| {
+        ProviderError::GuestBridge(
+            "Xcode did not return the application target for the selected scheme".to_string(),
+        )
+    })?;
+    let bundle_identifier =
+        build_setting_value(output, "PRODUCT_BUNDLE_IDENTIFIER").ok_or_else(|| {
+            ProviderError::GuestBridge(
+                "Xcode did not return the application bundle identifier for the selected scheme"
+                    .to_string(),
+            )
+        })?;
+    let product_path = build_setting_value(output, "CODESIGNING_FOLDER_PATH").ok_or_else(|| {
+        ProviderError::GuestBridge(
+            "Xcode did not return where the Debug product is built".to_string(),
+        )
+    })?;
+    if target.is_empty()
+        || target.len() > 128
+        || !target
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return Err(ProviderError::GuestBridge(
+            "the application target name cannot be represented safely in target-scoped signing settings"
+                .to_string(),
+        ));
+    }
+    validate_signing_target("TEAM", bundle_identifier)?;
+    if !product_path.starts_with(derived_data)
+        || !product_path.ends_with(".app")
+        || product_path.contains("..")
+        || product_path.chars().any(char::is_control)
+        || product_path.len() > 1024
+    {
+        return Err(ProviderError::GuestBridge(
+            "Xcode reported a Debug product path outside the build directory".to_string(),
+        ));
+    }
+
+    Ok(DeviceBuildTarget {
+        target: target.to_string(),
+        bundle_identifier: bundle_identifier.to_string(),
+        product_path: product_path.to_string(),
+    })
+}
+
+pub(crate) struct DeviceAppInspection {
+    bundle_identifier: String,
+    marketing_version: String,
+    build_number: String,
+    profile_uuid: String,
+}
+
+/// `__BUILDBRIDGE_DEVICE_APP__\t<bundle>\t<version>\t<build>\t<profile uuid>\t<yes|no>`; the last
+/// field says whether `get-task-allow` is set, which a development profile must give.
+pub(crate) fn parse_device_app_inspection(
+    output: &str,
+    expected_profile_uuid: &str,
+) -> Result<DeviceAppInspection, ProviderError> {
+    let values = output
+        .lines()
+        .find_map(|line| line.strip_prefix("__BUILDBRIDGE_DEVICE_APP__\t"))
+        .ok_or_else(|| {
+            ProviderError::GuestBridge("macOS returned incomplete app metadata".to_string())
+        })?;
+    let fields = values.split('\t').collect::<Vec<_>>();
+    let [
+        bundle_identifier,
+        marketing_version,
+        build_number,
+        profile_uuid,
+        task_allow,
+    ] = fields[..]
+    else {
+        return Err(ProviderError::GuestBridge(
+            "macOS returned invalid app metadata".to_string(),
+        ));
+    };
+    validate_signing_target("TEAM", bundle_identifier)?;
+    if !valid_release_value(marketing_version) || !valid_release_value(build_number) {
+        return Err(ProviderError::GuestBridge(
+            "macOS returned invalid release version metadata".to_string(),
+        ));
+    }
+    if !valid_profile_uuid(profile_uuid)
+        || !profile_uuid.eq_ignore_ascii_case(expected_profile_uuid)
+    {
+        return Err(ProviderError::GuestBridge(format!(
+            "the built app embeds profile {profile_uuid}, not the development profile {expected_profile_uuid}"
+        )));
+    }
+    if task_allow != "yes" {
+        return Err(ProviderError::GuestBridge(
+            "the built app is not debuggable (get-task-allow is missing), so it was not signed with a development profile"
+                .to_string(),
+        ));
+    }
+
+    Ok(DeviceAppInspection {
+        bundle_identifier: bundle_identifier.to_string(),
+        marketing_version: marketing_version.to_string(),
+        build_number: build_number.to_string(),
+        profile_uuid: profile_uuid.to_ascii_uppercase(),
+    })
+}
+
+fn device_app_inspection_command(app_path: &str) -> String {
+    let app = shell_single_quote(app_path);
+    format!(
+        "set -eu; app={app}; /usr/bin/codesign --verify --deep --strict --verbose=2 \"$app\"; bundle=$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - \"$app/Info.plist\"); version=$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - \"$app/Info.plist\"); build=$(/usr/bin/plutil -extract CFBundleVersion raw -o - \"$app/Info.plist\"); profile_uuid=$(/usr/bin/security cms -D -i \"$app/embedded.mobileprovision\" | /usr/bin/plutil -extract UUID raw -o - -); if /usr/bin/codesign -d --entitlements :- \"$app\" 2>/dev/null | /usr/bin/tr -d '\\n\\t ' | /usr/bin/grep -q '<key>get-task-allow</key><true/>'; then task_allow=yes; else task_allow=no; fi; /usr/bin/printf '__BUILDBRIDGE_DEVICE_APP__\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$bundle\" \"$version\" \"$build\" \"$profile_uuid\" \"$task_allow\""
+    )
+}
+
+/// The guest job wrapper: one owner runs `body` detached from the SSH session and everyone
+/// tails its log, so a dropped bridge can pick the run back up. Mirrors the smoke build's
+/// wrapper; `meta` is a line the owner records and a reattaching client is handed back.
+pub(crate) fn guest_job_script(job_name: &str, tools: &str, meta: &str, body: &str) -> String {
+    format!(
+        r#"set -u
+exec 2>&1
+job_root="{tools}/jobs"
+job_state="$job_root/{job_name}"
+job_meta={meta}
+/bin/mkdir -p "$job_root"
+
+job_owner=0
+while /usr/bin/true; do
+    if /bin/mkdir "$job_state" 2>/dev/null; then
+        job_owner=1
+        break
+    fi
+    if /bin/test -f "$job_state/status"; then
+        break
+    fi
+    if /bin/test -f "$job_state/pid"; then
+        job_pid=$(/bin/cat "$job_state/pid")
+        if /bin/kill -0 "$job_pid" 2>/dev/null; then
+            break
+        fi
+        /bin/rm -rf "$job_state"
+        continue
+    fi
+    /bin/sleep 1
+done
+
+job_log="$job_state/output.log"
+job_status="$job_state/status"
+if /bin/test "$job_owner" -eq 1; then
+    /usr/bin/printf '%s\n' "$job_meta" > "$job_state/meta"
+    trap '' HUP
+    (
+        finish_job() {{
+            worker_status=$?
+            /usr/bin/printf '%s\n' "$worker_status" > "$job_status.incoming"
+            /bin/mv "$job_status.incoming" "$job_status"
+        }}
+        trap finish_job EXIT
+        set -eu
+{body}
+    ) > "$job_log" 2>&1 < /dev/null &
+    job_pid=$!
+    /usr/bin/printf '%s\n' "$job_pid" > "$job_state/pid"
+    trap - HUP
+else
+    /usr/bin/printf '__BUILDBRIDGE_REATTACHED__:yes\n'
+    /bin/cat "$job_state/meta" 2>/dev/null || /usr/bin/true
+fi
+
+next_line=1
+while ! /bin/test -f "$job_status"; do
+    if /bin/test -f "$job_log"; then
+        line_count=$(/usr/bin/wc -l < "$job_log" | /usr/bin/tr -d ' ')
+        if /bin/test "$line_count" -ge "$next_line"; then
+            /usr/bin/sed -n "$next_line,$line_count p" "$job_log"
+            next_line=$((line_count + 1))
+        fi
+    fi
+    /bin/sleep 1
+done
+if /bin/test -f "$job_log"; then
+    line_count=$(/usr/bin/wc -l < "$job_log" | /usr/bin/tr -d ' ')
+    if /bin/test "$line_count" -ge "$next_line"; then
+        /usr/bin/sed -n "$next_line,$line_count p" "$job_log"
+    fi
+fi
+job_result=$(/bin/cat "$job_status")
+exit "$job_result"
+"#
+    )
+}
+
+pub(crate) fn device_run_job_body(
+    developer_dir: &str,
+    device_identifier: &str,
+    app_path: &str,
+    bundle_identifier: &str,
+) -> String {
+    format!(
+        "export DEVELOPER_DIR={developer_dir}\n\
+phase() {{ /usr/bin/printf '__BUILDBRIDGE_PHASE__:%s\\n' \"$1\"; }}\n\
+phase installing\n\
+/usr/bin/xcrun devicectl device install app --device {device} {app}\n\
+phase launching\n\
+/usr/bin/xcrun devicectl device process launch --console --terminate-existing --device {device} {bundle}\n",
+        developer_dir = shell_single_quote(developer_dir),
+        device = shell_single_quote(device_identifier),
+        app = shell_single_quote(app_path),
+        bundle = shell_single_quote(bundle_identifier),
+    )
+}
+
+/// What a reattaching client is handed about the run it did not start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeviceRunMeta {
+    pub device_identifier: String,
+    pub bundle_identifier: String,
+    pub app_path: String,
+    pub profile_uuid: String,
+    pub marketing_version: String,
+    pub build_number: String,
+    pub installed_at_epoch_seconds: u64,
+}
+
+const META_PREFIX: &str = "__BUILDBRIDGE_DEVICE_RUN_META__\t";
+
+fn encode_device_run_meta(meta: &DeviceRunMeta) -> String {
+    format!(
+        "{META_PREFIX}{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        meta.device_identifier,
+        meta.bundle_identifier,
+        meta.app_path,
+        meta.profile_uuid,
+        meta.marketing_version,
+        meta.build_number,
+        meta.installed_at_epoch_seconds
+    )
+}
+
+pub(crate) fn parse_device_run_meta(line: &str) -> Result<DeviceRunMeta, ProviderError> {
+    let values = line.strip_prefix(META_PREFIX).ok_or_else(|| {
+        ProviderError::GuestBridge("the guest returned an invalid run record".to_string())
+    })?;
+    let fields = values.split('\t').collect::<Vec<_>>();
+    let [device, bundle, app, profile, version, build, installed] = fields[..] else {
+        return Err(ProviderError::GuestBridge(
+            "the guest returned an invalid run record".to_string(),
+        ));
+    };
+    if !valid_profile_uuid(device)
+        || !valid_profile_uuid(profile)
+        || !valid_release_value(version)
+        || !valid_release_value(build)
+        || app.is_empty()
+        || app.contains("..")
+        || app.chars().any(char::is_control)
+    {
+        return Err(ProviderError::GuestBridge(
+            "the guest returned an invalid run record".to_string(),
+        ));
+    }
+    validate_signing_target("TEAM", bundle)?;
+    let installed_at_epoch_seconds = installed.parse().map_err(|_| {
+        ProviderError::GuestBridge("the guest returned an invalid run record".to_string())
+    })?;
+
+    Ok(DeviceRunMeta {
+        device_identifier: device.to_string(),
+        bundle_identifier: bundle.to_string(),
+        app_path: app.to_string(),
+        profile_uuid: profile.to_string(),
+        marketing_version: version.to_string(),
+        build_number: build.to_string(),
+        installed_at_epoch_seconds,
+    })
+}
+
+/// Lines from `devicectl` worth surfacing on their own: what it prints when the phone is
+/// locked, unpaired, or not in Developer Mode.
+pub(crate) fn apple_device_log_is_diagnostic(line: &str) -> bool {
+    let lowered = line.to_ascii_lowercase();
+    [
+        "error:",
+        "unable to",
+        "locked",
+        "not paired",
+        "developer mode",
+        "tunnel",
+        "could not connect",
+        "failed",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+}
+
+fn push_bounded(lines: &mut Vec<String>, line: String, limit: usize) {
+    lines.push(line);
+    if lines.len() > limit {
+        lines.remove(0);
+    }
+}
+
+/// Runs the helper's `--device-build` mode, streaming the compiler's diagnostic lines.
+#[allow(clippy::too_many_arguments)]
+fn run_device_build_helper<F>(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+    helper_path: &str,
+    keychain_path: &str,
+    xcodebuild_path: &str,
+    workspace_path: &str,
+    scheme: &str,
+    derived_data_path: &str,
+    signing_settings_path: &str,
+    keychain_password: &str,
+    started_at: Instant,
+    on_progress: &mut F,
+) -> Result<Vec<String>, ProviderError>
+where
+    F: FnMut(AppleDeviceRunProgress),
+{
+    let remote_command = format!(
+        "{} --device-build {} {} {} {} {} {} 2>&1",
+        shell_single_quote(helper_path),
+        shell_single_quote(keychain_path),
+        shell_single_quote(xcodebuild_path),
+        shell_single_quote(workspace_path),
+        shell_single_quote(scheme),
+        shell_single_quote(derived_data_path),
+        shell_single_quote(signing_settings_path),
+    );
+    let mut child = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
+        .arg(remote_command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .tracked_spawn()
+        .map_err(|error| {
+            ProviderError::GuestBridge(format!("could not start the device build: {error}"))
+        })?;
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        ProviderError::GuestBridge("could not open protected build input".to_string())
+    })?;
+    write_secret_frame(&mut stdin, keychain_password)?;
+    drop(stdin);
+    let stdout = child.stdout.take().ok_or_else(|| {
+        ProviderError::GuestBridge("could not capture device build output".to_string())
+    })?;
+    let mut output_tail = Vec::new();
+    let mut diagnostic_lines = Vec::new();
+    let mut pending = Vec::new();
+    let mut last_event = Instant::now() - Duration::from_secs(1);
+
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|error| {
+            ProviderError::GuestBridge(format!("could not read device build output: {error}"))
+        })?;
+        if let Some(marker) = line.strip_prefix("__BUILDBRIDGE_DEVICE_BUILD__:") {
+            match marker {
+                "building" | "complete" => {}
+                _ => {
+                    return Err(ProviderError::GuestBridge(
+                        "macOS returned an unknown device build phase".to_string(),
+                    ));
+                }
+            }
+            continue;
+        }
+        let line = sanitize_build_log_line(&line);
+        if line.is_empty() {
+            continue;
+        }
+        let diagnostic = apple_build_log_is_diagnostic(&line);
+        if diagnostic {
+            push_bounded(
+                &mut diagnostic_lines,
+                line.clone(),
+                APPLE_BUILD_DIAGNOSTIC_LINES,
+            );
+        }
+        push_bounded(
+            &mut output_tail,
+            line.clone(),
+            APPLE_BUILD_OUTPUT_TAIL_LINES,
+        );
+        pending.push(line);
+        if diagnostic
+            || last_event.elapsed() >= PROGRESS_INTERVAL
+            || pending.len() >= CONSOLE_BATCH_LINES
+        {
+            on_progress(device_progress(
+                AppleDeviceRunPhase::Building,
+                started_at,
+                device_phase_detail(AppleDeviceRunPhase::Building),
+                std::mem::take(&mut pending),
+            ));
+            last_event = Instant::now();
+        }
+    }
+    if !pending.is_empty() {
+        on_progress(device_progress(
+            AppleDeviceRunPhase::Building,
+            started_at,
+            device_phase_detail(AppleDeviceRunPhase::Building),
+            pending,
+        ));
+    }
+
+    let status = child.wait().map_err(|error| {
+        ProviderError::GuestBridge(format!("could not finish the device build: {error}"))
+    })?;
+    if !status.success() {
+        let context = if diagnostic_lines.is_empty() {
+            output_tail
+                .iter()
+                .rev()
+                .take(12)
+                .rev()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            diagnostic_lines.join("\n")
+        };
+        return Err(ProviderError::GuestBridge(if context.is_empty() {
+            "the device build failed while compiling".to_string()
+        } else {
+            format!("the device build failed while compiling:\n{context}")
+        }));
+    }
+
+    Ok(output_tail)
+}
+
+/// Builds the Debug configuration signed for one phone, installs it, launches it, and streams
+/// its console until the session ends. Any end after the app was launched is a result — the
+/// person stopped it, the app exited, or the bridge dropped — not a failure.
+#[allow(clippy::too_many_arguments)]
+pub fn run_apple_device_build<F>(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+    signing: &DeviceSigning<'_>,
+    scheme: &str,
+    device: &GuestDevice,
+    keychain_password: &str,
+    env: Option<&GuestEnvFiles>,
+    mut on_progress: F,
+) -> Result<AppleDeviceRunResult, ProviderError>
+where
+    F: FnMut(AppleDeviceRunProgress),
+{
+    validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
+    validate_signing_target(signing.development_team, signing.bundle_identifier)?;
+    if !valid_apple_scheme(scheme) {
+        return Err(ProviderError::GuestBridge(
+            "the stored Xcode scheme is missing or invalid".to_string(),
+        ));
+    }
+    if keychain_password.is_empty() || keychain_password.len() > 512 {
+        return Err(ProviderError::GuestBridge(
+            "the signing keychain credential is missing or invalid".to_string(),
+        ));
+    }
+    if signing.identity_sha1.len() != 40
+        || !signing
+            .identity_sha1
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err(ProviderError::GuestBridge(
+            "the provisioned development identity is invalid".to_string(),
+        ));
+    }
+    if !valid_profile_uuid(&signing.profile.uuid) || !valid_profile_uuid(&device.identifier) {
+        return Err(ProviderError::GuestBridge(
+            "the development profile or the device identifier is invalid".to_string(),
+        ));
+    }
+    let expected_keychain_path =
+        format!("/Users/{username}/Library/Keychains/{SIGNING_KEYCHAIN_NAME}");
+    if signing.keychain_path != expected_keychain_path {
+        return Err(ProviderError::GuestBridge(
+            "the provisioned signing keychain path is invalid".to_string(),
+        ));
+    }
+
+    let started_at = Instant::now();
+    let guest_home = format!("/Users/{username}");
+    let guest_tools = format!("{guest_home}/.buildbridge/tools");
+    let helper_source = format!("{guest_tools}/signing-helper.c");
+    let helper_binary = format!("{guest_tools}/signing-helper");
+    let developer_dir = format!("{guest_home}/Applications/Xcode.app/Contents/Developer");
+    let xcodebuild = format!("{developer_dir}/usr/bin/xcodebuild");
+    let workspace_root = format!("{guest_home}/BuildBridge/workspaces/active");
+    let workspace = format!("{workspace_root}/ios/App/App.xcworkspace");
+    let derived_data = format!("{workspace_root}/.buildbridge/DerivedData");
+    let operation_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let staging =
+        format!("{guest_home}/Library/Caches/dev.buildbridge.desktop/device-run-{operation_id}");
+    let signing_settings = format!("{staging}/Signing.xcconfig");
+    let job_dir = format!("{guest_tools}/jobs/{DEVICE_RUN_JOB}");
+
+    // A run that outlived a dropped bridge is picked back up rather than rebuilt.
+    let job_state = run_guest_command(
+        ssh_port,
+        username,
+        identity_path,
+        known_hosts_path,
+        &format!(
+            "if /bin/test -f {pid} && /bin/kill -0 \"$(/bin/cat {pid})\" 2>/dev/null; then /usr/bin/printf running; else /usr/bin/printf idle; fi",
+            pid = shell_single_quote(&format!("{job_dir}/pid"))
+        ),
+    )?;
+    let reattached = job_state == "running";
+
+    let mut build_tail = Vec::new();
+    let mut meta = None;
+    if !reattached {
+        on_progress(device_progress(
+            AppleDeviceRunPhase::Preparing,
+            started_at,
+            device_phase_detail(AppleDeviceRunPhase::Preparing),
+            Vec::new(),
+        ));
+        run_guest_command(
+            ssh_port,
+            username,
+            identity_path,
+            known_hosts_path,
+            &format!(
+                "set -eu; /bin/mkdir -p {} {} {}; /bin/chmod 700 {}; /bin/rm -rf {} {}; /bin/mkdir -p {}; /bin/chmod 700 {}",
+                shell_single_quote(&guest_tools),
+                shell_single_quote(&format!(
+                    "{guest_home}/Library/Caches/dev.buildbridge.desktop"
+                )),
+                shell_single_quote(&derived_data),
+                shell_single_quote(&guest_tools),
+                shell_single_quote(&staging),
+                shell_single_quote(&job_dir),
+                shell_single_quote(&staging),
+                shell_single_quote(&staging),
+            ),
+        )?;
+
+        let built = (|| {
+            if let Some(env) = env {
+                let mut adapt = |progress: AppleArchiveProgress| {
+                    on_progress(AppleDeviceRunProgress {
+                        phase: AppleDeviceRunPhase::BuildingWebAssets,
+                        elapsed_seconds: progress.elapsed_seconds,
+                        detail: progress.detail,
+                        log_lines: progress.log_line.into_iter().collect(),
+                    });
+                };
+                rebuild_web_assets_with_env(
+                    env,
+                    ssh_port,
+                    username,
+                    identity_path,
+                    known_hosts_path,
+                    &guest_home,
+                    started_at,
+                    &mut adapt,
+                )?;
+            }
+
+            on_progress(device_progress(
+                AppleDeviceRunPhase::ResolvingTarget,
+                started_at,
+                device_phase_detail(AppleDeviceRunPhase::ResolvingTarget),
+                Vec::new(),
+            ));
+            let settings = run_guest_command(
+                ssh_port,
+                username,
+                identity_path,
+                known_hosts_path,
+                &format!(
+                    "set -o pipefail; {} -workspace {} -scheme {} -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath {} -showBuildSettings | /usr/bin/awk '$1 == \"TARGET_NAME\" || $1 == \"PRODUCT_BUNDLE_IDENTIFIER\" || $1 == \"CODESIGNING_FOLDER_PATH\" {{ print }}'",
+                    shell_single_quote(&xcodebuild),
+                    shell_single_quote(&workspace),
+                    shell_single_quote(scheme),
+                    shell_single_quote(&derived_data),
+                ),
+            )?;
+            let target = parse_device_build_target(&settings, &derived_data)?;
+            if !profile_allows_bundle(
+                &signing.profile.application_identifier,
+                &target.bundle_identifier,
+            ) {
+                return Err(ProviderError::GuestBridge(format!(
+                    "the Debug configuration builds bundle identifier {}, which the development profile for {} does not cover",
+                    target.bundle_identifier, signing.bundle_identifier
+                )));
+            }
+
+            let xcconfig = apple_archive_signing_xcconfig(
+                &target.target,
+                signing.development_team,
+                signing.identity_sha1,
+                &signing.profile.uuid,
+            );
+            stream_bytes_to_guest(
+                SIGNING_HELPER_SOURCE,
+                ssh_port,
+                username,
+                identity_path,
+                known_hosts_path,
+                &helper_source,
+                "signing helper",
+            )?;
+            stream_bytes_to_guest(
+                xcconfig.as_bytes(),
+                ssh_port,
+                username,
+                identity_path,
+                known_hosts_path,
+                &signing_settings,
+                "target-scoped signing settings",
+            )?;
+            run_guest_command(
+                ssh_port,
+                username,
+                identity_path,
+                known_hosts_path,
+                &format!(
+                    "set -eu; /usr/bin/xcrun --sdk macosx clang -std=c11 -O2 -Wno-deprecated-declarations {} -framework Security -framework CoreFoundation -o {}; /bin/chmod 700 {}",
+                    shell_single_quote(&helper_source),
+                    shell_single_quote(&helper_binary),
+                    shell_single_quote(&helper_binary),
+                ),
+            )?;
+
+            on_progress(device_progress(
+                AppleDeviceRunPhase::Building,
+                started_at,
+                device_phase_detail(AppleDeviceRunPhase::Building),
+                Vec::new(),
+            ));
+            let tail = run_device_build_helper(
+                ssh_port,
+                username,
+                identity_path,
+                known_hosts_path,
+                &helper_binary,
+                signing.keychain_path,
+                &xcodebuild,
+                &workspace,
+                scheme,
+                &derived_data,
+                &signing_settings,
+                keychain_password,
+                started_at,
+                &mut on_progress,
+            )?;
+
+            on_progress(device_progress(
+                AppleDeviceRunPhase::Verifying,
+                started_at,
+                device_phase_detail(AppleDeviceRunPhase::Verifying),
+                Vec::new(),
+            ));
+            let inspection_output = run_guest_command(
+                ssh_port,
+                username,
+                identity_path,
+                known_hosts_path,
+                &device_app_inspection_command(&target.product_path),
+            )?;
+            let inspection =
+                parse_device_app_inspection(&inspection_output, &signing.profile.uuid)?;
+            if inspection.bundle_identifier != target.bundle_identifier {
+                return Err(ProviderError::GuestBridge(format!(
+                    "the built app carries bundle identifier {}, not {}",
+                    inspection.bundle_identifier, target.bundle_identifier
+                )));
+            }
+
+            Ok((tail, target, inspection))
+        })();
+        let _ = run_guest_command(
+            ssh_port,
+            username,
+            identity_path,
+            known_hosts_path,
+            &format!("/bin/rm -rf {}", shell_single_quote(&staging)),
+        );
+        let (tail, target, inspection) = built?;
+        build_tail = tail;
+        meta = Some(DeviceRunMeta {
+            device_identifier: device.identifier.clone(),
+            bundle_identifier: inspection.bundle_identifier,
+            app_path: target.product_path,
+            profile_uuid: inspection.profile_uuid,
+            marketing_version: inspection.marketing_version,
+            build_number: inspection.build_number,
+            installed_at_epoch_seconds: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        });
+    }
+
+    // The job body is fixed for a reattach: the guest already has it running, and the wrapper
+    // only tails. An empty body keeps the script well-formed.
+    let body = meta
+        .as_ref()
+        .map(|meta| {
+            device_run_job_body(
+                &developer_dir,
+                &meta.device_identifier,
+                &meta.app_path,
+                &meta.bundle_identifier,
+            )
+        })
+        .unwrap_or_else(|| "/usr/bin/true\n".to_string());
+    let meta_line = meta
+        .as_ref()
+        .map(encode_device_run_meta)
+        .unwrap_or_default();
+    let script = guest_job_script(
+        DEVICE_RUN_JOB,
+        &guest_tools,
+        &shell_single_quote(&meta_line),
+        &body,
+    );
+
+    on_progress(device_progress(
+        AppleDeviceRunPhase::Installing,
+        started_at,
+        device_phase_detail(AppleDeviceRunPhase::Installing),
+        Vec::new(),
+    ));
+    let mut child = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .tracked_spawn()
+        .map_err(|error| {
+            ProviderError::GuestBridge(format!("could not start the device session: {error}"))
+        })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        ProviderError::GuestBridge("could not capture the device session output".to_string())
+    })?;
+
+    let mut phase = AppleDeviceRunPhase::Installing;
+    let mut console_tail = Vec::new();
+    let mut diagnostic_lines = Vec::new();
+    let mut pending = Vec::new();
+    let mut last_event = Instant::now() - Duration::from_secs(1);
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|error| {
+            ProviderError::GuestBridge(format!("could not read the device session: {error}"))
+        })?;
+        if let Some(value) = line.strip_prefix("__BUILDBRIDGE_PHASE__:") {
+            phase = match value {
+                "installing" => AppleDeviceRunPhase::Installing,
+                "launching" => AppleDeviceRunPhase::Launching,
+                _ => {
+                    return Err(ProviderError::GuestBridge(
+                        "the guest returned an unknown device session phase".to_string(),
+                    ));
+                }
+            };
+            on_progress(device_progress(
+                phase,
+                started_at,
+                device_phase_detail(phase),
+                Vec::new(),
+            ));
+            last_event = Instant::now();
+            continue;
+        }
+        if line == "__BUILDBRIDGE_REATTACHED__:yes" {
+            on_progress(device_progress(
+                phase,
+                started_at,
+                "Reattached to the session already running inside macOS.",
+                Vec::new(),
+            ));
+            continue;
+        }
+        if line.starts_with(META_PREFIX) {
+            if meta.is_none() {
+                meta = Some(parse_device_run_meta(&line)?);
+            }
+            continue;
+        }
+        let line = sanitize_build_log_line(&line);
+        if line.is_empty() {
+            continue;
+        }
+        if phase == AppleDeviceRunPhase::Launching {
+            phase = AppleDeviceRunPhase::Running;
+            on_progress(device_progress(
+                phase,
+                started_at,
+                device_phase_detail(phase),
+                Vec::new(),
+            ));
+        }
+        let diagnostic = apple_device_log_is_diagnostic(&line);
+        if diagnostic {
+            push_bounded(
+                &mut diagnostic_lines,
+                line.clone(),
+                APPLE_BUILD_DIAGNOSTIC_LINES,
+            );
+        }
+        push_bounded(&mut console_tail, line.clone(), CONSOLE_TAIL_LINES);
+        pending.push(line);
+        if diagnostic
+            || last_event.elapsed() >= PROGRESS_INTERVAL
+            || pending.len() >= CONSOLE_BATCH_LINES
+        {
+            on_progress(device_progress(
+                phase,
+                started_at,
+                device_phase_detail(phase),
+                std::mem::take(&mut pending),
+            ));
+            last_event = Instant::now();
+        }
+    }
+    if !pending.is_empty() {
+        on_progress(device_progress(
+            phase,
+            started_at,
+            device_phase_detail(phase),
+            pending,
+        ));
+    }
+
+    let status = child.wait().map_err(|error| {
+        ProviderError::GuestBridge(format!("could not finish the device session: {error}"))
+    })?;
+    let exit_code = status.code();
+    if exit_code != Some(255) && exit_code.is_some() {
+        let _ = run_guest_command(
+            ssh_port,
+            username,
+            identity_path,
+            known_hosts_path,
+            &format!("/bin/rm -rf {}", shell_single_quote(&job_dir)),
+        );
+    }
+    let Some(meta) = meta else {
+        return Err(ProviderError::GuestBridge(
+            "the guest did not report what it installed".to_string(),
+        ));
+    };
+    if phase != AppleDeviceRunPhase::Running {
+        let context = if diagnostic_lines.is_empty() {
+            console_tail
+                .iter()
+                .rev()
+                .take(12)
+                .rev()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            diagnostic_lines.join("\n")
+        };
+        return Err(ProviderError::GuestBridge(if context.is_empty() {
+            format!(
+                "the device session failed while {}",
+                device_phase_detail(phase).to_ascii_lowercase()
+            )
+        } else {
+            format!(
+                "the device session failed while {}\n{context}",
+                device_phase_detail(phase).to_ascii_lowercase()
+            )
+        }));
+    }
+    let console_end = match exit_code {
+        None => ConsoleEnd::Stopped,
+        Some(255) => ConsoleEnd::Disconnected,
+        Some(_) => ConsoleEnd::Exited,
+    };
+    on_progress(device_progress(
+        AppleDeviceRunPhase::Completed,
+        started_at,
+        device_phase_detail(AppleDeviceRunPhase::Completed),
+        Vec::new(),
+    ));
+
+    Ok(AppleDeviceRunResult {
+        device: device.clone(),
+        bundle_identifier: meta.bundle_identifier,
+        app_path: meta.app_path,
+        marketing_version: meta.marketing_version,
+        build_number: meta.build_number,
+        provisioning_profile_uuid: meta.profile_uuid,
+        installed_at_epoch_seconds: meta.installed_at_epoch_seconds,
+        console_end,
+        exit_status: exit_code.filter(|code| *code != 255),
+        reattached,
+        build_tail,
+        console_tail,
+    })
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+
+    #[test]
+    fn device_build_targets_are_read_and_bounded() {
+        let output = "    TARGET_NAME = App\n    PRODUCT_BUNDLE_IDENTIFIER = com.example.app.debug\n    CODESIGNING_FOLDER_PATH = /Users/b/BuildBridge/workspaces/active/.buildbridge/DerivedData/Build/Products/Debug-iphoneos/App.app\n";
+        let derived = "/Users/b/BuildBridge/workspaces/active/.buildbridge/DerivedData";
+        let target = parse_device_build_target(output, derived).expect("parses");
+        assert_eq!(target.target, "App");
+        assert_eq!(target.bundle_identifier, "com.example.app.debug");
+        assert!(target.product_path.ends_with("/App.app"));
+
+        let outside = output.replace(derived, "/tmp/elsewhere");
+        assert!(parse_device_build_target(&outside, derived).is_err());
+        let traversal = output.replace("/App.app", "/../App.app");
+        assert!(parse_device_build_target(&traversal, derived).is_err());
+        assert!(parse_device_build_target("TARGET_NAME = App\n", derived).is_err());
+    }
+
+    #[test]
+    fn device_app_inspection_is_strictly_validated() {
+        let uuid = "22222222-3333-4444-5555-666666666666";
+        let good = format!("__BUILDBRIDGE_DEVICE_APP__\tcom.example.app\t3.2.0\t15\t{uuid}\tyes\n");
+        let inspection = parse_device_app_inspection(&good, uuid).expect("parses");
+        assert_eq!(inspection.bundle_identifier, "com.example.app");
+        assert_eq!(inspection.marketing_version, "3.2.0");
+        assert_eq!(inspection.profile_uuid, uuid);
+
+        let other_profile = "__BUILDBRIDGE_DEVICE_APP__\tcom.example.app\t3.2.0\t15\t11111111-2222-3333-4444-555555555555\tyes\n";
+        assert!(parse_device_app_inspection(other_profile, uuid).is_err());
+        let not_debuggable = good.replace("\tyes", "\tno");
+        assert!(parse_device_app_inspection(&not_debuggable, uuid).is_err());
+        assert!(parse_device_app_inspection("nothing", uuid).is_err());
+    }
+
+    #[test]
+    fn the_device_run_job_script_reattaches_and_quotes_every_guest_value() {
+        let body = device_run_job_body(
+            "/Users/b/Applications/Xcode.app/Contents/Developer",
+            "E3F1A2B4-5C6D-4E7F-8A9B-0C1D2E3F4A5B",
+            "/Users/b/BuildBridge/workspaces/active/.buildbridge/DerivedData/Build/Products/Debug-iphoneos/App.app",
+            "com.example.app",
+        );
+        assert!(body.contains(
+            "devicectl device install app --device 'E3F1A2B4-5C6D-4E7F-8A9B-0C1D2E3F4A5B'"
+        ));
+        assert!(body.contains("process launch --console --terminate-existing --device"));
+        assert!(body.contains("'com.example.app'"));
+
+        let meta = DeviceRunMeta {
+            device_identifier: "E3F1A2B4-5C6D-4E7F-8A9B-0C1D2E3F4A5B".to_string(),
+            bundle_identifier: "com.example.app".to_string(),
+            app_path: "/Users/b/App.app".to_string(),
+            profile_uuid: "22222222-3333-4444-5555-666666666666".to_string(),
+            marketing_version: "3.2.0".to_string(),
+            build_number: "15".to_string(),
+            installed_at_epoch_seconds: 1_756_900_000,
+        };
+        let encoded = encode_device_run_meta(&meta);
+        assert_eq!(parse_device_run_meta(&encoded).expect("round trip"), meta);
+        assert!(parse_device_run_meta("__BUILDBRIDGE_DEVICE_RUN_META__\tbad").is_err());
+
+        let script = guest_job_script(
+            "apple-device-run",
+            "/Users/b/.buildbridge/tools",
+            "'meta'",
+            &body,
+        );
+        assert!(script.contains("job_state=\"$job_root/apple-device-run\""));
+        assert!(script.contains("__BUILDBRIDGE_REATTACHED__:yes"));
+        assert!(script.contains("/bin/cat \"$job_state/meta\""));
+        assert!(script.contains("trap '' HUP"));
+    }
+
+    #[test]
+    fn device_console_diagnostics_are_the_lines_a_person_must_act_on() {
+        assert!(apple_device_log_is_diagnostic(
+            "ERROR: The device is locked."
+        ));
+        assert!(apple_device_log_is_diagnostic(
+            "Unable to install: Developer Mode is disabled"
+        ));
+        assert!(!apple_device_log_is_diagnostic(
+            "[App] scene did become active"
+        ));
     }
 }

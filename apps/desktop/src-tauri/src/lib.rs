@@ -12,11 +12,11 @@ use buildbridge_contract::{
     RealtimeAuthorizationRequest, RealtimeConfiguration, valid_git_ref,
 };
 use buildbridge_docker_osx::{
-    AppleArchiveArtifact, AppleArchiveProgress, AppleArchiveResult, AppleProjectProgress,
-    AppleSmokeBuildResult, AppleWorkspaceSyncResult, ContainerState, GuestDiagnostics,
-    GuestEnvFiles, GuestOptimization, GuestSshStatus, GuestTrustState, HostPrerequisites,
-    MacBuilderConfig, OperationScope, RuntimeStatus, SigningProvisioningProgress,
-    SigningProvisioningResult, XcodeImportProgress,
+    AppleArchiveArtifact, AppleArchiveProgress, AppleArchiveResult, AppleDeviceRunProgress,
+    AppleDeviceRunResult, AppleProjectProgress, AppleSmokeBuildResult, AppleWorkspaceSyncResult,
+    ContainerState, GuestDiagnostics, GuestEnvFiles, GuestOptimization, GuestSshStatus,
+    GuestTrustState, HostPrerequisites, MacBuilderConfig, OperationScope, RuntimeStatus,
+    SigningProvisioningProgress, SigningProvisioningResult, XcodeImportProgress,
 };
 use buildbridge_runner::{ApiClient, execute};
 use keyring::Entry;
@@ -37,6 +37,8 @@ const SIGNING_PROGRESS_EVENT: &str = "machine-signing-progress";
 const PROJECT_PROGRESS_EVENT: &str = "machine-project-progress";
 const ARCHIVE_PROGRESS_EVENT: &str = "machine-archive-progress";
 const USB_MIGRATION_PROGRESS_EVENT: &str = "machine-usb-migration-progress";
+const DEVICE_SIGNING_PROGRESS_EVENT: &str = "machine-device-signing-progress";
+const DEVICE_RUN_PROGRESS_EVENT: &str = "machine-device-progress";
 
 const CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop";
 const MAC_BUILDER_CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop.macos-builder";
@@ -185,7 +187,10 @@ async fn cancel_machine_operation(app: AppHandle, machine_id: String) -> Result<
     }
     scope.cancel();
 
-    if matches!(label.as_deref(), Some("test_building" | "archiving")) {
+    if matches!(
+        label.as_deref(),
+        Some("test_building" | "archiving" | "running_on_device")
+    ) {
         let paths = MachinePaths::resolve(&app, &machine_id)?;
         if let Some(access) = load_mac_guest_access(&paths)?
             && let Ok(registry) = machines::load_registry(&app)
@@ -310,6 +315,7 @@ struct MachineSummary {
     env_set_name: Option<String>,
     /// The container keeps its disk on the host and can be handed USB devices.
     usb_ready: bool,
+    device_run_retained: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -383,6 +389,15 @@ struct StoredSigningKit {
     guest_keychain_password: Option<String>,
     #[serde(default)]
     created_at_epoch_seconds: u64,
+    /// The optional development identity, for Debug builds on registered phones.
+    #[serde(default)]
+    development_certificate_path: Option<String>,
+    #[serde(default)]
+    development_certificate_password: Option<String>,
+    /// Apple's serial for the development `.p12` BuildBridge created; derived with OpenSSL for
+    /// a hand-supplied file and cached here.
+    #[serde(default)]
+    development_certificate_serial_number: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -405,6 +420,10 @@ struct SigningKitInput {
     signing_certificate_password: String,
     provisioning_profile_paths: Vec<String>,
     guest_keychain_password: String,
+    #[serde(default)]
+    development_certificate_path: String,
+    #[serde(default)]
+    development_certificate_password: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -430,6 +449,9 @@ struct SigningKitSummary {
     created_at_epoch_seconds: u64,
     /// Machines currently attached to this kit, by display name.
     attached_machines: Vec<String>,
+    development_certificate_configured: bool,
+    development_certificate_name: Option<String>,
+    development_certificate_password_stored: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -719,6 +741,10 @@ struct MacBuilderView {
     logs: Vec<String>,
     /// USB passthrough: the host's phones and rule, the container's access, the attachment.
     usb: buildbridge_docker_osx::MachineUsbStatus,
+    /// The last run on a phone, kept until cleared; bound to the container like signing.
+    device_run: Option<AppleDeviceRunResult>,
+    /// The last failed device run, retained like `archive_error` until cleared.
+    device_run_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1391,6 +1417,7 @@ async fn discard_machine_container(
     }
     remove_file_if_present(&paths.known_hosts())?;
     remove_signing_provisioning_record(&paths)?;
+    remove_file_if_present(&paths.apple_device_run_record())?;
     // The disk is the macOS installation the person just agreed to discard.
     paths.remove_container_storage()?;
     clear_usb_attach_issue(&app, &machine_id);
@@ -1847,6 +1874,28 @@ async fn create_apple_distribution_certificate(
     kit_id: String,
     input: CreateAppleCertificateInput,
 ) -> Result<CreateAppleCertificateResult, String> {
+    create_apple_certificate_command(app, kit_id, input, apple_api::CertificateKind::Distribution)
+        .await
+}
+
+/// The development counterpart: the identity a Debug build on a registered phone is signed
+/// with. It joins the kit next to the distribution one and never replaces it.
+#[tauri::command]
+async fn create_apple_development_certificate(
+    app: AppHandle,
+    kit_id: String,
+    input: CreateAppleCertificateInput,
+) -> Result<CreateAppleCertificateResult, String> {
+    create_apple_certificate_command(app, kit_id, input, apple_api::CertificateKind::Development)
+        .await
+}
+
+async fn create_apple_certificate_command(
+    app: AppHandle,
+    kit_id: String,
+    input: CreateAppleCertificateInput,
+    kind: apple_api::CertificateKind,
+) -> Result<CreateAppleCertificateResult, String> {
     if !input.confirmed {
         return Err("Confirm the Apple certificate creation before continuing.".to_string());
     }
@@ -1856,6 +1905,23 @@ async fn create_apple_distribution_certificate(
         .into_iter()
         .find(|kit| kit.id == kit_id)
         .ok_or_else(|| "This signing kit is no longer stored.".to_string())?;
+    let (certificate, saved_path) = create_apple_certificate_for_kit(&app, &mut kit, kind).await?;
+
+    Ok(CreateAppleCertificateResult {
+        certificate,
+        saved_path,
+        kit: summarize_signing_kit(&kit),
+    })
+}
+
+/// Creates an identity of one kind for a kit without a Mac anywhere: the private key is
+/// generated on this host, Apple signs a CSR for it through the kit's Team key, and the result
+/// is packaged as a `.p12` straight into the kit. Nothing at Apple is revoked or replaced.
+async fn create_apple_certificate_for_kit(
+    app: &AppHandle,
+    kit: &mut StoredSigningKit,
+    kind: apple_api::CertificateKind,
+) -> Result<(apple_api::AppleCertificateSummary, String), String> {
     let key_id = kit.app_store_connect_key_id.clone().ok_or_else(|| {
         "This kit has no App Store Connect key. Add one to the kit first; creating a certificate needs a Team key with the Admin role."
             .to_string()
@@ -1869,35 +1935,34 @@ async fn create_apple_distribution_certificate(
         .clone()
         .ok_or_else(|| "This kit has no App Store Connect .p8 key.".to_string())?;
 
-    let directory = managed_apple_certificates_dir(&app)?
-        .join(format!("distribution-{}", machines::now_epoch_seconds()));
+    let directory = managed_apple_certificates_dir(app)?.join(format!(
+        "{}-{}",
+        kind.file_stem(),
+        machines::now_epoch_seconds()
+    ));
     let work = tauri::async_runtime::spawn_blocking({
         let directory = directory.clone();
-        move || prepare_certificate_request(&directory)
+        move || prepare_certificate_request(&directory, kind.common_name())
     })
     .await
     .map_err(|error| error.to_string())??;
 
-    let created = match apple_api::create_distribution_certificate(
-        &key_id,
-        &issuer_id,
-        &private_key,
-        &work.csr_pem,
-    )
-    .await
-    {
-        Ok(created) => created,
-        Err(error) => {
-            let _ = fs::remove_dir_all(&directory);
-            return Err(error);
-        }
-    };
+    let created =
+        match apple_api::create_certificate(&key_id, &issuer_id, &private_key, &work.csr_pem, kind)
+            .await
+        {
+            Ok(created) => created,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&directory);
+                return Err(error);
+            }
+        };
 
     let packaged = tauri::async_runtime::spawn_blocking({
         let directory = directory.clone();
         let display_name = created.certificate.name.clone();
         let content = created.content.clone();
-        move || package_certificate(&directory, &display_name, &content)
+        move || package_certificate(&directory, &display_name, &content, kind.file_stem())
     })
     .await
     .map_err(|error| error.to_string())
@@ -1910,8 +1975,18 @@ async fn create_apple_distribution_certificate(
         )
     })?;
 
-    kit.signing_certificate_path = Some(packaged.p12_path.clone());
-    kit.signing_certificate_password = Some(packaged.password);
+    match kind {
+        apple_api::CertificateKind::Distribution => {
+            kit.signing_certificate_path = Some(packaged.p12_path.clone());
+            kit.signing_certificate_password = Some(packaged.password);
+        }
+        apple_api::CertificateKind::Development => {
+            kit.development_certificate_path = Some(packaged.p12_path.clone());
+            kit.development_certificate_password = Some(packaged.password);
+            kit.development_certificate_serial_number =
+                Some(created.certificate.serial_number.clone());
+        }
+    }
     save_signing_kit_record(kit.clone()).await.map_err(|error| {
         format!(
             "Apple issued certificate {} and it was packaged at {}, but BuildBridge could not update the kit in the OS vault: {error}. Nothing at Apple was revoked.",
@@ -1919,10 +1994,87 @@ async fn create_apple_distribution_certificate(
         )
     })?;
 
-    Ok(CreateAppleCertificateResult {
-        certificate: created.certificate,
-        saved_path: packaged.p12_path,
-        kit: summarize_signing_kit(&kit),
+    Ok((created.certificate, packaged.p12_path))
+}
+
+/// Apple's serial number for the kit's development `.p12`: recorded when BuildBridge created
+/// it, read out of the file with OpenSSL otherwise. The passphrase goes through the environment.
+fn development_certificate_serial(kit: &StoredSigningKit) -> Result<String, String> {
+    if let Some(serial) = &kit.development_certificate_serial_number {
+        return Ok(serial.clone());
+    }
+    let path = kit
+        .development_certificate_path
+        .as_deref()
+        .ok_or_else(|| "This kit has no development certificate.".to_string())?;
+    let password = kit
+        .development_certificate_password
+        .as_deref()
+        .ok_or_else(|| {
+            "Store the development certificate passphrase in the operating-system vault first."
+                .to_string()
+        })?;
+    let env = Some(("BUILDBRIDGE_P12_PASSWORD", password));
+    let pem = openssl(
+        &[
+            "pkcs12",
+            "-in",
+            path,
+            "-nokeys",
+            "-clcerts",
+            "-passin",
+            "env:BUILDBRIDGE_P12_PASSWORD",
+        ],
+        None,
+        env,
+    )
+    .or_else(|_| {
+        openssl(
+            &[
+                "pkcs12",
+                "-legacy",
+                "-in",
+                path,
+                "-nokeys",
+                "-clcerts",
+                "-passin",
+                "env:BUILDBRIDGE_P12_PASSWORD",
+            ],
+            None,
+            env,
+        )
+    })?;
+    let serial = openssl(&["x509", "-noout", "-serial"], Some(&pem), None)?;
+    let serial = String::from_utf8_lossy(&serial);
+    let serial = serial.trim();
+    let serial = serial
+        .strip_prefix("serial=")
+        .unwrap_or(serial)
+        .trim()
+        .to_ascii_uppercase();
+    if serial.is_empty()
+        || !serial
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err(
+            "OpenSSL could not read the development certificate's serial number.".to_string(),
+        );
+    }
+
+    Ok(serial)
+}
+
+/// Whether the kit already holds a copy of the profile with this UUID, by managed file name.
+fn kit_holds_profile_uuid(kit: &StoredSigningKit, uuid: &str) -> bool {
+    kit.provisioning_profile_paths.iter().any(|path| {
+        std::path::Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.to_ascii_uppercase()
+                    .starts_with(&uuid.to_ascii_uppercase())
+            })
     })
 }
 
@@ -1948,6 +2100,7 @@ struct PackagedCertificate {
 /// with looser permissions even for an instant.
 fn prepare_certificate_request(
     directory: &std::path::Path,
+    common_name: &str,
 ) -> Result<CertificateRequestFiles, String> {
     openssl(&["version"], None, None).map_err(|_| {
         "OpenSSL is not installed on this host. Install the openssl package and try again."
@@ -1967,7 +2120,7 @@ fn prepare_certificate_request(
     write_restricted_file(&key_path, &key_pem)?;
 
     let csr_pem = openssl(
-        &certificate_csr_args(&key_path.to_string_lossy()),
+        &certificate_csr_args(&key_path.to_string_lossy(), common_name),
         None,
         None,
     )?;
@@ -1987,11 +2140,12 @@ fn package_certificate(
     directory: &std::path::Path,
     display_name: &str,
     certificate_der: &[u8],
+    file_stem: &str,
 ) -> Result<PackagedCertificate, String> {
     let key_path = directory.join("key.pem");
     let cer_path = directory.join("certificate.cer");
     let pem_path = directory.join("certificate.pem");
-    let p12_path = directory.join("distribution.p12");
+    let p12_path = directory.join(format!("{file_stem}.p12"));
     write_restricted_file(&cer_path, certificate_der)?;
 
     let certificate_pem = openssl(
@@ -2044,19 +2198,12 @@ fn certificate_key_args() -> Vec<String> {
     .collect()
 }
 
-fn certificate_csr_args(key_path: &str) -> Vec<String> {
-    [
-        "req",
-        "-new",
-        "-batch",
-        "-key",
-        key_path,
-        "-subj",
-        "/CN=BuildBridge Distribution",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+fn certificate_csr_args(key_path: &str, common_name: &str) -> Vec<String> {
+    let subject = format!("/CN={common_name}");
+    ["req", "-new", "-batch", "-key", key_path, "-subj", &subject]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 fn certificate_p12_args(key_path: &str, certificate_pem: &str, display_name: &str) -> Vec<String> {
@@ -2857,9 +3004,21 @@ async fn provision_mac_signing(
     app: AppHandle,
     machine_id: String,
 ) -> Result<MacBuilderView, String> {
-    let paths = MachinePaths::resolve(&app, &machine_id)?;
-    let profile = machines::load_registry(&app)?
-        .find(&machine_id)?
+    let secrets = resolve_signing_kit_for(&app, &machine_id).await?;
+    provision_with_kit(&app, &machine_id, secrets).await
+}
+
+/// Provisions one kit into a machine's guest keychain: the distribution identity every kit
+/// has, the development identity when the kit holds one, and every profile, replacing what
+/// the previous provisioning installed.
+async fn provision_with_kit(
+    app: &AppHandle,
+    machine_id: &str,
+    secrets: StoredSigningKit,
+) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(app, machine_id)?;
+    let profile = machines::load_registry(app)?
+        .find(machine_id)?
         .config
         .clone();
     let access = load_mac_guest_access(&paths)?
@@ -2879,7 +3038,7 @@ async fn provision_mac_signing(
         "BuildBridge could not detect one release bundle identifier. Re-approve the project after setting PRODUCT_BUNDLE_IDENTIFIER in Xcode."
             .to_string()
     })?;
-    let current = build_mac_builder_view(&app, &paths).await?;
+    let current = build_mac_builder_view(app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let container_id = current
         .runtime
@@ -2898,7 +3057,6 @@ async fn provision_mac_signing(
         })
         .unwrap_or_default();
 
-    let secrets = resolve_signing_kit_for(&app, &machine_id).await?;
     let certificate_path = PathBuf::from(
         secrets
             .signing_certificate_path
@@ -2907,6 +3065,19 @@ async fn provision_mac_signing(
     let certificate_password = secrets.signing_certificate_password.ok_or_else(|| {
         "Store the certificate passphrase in the operating-system vault first.".to_string()
     })?;
+    let development_certificate = match (
+        secrets.development_certificate_path,
+        secrets.development_certificate_password,
+    ) {
+        (Some(path), Some(password)) => Some((PathBuf::from(path), password)),
+        (Some(_), None) => {
+            return Err(
+                "Store the development certificate passphrase in the operating-system vault first."
+                    .to_string(),
+            );
+        }
+        (None, _) => None,
+    };
     let profile_paths = secrets
         .provisioning_profile_paths
         .into_iter()
@@ -2921,7 +3092,7 @@ async fn provision_mac_signing(
     let identity_path = paths.guest_identity();
     let known_hosts_path = paths.known_hosts();
 
-    let guard = begin_machine_operation(&app, &machine_id, "provisioning_signing")?;
+    let guard = begin_machine_operation(app, machine_id, "provisioning_signing")?;
     if current.signing.is_some()
         && let Err(error) = remove_signing_provisioning_record(&paths)
     {
@@ -2930,7 +3101,7 @@ async fn provision_mac_signing(
     }
 
     let event_app = app.clone();
-    let event_machine_id = machine_id.clone();
+    let event_machine_id = machine_id.to_string();
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tauri::async_runtime::spawn_blocking(move || {
@@ -2945,11 +3116,17 @@ async fn provision_mac_signing(
             )
             .map_err(|error| error.to_string())?;
         }
+        let material = buildbridge_docker_osx::SigningMaterial {
+            certificate_path: &certificate_path,
+            certificate_password: &certificate_password,
+            development_certificate: development_certificate
+                .as_ref()
+                .map(|(path, password)| (path.as_path(), password.as_str())),
+            profile_paths: &profile_paths,
+            keychain_password: &keychain_password,
+        };
         buildbridge_docker_osx::provision_signing(
-            &certificate_path,
-            &certificate_password,
-            &profile_paths,
-            &keychain_password,
+            &material,
             &development_team,
             &bundle_identifier,
             profile.ssh_port,
@@ -2979,7 +3156,482 @@ async fn provision_mac_signing(
         },
     )?;
 
+    build_mac_builder_view(app, &paths).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrepareDeviceSigningInput {
+    udid: String,
+    device_name: String,
+    confirmed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrepareDeviceSigningResult {
+    view: MacBuilderView,
+    certificate_created: bool,
+    device_already_registered: bool,
+    profile_created: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DeviceSigningPhase {
+    CheckingKit,
+    CreatingCertificate,
+    RegisteringDevice,
+    CheckingProfiles,
+    CreatingProfile,
+    DownloadingProfile,
+    Provisioning,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceSigningProgress {
+    phase: DeviceSigningPhase,
+    elapsed_seconds: u64,
+    detail: String,
+}
+
+/// Makes one phone buildable: a development identity in the kit (created at Apple if needed),
+/// the phone registered with the team, a development profile that lists it, and both
+/// identities provisioned into the guest keychain. Each step persists before the next, so a
+/// retry resumes rather than repeats, and nothing at Apple is revoked.
+#[tauri::command]
+async fn prepare_apple_device_signing(
+    app: AppHandle,
+    machine_id: String,
+    input: PrepareDeviceSigningInput,
+) -> Result<PrepareDeviceSigningResult, String> {
+    if !input.confirmed {
+        return Err("Confirm the device registration before continuing.".to_string());
+    }
+    let udid = input.udid.trim().to_ascii_uppercase();
+    apple_api::validate_device_udid(&udid)?;
+    let device_name = apple_api::validate_device_name(&input.device_name)?;
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let workspace = load_apple_workspace(&paths)?
+        .ok_or_else(|| "Approve and verify an Apple project first.".to_string())?;
+    if !workspace.last_build_succeeded {
+        return Err("Complete the unsigned project test build first.".to_string());
+    }
+    let bundle_identifier = workspace.bundle_identifier.clone().ok_or_else(|| {
+        "BuildBridge could not detect one release bundle identifier. Re-approve the project after setting PRODUCT_BUNDLE_IDENTIFIER in Xcode."
+            .to_string()
+    })?;
+    let current = build_mac_builder_view(&app, &paths).await?;
+    ensure_apple_project_guest_ready(&current)?;
+    let mut kit = resolve_signing_kit_for(&app, &machine_id).await?;
+    let (key_id, issuer_id, private_key) = match (
+        kit.app_store_connect_key_id.clone(),
+        kit.app_store_connect_issuer_id.clone(),
+        kit.app_store_connect_private_key.clone(),
+    ) {
+        (Some(key_id), Some(issuer_id), Some(private_key)) => (key_id, issuer_id, private_key),
+        _ => {
+            return Err(
+                "This kit has no App Store Connect key. Device signing needs a Team key with the Admin role to register the iPhone and create a development profile."
+                    .to_string(),
+            );
+        }
+    };
+    if kit.guest_keychain_password.is_none() {
+        return Err(
+            "Store a dedicated guest keychain password in the operating-system vault first."
+                .to_string(),
+        );
+    }
+
+    // Already prepared for this phone: nothing to do beyond confirming the registration.
+    if kit.development_certificate_path.is_some()
+        && current.signing.as_ref().is_some_and(|signing| {
+            buildbridge_docker_osx::select_development_profile(signing, &udid).is_some()
+        })
+    {
+        let registered =
+            apple_api::register_device(&key_id, &issuer_id, &private_key, &udid, &device_name)
+                .await?;
+        return Ok(PrepareDeviceSigningResult {
+            view: current,
+            certificate_created: false,
+            device_already_registered: registered.already_registered,
+            profile_created: false,
+        });
+    }
+
+    let guard = begin_machine_operation(&app, &machine_id, "preparing_device_signing")?;
+    let started = std::time::Instant::now();
+    let report = |phase: DeviceSigningPhase, detail: &str| {
+        emit_machine_progress(
+            &app,
+            DEVICE_SIGNING_PROGRESS_EVENT,
+            &machine_id,
+            DeviceSigningProgress {
+                phase,
+                elapsed_seconds: started.elapsed().as_secs(),
+                detail: detail.to_string(),
+            },
+        );
+    };
+    let outcome: Result<(bool, bool, bool), String> = async {
+        report(
+            DeviceSigningPhase::CheckingKit,
+            "Checking the kit for a development identity",
+        );
+        let mut certificate_created = false;
+        if kit.development_certificate_path.is_none() {
+            report(
+                DeviceSigningPhase::CreatingCertificate,
+                "Creating an Apple Development certificate for a key generated on this host",
+            );
+            create_apple_certificate_for_kit(&app, &mut kit, apple_api::CertificateKind::Development)
+                .await?;
+            certificate_created = true;
+        }
+        let serial = tauri::async_runtime::spawn_blocking({
+            let kit = kit.clone();
+            move || development_certificate_serial(&kit)
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        if kit.development_certificate_serial_number.is_none() {
+            kit.development_certificate_serial_number = Some(serial.clone());
+            save_signing_kit_record(kit.clone()).await?;
+        }
+        let certificate = apple_api::find_certificate_by_serial(
+            &key_id,
+            &issuer_id,
+            &private_key,
+            &serial,
+            apple_api::CertificateKind::Development,
+        )
+        .await?
+        .ok_or_else(|| {
+            format!(
+                "The kit's development certificate (serial {serial}) is not an unexpired development certificate on the Apple team. Create one from the kit, or store the .p12 Apple issued for this team."
+            )
+        })?;
+
+        report(
+            DeviceSigningPhase::RegisteringDevice,
+            &format!("Registering {device_name} with the team"),
+        );
+        let registered =
+            apple_api::register_device(&key_id, &issuer_id, &private_key, &udid, &device_name)
+                .await?;
+
+        report(
+            DeviceSigningPhase::CheckingProfiles,
+            "Checking the team's development profiles for this phone",
+        );
+        let search = apple_api::find_development_profile(
+            &key_id,
+            &issuer_id,
+            &private_key,
+            &bundle_identifier,
+            &certificate.id,
+            &udid,
+        )
+        .await?;
+        let mut profile_created = false;
+        let (profile, content) = match search.matching {
+            Some(profile) if kit_holds_profile_uuid(&kit, &profile.uuid) => (profile, None),
+            Some(profile) => {
+                report(
+                    DeviceSigningPhase::DownloadingProfile,
+                    "Downloading the development profile that already lists this phone",
+                );
+                let (profile, content) =
+                    apple_api::download_profile(&key_id, &issuer_id, &private_key, &profile.id)
+                        .await?;
+                (profile, Some(content))
+            }
+            None => {
+                report(
+                    DeviceSigningPhase::CreatingProfile,
+                    "Creating a development profile listing this phone",
+                );
+                let mut device_ids = search.superseded_device_ids;
+                if !device_ids.contains(&registered.device.id) {
+                    device_ids.push(registered.device.id.clone());
+                }
+                let created = apple_api::create_development_profile(
+                    &key_id,
+                    &issuer_id,
+                    &private_key,
+                    &bundle_identifier,
+                    &certificate.id,
+                    &device_ids,
+                )
+                .await?;
+                profile_created = true;
+                (created.profile, Some(created.content))
+            }
+        };
+        if let Some(content) = content {
+            if kit.provisioning_profile_paths.len() >= MAX_PROVISIONING_PROFILES {
+                return Err(format!(
+                    "This kit already holds {MAX_PROVISIONING_PROFILES} profiles. Remove obsolete paths before adding another."
+                ));
+            }
+            let saved_path = save_managed_apple_profile(&app, &profile, &content)?;
+            let saved_path = saved_path
+                .to_str()
+                .ok_or_else(|| "The managed profile path is not valid UTF-8.".to_string())?
+                .to_string();
+            if !kit
+                .provisioning_profile_paths
+                .iter()
+                .any(|path| path == &saved_path)
+            {
+                kit.provisioning_profile_paths.push(saved_path);
+            }
+            save_signing_kit_record(kit.clone()).await?;
+        }
+
+        Ok((
+            certificate_created,
+            registered.already_registered,
+            profile_created,
+        ))
+    }
+    .await;
+    drop(guard);
+    let (certificate_created, device_already_registered, profile_created) = outcome?;
+
+    report(
+        DeviceSigningPhase::Provisioning,
+        "Provisioning both identities and every profile into the guest keychain",
+    );
+    let view = provision_with_kit(&app, &machine_id, kit).await?;
+    let ready = view.signing.as_ref().is_some_and(|signing| {
+        buildbridge_docker_osx::select_development_profile(signing, &udid).is_some()
+    });
+    if !ready {
+        return Err(
+            "Provisioning finished, but the installed development profile does not list this iPhone. Verify the team and try again."
+                .to_string(),
+        );
+    }
+    report(
+        DeviceSigningPhase::Completed,
+        "Ready to sign for this iPhone",
+    );
+
+    Ok(PrepareDeviceSigningResult {
+        view,
+        certificate_created,
+        device_already_registered,
+        profile_created,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunAppleDeviceBuildInput {
+    udid: String,
+    #[serde(default)]
+    env_set_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunAppleDeviceResult {
+    view: MacBuilderView,
+    run: AppleDeviceRunResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredAppleDeviceRun {
+    container_id: String,
+    snapshot_sha256: String,
+    device_identifier: String,
+    result: AppleDeviceRunResult,
+    finished_at_epoch_seconds: u64,
+}
+
+/// Builds the Debug configuration for one phone, installs and launches it, and streams its
+/// console until the session ends. A Stop while the app runs is the normal end and the run is
+/// retained; a failure before launch is kept as the step's diagnostic.
+#[tauri::command]
+async fn run_apple_device_build(
+    app: AppHandle,
+    machine_id: String,
+    input: RunAppleDeviceBuildInput,
+) -> Result<RunAppleDeviceResult, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let udid = input.udid.trim().to_ascii_uppercase();
+    apple_api::validate_device_udid(&udid)?;
+    remove_apple_device_run_error(&paths)?;
+    let chosen_env = guest_env_files_for_set(input.env_set_id.as_deref()).await?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let access = load_mac_guest_access(&paths)?
+        .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
+    let workspace = load_apple_workspace(&paths)?
+        .ok_or_else(|| "Approve and synchronize a local Apple project first.".to_string())?;
+    if !workspace.last_build_succeeded || workspace.last_snapshot_sha256.is_none() {
+        return Err("Complete the unsigned project test build first.".to_string());
+    }
+    let current = build_mac_builder_view(&app, &paths).await?;
+    ensure_apple_project_guest_ready(&current)?;
+    let signing = current
+        .signing
+        .clone()
+        .ok_or_else(|| "Provision and verify signing in macOS first.".to_string())?;
+    let device_profile = buildbridge_docker_osx::select_development_profile(&signing, &udid)
+        .cloned()
+        .ok_or_else(|| "Prepare signing for this iPhone first.".to_string())?;
+    let identity = signing
+        .development_identity
+        .clone()
+        .ok_or_else(|| "The kit has no development identity provisioned.".to_string())?;
+    let device = current
+        .guest
+        .devices
+        .iter()
+        .find(|device| {
+            device
+                .udid
+                .as_deref()
+                .is_some_and(|listed| listed.eq_ignore_ascii_case(&udid))
+        })
+        .cloned()
+        .ok_or_else(|| {
+            "The guest does not list that iPhone. Refresh the devices and try again.".to_string()
+        })?;
+    if !device.ready {
+        return Err(device
+            .issue
+            .clone()
+            .unwrap_or_else(|| "The iPhone is not ready for a build.".to_string()));
+    }
+    let secrets = resolve_signing_kit_for(&app, &machine_id).await?;
+    let keychain_password = secrets.guest_keychain_password.ok_or_else(|| {
+        "The signing keychain credential is missing from the OS vault.".to_string()
+    })?;
+    let container_id = current
+        .runtime
+        .container_id
+        .clone()
+        .ok_or_else(|| "The macOS builder container identity is unavailable.".to_string())?;
+    let snapshot_sha256 = workspace
+        .last_snapshot_sha256
+        .clone()
+        .expect("checked above");
+    let identity_path = paths.guest_identity();
+    let known_hosts_path = paths.known_hosts();
+    let scheme = workspace.scheme.clone();
+    let guard = begin_machine_operation(&app, &machine_id, "running_on_device")?;
+
+    let event_app = app.clone();
+    let event_machine_id = machine_id.clone();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        let device_signing = buildbridge_docker_osx::DeviceSigning {
+            keychain_path: &signing.keychain_path,
+            identity_sha1: &identity.identity_sha1,
+            development_team: &signing.development_team,
+            bundle_identifier: &signing.bundle_identifier,
+            profile: &device_profile,
+        };
+        buildbridge_docker_osx::run_apple_device_build(
+            profile.ssh_port,
+            &access.username,
+            &identity_path,
+            &known_hosts_path,
+            &device_signing,
+            &scheme,
+            &device,
+            &keychain_password,
+            chosen_env.as_ref().map(|(_, files)| files),
+            |progress: AppleDeviceRunProgress| {
+                emit_machine_progress(
+                    &event_app,
+                    DEVICE_RUN_PROGRESS_EVENT,
+                    &event_machine_id,
+                    progress,
+                );
+            },
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string());
+    drop(guard);
+    let run = match finish_operation(&cancel_probe, joined) {
+        Ok(run) => run,
+        Err(error) => {
+            if error != CANCELLED_MESSAGE {
+                let _ = save_apple_device_run_error(&paths, &error);
+            }
+            return Err(error);
+        }
+    };
+    save_apple_device_run(
+        &paths,
+        &StoredAppleDeviceRun {
+            container_id,
+            snapshot_sha256,
+            device_identifier: run.device.identifier.clone(),
+            result: run.clone(),
+            finished_at_epoch_seconds: machines::now_epoch_seconds(),
+        },
+    )?;
+    remove_apple_device_run_error(&paths)?;
+    let view = build_mac_builder_view(&app, &paths).await?;
+
+    Ok(RunAppleDeviceResult { view, run })
+}
+
+#[tauri::command]
+async fn clear_apple_device_run(
+    app: AppHandle,
+    machine_id: String,
+) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    remove_file_if_present(&paths.apple_device_run_record())?;
+    remove_apple_device_run_error(&paths)?;
+
     build_mac_builder_view(&app, &paths).await
+}
+
+fn load_apple_device_run(paths: &MachinePaths) -> Result<Option<StoredAppleDeviceRun>, String> {
+    match fs::read(paths.apple_device_run_record()) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| format!("The device run record is invalid: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn save_apple_device_run(paths: &MachinePaths, run: &StoredAppleDeviceRun) -> Result<(), String> {
+    let encoded = serde_json::to_vec_pretty(run).map_err(|error| error.to_string())?;
+
+    write_restricted_file(&paths.apple_device_run_record(), &encoded)
+}
+
+fn save_apple_device_run_error(paths: &MachinePaths, error: &str) -> Result<(), String> {
+    let error = error
+        .chars()
+        .filter(|character| !character.is_control() || *character == '\n')
+        .take(8_000)
+        .collect::<String>();
+    write_restricted_file(&paths.apple_device_run_error(), error.as_bytes())
+}
+
+fn remove_apple_device_run_error(paths: &MachinePaths) -> Result<(), String> {
+    remove_file_if_present(&paths.apple_device_run_error())
 }
 
 #[tauri::command]
@@ -3441,6 +4093,7 @@ async fn build_machine_list_view(app: &AppHandle) -> Result<MachineListView, Str
                     .is_some_and(|layout| {
                         layout.disk_on_host && layout.usb_access && layout.control_socket
                     }),
+                device_run_retained: paths.apple_device_run_record().is_file(),
             });
         }
 
@@ -3562,6 +4215,10 @@ async fn build_mac_builder_view(
         .map(|stored| (Some(stored.result), stored.env_set_name))
         .unwrap_or((None, None));
     let archive_error = read_optional_text(&paths.apple_archive_error())?;
+    let device_run = load_apple_device_run(paths)?
+        .filter(|stored| runtime.container_id.as_deref() == Some(&stored.container_id))
+        .map(|stored| stored.result);
+    let device_run_error = read_optional_text(&paths.apple_device_run_error())?;
 
     Ok(MacBuilderView {
         machine_id: paths.id.clone(),
@@ -3580,6 +4237,8 @@ async fn build_mac_builder_view(
         archive_error,
         logs,
         usb,
+        device_run,
+        device_run_error,
     })
 }
 
@@ -3707,6 +4366,9 @@ fn normalize_signing_kit(input: SigningKitInput) -> Result<StoredSigningKit, Str
             .filter_map(optional_trim)
             .collect(),
         guest_keychain_password: optional_trim(input.guest_keychain_password),
+        development_certificate_path: optional_trim(input.development_certificate_path),
+        development_certificate_password: optional_trim(input.development_certificate_password),
+        development_certificate_serial_number: None,
     };
     let app_store_connect_values = [
         secrets.app_store_connect_key_id.is_some(),
@@ -3740,6 +4402,9 @@ fn normalize_signing_kit(input: SigningKitInput) -> Result<StoredSigningKit, Str
     if let Some(path) = &secrets.signing_certificate_path {
         validate_secret_file(path, &["p12", "pfx"], "signing certificate")?;
     }
+    if let Some(path) = &secrets.development_certificate_path {
+        validate_secret_file(path, &["p12", "pfx"], "development certificate")?;
+    }
 
     for path in &secrets.provisioning_profile_paths {
         validate_secret_file(path, &["mobileprovision"], "provisioning profile")?;
@@ -3750,6 +4415,7 @@ fn normalize_signing_kit(input: SigningKitInput) -> Result<StoredSigningKit, Str
         secrets.app_store_connect_issuer_id.as_deref(),
         secrets.signing_certificate_password.as_deref(),
         secrets.guest_keychain_password.as_deref(),
+        secrets.development_certificate_password.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -3785,6 +4451,18 @@ fn merge_signing_kit(
     incoming.guest_keychain_password = incoming
         .guest_keychain_password
         .or(existing.guest_keychain_password);
+    // A newly supplied development file invalidates the serial recorded for the old one.
+    let new_development_file = incoming.development_certificate_path.is_some();
+    incoming.development_certificate_path = incoming
+        .development_certificate_path
+        .or(existing.development_certificate_path);
+    incoming.development_certificate_password = incoming
+        .development_certificate_password
+        .or(existing.development_certificate_password);
+    if !new_development_file {
+        incoming.development_certificate_serial_number =
+            existing.development_certificate_serial_number;
+    }
 
     incoming
 }
@@ -3891,6 +4569,16 @@ fn summarize_signing_kit(secrets: &StoredSigningKit) -> SigningKitSummary {
             })
             .collect(),
         guest_keychain_configured: secrets.guest_keychain_password.is_some(),
+        development_certificate_configured: secrets.development_certificate_path.is_some(),
+        development_certificate_name: secrets.development_certificate_path.as_ref().and_then(
+            |path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned)
+            },
+        ),
+        development_certificate_password_stored: secrets.development_certificate_password.is_some(),
     }
 }
 
@@ -5033,7 +5721,13 @@ fn render_shell_env(variables: &[StoredEnvVariable]) -> String {
 /// that was just deleted, so the file could not be used again anyway.
 fn remove_managed_certificate_for(app: &AppHandle, kit: &StoredSigningKit) -> Result<(), String> {
     let managed = managed_apple_certificates_dir(app)?;
-    if let Some(path) = &kit.signing_certificate_path {
+    for path in [
+        kit.signing_certificate_path.as_ref(),
+        kit.development_certificate_path.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
         let candidate = std::path::Path::new(path);
         if candidate.starts_with(&managed)
             && let Some(directory) = candidate.parent()
@@ -5096,6 +5790,10 @@ pub fn run() {
             attach_usb_device,
             detach_usb_device,
             list_guest_devices,
+            prepare_apple_device_signing,
+            run_apple_device_build,
+            clear_apple_device_run,
+            create_apple_development_certificate,
             list_signing_kits,
             save_signing_kit,
             delete_signing_kit,
@@ -5158,6 +5856,8 @@ mod tests {
             signing_certificate_password: String::new(),
             provisioning_profile_paths: Vec::new(),
             guest_keychain_password: String::new(),
+            development_certificate_path: String::new(),
+            development_certificate_password: String::new(),
         }
     }
 
@@ -5285,6 +5985,9 @@ mod tests {
             signing_certificate_password: Some("certificate-password".to_string()),
             provisioning_profile_paths: vec!["/secure/app.mobileprovision".to_string()],
             guest_keychain_password: Some("keychain-password".to_string()),
+            development_certificate_path: None,
+            development_certificate_password: None,
+            development_certificate_serial_number: None,
         };
 
         let summary = summarize_signing_kit(&secrets);
@@ -5319,6 +6022,9 @@ mod tests {
             signing_certificate_password: None,
             provisioning_profile_paths: Vec::new(),
             guest_keychain_password: None,
+            development_certificate_path: None,
+            development_certificate_password: None,
+            development_certificate_serial_number: None,
         };
         let incoming = StoredSigningKit {
             id: String::new(),
@@ -5327,6 +6033,9 @@ mod tests {
             signing_certificate_password: Some("certificate-password".to_string()),
             provisioning_profile_paths: vec!["/secure/app.mobileprovision".to_string()],
             guest_keychain_password: Some("keychain-password".to_string()),
+            development_certificate_path: None,
+            development_certificate_password: None,
+            development_certificate_serial_number: None,
             ..StoredSigningKit::default()
         };
 
@@ -5410,6 +6119,9 @@ mod tests {
                 Vec::new()
             },
             guest_keychain_password: complete.then(|| "keychain".to_string()),
+            development_certificate_path: None,
+            development_certificate_password: None,
+            development_certificate_serial_number: None,
             ..StoredSigningKit::default()
         }
     }
@@ -5633,7 +6345,7 @@ mod tests {
         assert_eq!(key[0], "genpkey");
         assert!(key.contains(&"rsa_keygen_bits:2048".to_string()));
 
-        let csr = certificate_csr_args("/keys/key.pem");
+        let csr = certificate_csr_args("/keys/key.pem", "BuildBridge Distribution");
         assert!(csr.contains(&"-batch".to_string()), "must never prompt");
         assert!(csr.contains(&"/CN=BuildBridge Distribution".to_string()));
 
