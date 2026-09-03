@@ -1,3 +1,4 @@
+import tailwindcss from '@tailwindcss/vite';
 import vue from '@vitejs/plugin-vue';
 import { defineConfig } from 'vite-plus';
 
@@ -5,7 +6,7 @@ import { defineConfig } from 'vite-plus';
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig(async () => ({
-    plugins: [vue()],
+    plugins: [vue(), tailwindcss()],
 
     // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
     //
@@ -26,5 +27,9 @@ export default defineConfig(async () => ({
         watch: {
             ignored: ['**/src-tauri/**'],
         },
+    },
+    test: {
+        environment: 'node',
+        include: ['src/**/*.test.ts'],
     },
 }));

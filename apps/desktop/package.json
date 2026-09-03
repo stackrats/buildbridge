@@ -8,18 +8,22 @@
         "build": "vue-tsc --noEmit && vp build",
         "typecheck": "vue-tsc --noEmit",
         "check": "vp check",
+        "test": "vp test --run",
         "preview": "vp preview",
         "tauri": "tauri"
     },
     "dependencies": {
         "@lucide/vue": "^1.17.0",
         "@tauri-apps/api": "^2",
+        "@tauri-apps/plugin-dialog": "^2.7.3",
         "pusher-js": "^8.6.0",
         "vue": "^3.5.13"
     },
     "devDependencies": {
+        "@tailwindcss/vite": "^4.3.3",
         "@tauri-apps/cli": "^2",
         "@vitejs/plugin-vue": "^6.0.8",
+        "tailwindcss": "^4.3.3",
         "typescript": "~6.0.3",
         "vite": "catalog:",
         "vite-plus": "catalog:",
