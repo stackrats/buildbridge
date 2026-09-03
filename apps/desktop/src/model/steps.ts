@@ -14,6 +14,7 @@ import type {
 import { formatBytes, formatElapsed, relativeTime, secondsSince } from '../lib/format';
 import { isLive } from '../lib/status';
 import { deviceNextSummary, deviceReadiness, deviceWorkingSummary } from './device';
+import { kitIsProvisionable, kitShortfall } from './signing';
 
 export type StepStatus = 'done' | 'active' | 'running' | 'pending' | 'failed';
 
@@ -336,12 +337,10 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
     const approved = workspace !== null;
     const synced = approved && workspace.lastSnapshotSha256 !== null;
     const built = synced && workspace.lastBuildSucceeded;
-    const kitReady =
-        signingKit !== null &&
-        signingKit.signingCertificateConfigured &&
-        signingKit.provisioningProfileNames.length > 0 &&
-        signingKit.guestKeychainConfigured;
+    const kitReady = signingKit !== null && kitIsProvisionable(signingKit);
     const provisioned = signing !== null;
+    // The archive signs with the distribution identity; a development-only kit never unlocks it.
+    const canArchive = signing?.distributionIdentity != null;
     const isRunning = (id: BuildStepId) => context.runningStep === id;
 
     const steps: BuildStep[] = [];
@@ -416,18 +415,14 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
                 : view.signingHealth === 'kit_missing'
                   ? 'This machine has provisioned signing, but no kit remains in the vault. Store the kit again, then provision to rebuild the guest keychain.'
                   : kitReady
-                    ? `${signingKit.name} · ${signingKit.signingCertificateName ?? 'certificate'} · ${profileCount} profile${profileCount === 1 ? '' : 's'}`
+                    ? signingKit.signingCertificateConfigured
+                        ? `${signingKit.name} · ${signingKit.signingCertificateName ?? 'certificate'} · ${profileCount} profile${profileCount === 1 ? '' : 's'}`
+                        : `${signingKit.name} · development identity only · phone builds, no archive`
                     : signingKit === null
                       ? built
                           ? 'Attach one of this host’s signing kits, or store a new one'
                           : unlockedBy['signing-kit']
-                      : `${signingKit.name} is incomplete: ${[
-                            signingKit.signingCertificateConfigured ? null : 'certificate',
-                            profileCount > 0 ? null : 'provisioning profile',
-                            signingKit.guestKeychainConfigured ? null : 'keychain password',
-                        ]
-                            .filter(Boolean)
-                            .join(', ')} missing`,
+                      : `${signingKit.name} is incomplete: ${kitShortfall(signingKit).join(', ')} missing`,
     });
 
     steps.push({
@@ -445,7 +440,9 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
         summary: isRunning('provision')
             ? 'Importing the identity into a dedicated guest keychain'
             : provisioned
-              ? `${signing.identityName} · valid until ${signing.certificateExpiresAt.slice(0, 10)}`
+              ? signing.distributionIdentity
+                  ? `${signing.distributionIdentity.identityName} · valid until ${signing.distributionIdentity.certificateExpiresAt.slice(0, 10)}`
+                  : `${signing.developmentIdentity?.identityName ?? 'Development identity'} · development only · valid until ${signing.developmentIdentity?.certificateExpiresAt.slice(0, 10) ?? 'unknown'}`
               : built && kitReady
                 ? 'Create a dedicated keychain and verify the identity with a real code-sign probe'
                 : kitReady
@@ -464,7 +461,7 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
               ? 'done'
               : view.archiveError
                 ? 'failed'
-                : provisioned && built && !credentialsLost
+                : canArchive && built && !credentialsLost
                   ? 'active'
                   : 'pending',
         summary: isRunning('archive')
@@ -475,11 +472,13 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
                 ? 'The last signed build failed; the diagnostic is kept below'
                 : credentialsLost
                   ? 'Blocked: the signing kit is missing, and its keychain password is needed to sign'
-                  : provisioned && built
-                    ? workspace?.lastNativeLockUpdated
-                        ? 'Blocked: commit the refreshed Podfile.lock on the host and synchronize again'
-                        : 'Release configuration · App Store Connect export · app target only'
-                    : unlockedBy.archive,
+                  : provisioned && !canArchive
+                    ? 'Locked: the kit holds only a development identity; add a distribution identity and an App Store profile, then provision again'
+                    : provisioned && built
+                      ? workspace?.lastNativeLockUpdated
+                          ? 'Blocked: commit the refreshed Podfile.lock on the host and synchronize again'
+                          : 'Release configuration · App Store Connect export · app target only'
+                      : unlockedBy.archive,
     });
 
     // Off the golden path: a Debug build on a phone plugged into this host. It opens on the

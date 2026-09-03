@@ -42,15 +42,7 @@ const state = reactive({
 });
 
 /** A kit can provision only when it holds an identity, a profile, and a keychain password. */
-export function kitIsProvisionable(kit: SigningKitSummary | null | undefined): boolean {
-    return (
-        kit !== null &&
-        kit !== undefined &&
-        kit.signingCertificateConfigured &&
-        kit.provisioningProfileNames.length > 0 &&
-        kit.guestKeychainConfigured
-    );
-}
+export { kitIsProvisionable } from '../model/signing';
 
 export function useSigningStore() {
     return {

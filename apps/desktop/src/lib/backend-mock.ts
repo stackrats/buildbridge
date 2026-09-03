@@ -204,10 +204,13 @@ function readyMachine(): MockMachine {
         },
         signing: {
             keychainPath: '/Users/builder/Library/Keychains/buildbridge-signing.keychain-db',
-            identityName: 'iPhone Distribution: Example Developer (TEAM123456)',
-            identitySha1: '1111222233334444555566667777888899990000',
-            certificateSha256: 'aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888',
-            certificateExpiresAt: '2027-09-02T10:14:00Z',
+            distributionIdentity: {
+                identityName: 'iPhone Distribution: Example Developer (TEAM123456)',
+                identitySha1: '1111222233334444555566667777888899990000',
+                certificateSha256:
+                    'aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888',
+                certificateExpiresAt: '2027-09-02T10:14:00Z',
+            },
             developmentTeam: 'TEAM123456',
             bundleIdentifier: 'com.example.app',
             profiles: [
@@ -613,7 +616,10 @@ export function createMockBackend(): Backend {
             signingKitName:
                 storedKits().find((kit) => kit.id === attachments[machine.id])?.name ?? null,
             signingProvisioned: machine.signing !== null,
-            signingIdentity: machine.signing?.identityName ?? null,
+            signingIdentity:
+                machine.signing?.distributionIdentity?.identityName ??
+                machine.signing?.developmentIdentity?.identityName ??
+                null,
             archiveRetained: machine.archive !== null,
             usbReady: machine.usbContainer && machine.state !== 'missing',
             deviceRunRetained: machine.deviceRun !== null,

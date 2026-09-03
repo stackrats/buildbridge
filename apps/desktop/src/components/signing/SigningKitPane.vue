@@ -13,7 +13,8 @@ import { computed, ref, watch } from 'vue';
 
 import { formatDate } from '../../lib/format';
 import { useMachinesStore } from '../../stores/machines';
-import { kitIsProvisionable, useSigningStore } from '../../stores/signing';
+import { kitReadiness } from '../../model/signing';
+import { useSigningStore } from '../../stores/signing';
 import type { SigningKitSummary } from '../../types/backend';
 import Badge from '../ui/Badge.vue';
 import Button from '../ui/Button.vue';
@@ -190,8 +191,15 @@ const orphaned = computed(() =>
             <template #title>
                 <span class="flex flex-wrap items-center gap-2">
                     {{ kit.name }}
-                    <Badge v-if="kitIsProvisionable(kit)" tone="ok">ready to provision</Badge>
+                    <Badge v-if="kitReadiness(kit).provisionable" tone="ok"
+                        >ready to provision</Badge
+                    >
                     <Badge v-else tone="warn">incomplete</Badge>
+                    <Badge
+                        v-if="kitReadiness(kit).provisionable && !kitReadiness(kit).distribution"
+                        tone="warn"
+                        >phone only</Badge
+                    >
                 </span>
             </template>
             <template #actions>
@@ -248,7 +256,11 @@ const orphaned = computed(() =>
                 v-if="!kit.signingCertificateConfigured"
                 class="mt-2 text-[11px] leading-4 text-amber-700 dark:text-amber-400"
             >
-                No identity yet.
+                {{
+                    kit.developmentCertificateConfigured
+                        ? 'No distribution identity: this kit can run Debug builds on a phone, but cannot sign an App Store archive.'
+                        : 'No identity yet.'
+                }}
                 {{
                     kit.appStoreConnectConfigured
                         ? 'Create one at Apple from here — the key is generated on this host — or export a .p12 from a Mac.'

@@ -51,10 +51,12 @@ function guestDevice(overrides: Partial<GuestDevice> = {}): GuestDevice {
 function signing(devices: string[] = [UDID]): SigningProvisioningResult {
     return {
         keychainPath: '/k',
-        identityName: 'iPhone Distribution: Example (TEAM123456)',
-        identitySha1: 'sha1',
-        certificateSha256: 'sha256',
-        certificateExpiresAt: '2027-09-02T00:00:00Z',
+        distributionIdentity: {
+            identityName: 'iPhone Distribution: Example (TEAM123456)',
+            identitySha1: 'sha1',
+            certificateSha256: 'sha256',
+            certificateExpiresAt: '2027-09-02T00:00:00Z',
+        },
         developmentTeam: 'TEAM123456',
         bundleIdentifier: 'com.example.app',
         developmentIdentity: {

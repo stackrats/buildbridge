@@ -399,26 +399,80 @@ pub struct ProvisionedIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "SigningProvisioningWire")]
 pub struct SigningProvisioningResult {
     pub keychain_path: String,
-    pub identity_name: String,
-    pub identity_sha1: String,
-    pub certificate_sha256: String,
-    pub certificate_expires_at: String,
+    /// The distribution identity, when the kit holds one. An App Store archive needs it; a kit
+    /// with only a development identity provisions, runs on a phone, and cannot archive.
+    pub distribution_identity: Option<ProvisionedIdentity>,
     pub development_team: String,
     pub bundle_identifier: String,
     pub profiles: Vec<ProvisioningProfileSummary>,
     /// The development identity in the same keychain, when the kit holds one.
-    #[serde(default)]
     pub development_identity: Option<ProvisionedIdentity>,
 }
 
-/// The files and passphrases a provisioning run imports: the distribution identity every kit
-/// has, the development identity a kit may hold for device builds, and the profiles.
+/// The stored shape, old and new. Records written before the distribution identity became
+/// optional carried its four fields at the top level; they still read.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SigningProvisioningWire {
+    keychain_path: String,
+    #[serde(default)]
+    distribution_identity: Option<ProvisionedIdentity>,
+    #[serde(default)]
+    identity_name: Option<String>,
+    #[serde(default)]
+    identity_sha1: Option<String>,
+    #[serde(default)]
+    certificate_sha256: Option<String>,
+    #[serde(default)]
+    certificate_expires_at: Option<String>,
+    development_team: String,
+    bundle_identifier: String,
+    #[serde(default)]
+    profiles: Vec<ProvisioningProfileSummary>,
+    #[serde(default)]
+    development_identity: Option<ProvisionedIdentity>,
+}
+
+impl From<SigningProvisioningWire> for SigningProvisioningResult {
+    fn from(wire: SigningProvisioningWire) -> Self {
+        let legacy = match (
+            wire.identity_name,
+            wire.identity_sha1,
+            wire.certificate_sha256,
+            wire.certificate_expires_at,
+        ) {
+            (
+                Some(identity_name),
+                Some(identity_sha1),
+                Some(certificate_sha256),
+                Some(certificate_expires_at),
+            ) => Some(ProvisionedIdentity {
+                identity_name,
+                identity_sha1,
+                certificate_sha256,
+                certificate_expires_at,
+            }),
+            _ => None,
+        };
+        Self {
+            keychain_path: wire.keychain_path,
+            distribution_identity: wire.distribution_identity.or(legacy),
+            development_team: wire.development_team,
+            bundle_identifier: wire.bundle_identifier,
+            profiles: wire.profiles,
+            development_identity: wire.development_identity,
+        }
+    }
+}
+
+/// The files and passphrases a provisioning run imports: the distribution identity, the
+/// development identity, and the profiles. A kit holds at least one identity; which ones it
+/// holds decides what the machine can do afterwards.
 pub struct SigningMaterial<'a> {
-    pub certificate_path: &'a Path,
-    pub certificate_password: &'a str,
+    pub distribution_certificate: Option<(&'a Path, &'a str)>,
     pub development_certificate: Option<(&'a Path, &'a str)>,
     pub profile_paths: &'a [PathBuf],
     pub keychain_password: &'a str,
@@ -2045,6 +2099,136 @@ fn verify_xcode_activation(
     Ok(())
 }
 
+/// What one identity import needs beyond the identity itself: the guest helper, the keychain,
+/// the pinned Apple intermediate, and the bridge to reach them.
+struct IdentityImportContext<'a> {
+    ssh_port: u16,
+    username: &'a str,
+    identity_path: &'a Path,
+    known_hosts_path: &'a Path,
+    helper_binary: &'a str,
+    keychain_path: &'a str,
+    staging: &'a str,
+    xcodebuild: &'a str,
+    keychain_password: &'a str,
+    development_team: &'a str,
+    wwdr_g3_pem: &'a str,
+    wwdr_g3_der: &'a str,
+    total_bytes: u64,
+    started_at: Instant,
+}
+
+/// Streams one `.p12` into the staging directory, imports it through the helper (creating the
+/// keychain for the first identity, adding to it for the second), installs the pinned Apple
+/// intermediate alongside the first, checks the team, and proves the private key can sign.
+#[allow(clippy::too_many_arguments)]
+fn import_signing_identity<F>(
+    context: &IdentityImportContext<'_>,
+    host_path: &Path,
+    password: &str,
+    stem: &str,
+    label: &str,
+    mode: HelperImportMode,
+    completed_bytes: &mut u64,
+    on_progress: &mut F,
+) -> Result<ProvisionedIdentity, ProviderError>
+where
+    F: FnMut(SigningProvisioningProgress),
+{
+    let guest_p12 = format!("{}/{stem}.p12", context.staging);
+    let guest_der = format!("{}/{stem}.der", context.staging);
+    stream_signing_file(
+        host_path,
+        &guest_p12,
+        context.total_bytes,
+        completed_bytes,
+        context.started_at,
+        context.ssh_port,
+        context.username,
+        context.identity_path,
+        context.known_hosts_path,
+        on_progress,
+    )?;
+    on_progress(signing_progress(
+        SigningProvisioningPhase::ImportingCertificate,
+        context.total_bytes,
+        context.total_bytes,
+        context.started_at,
+        match mode {
+            HelperImportMode::Create => {
+                "Creating the dedicated keychain and importing its non-extractable identity."
+            }
+            HelperImportMode::Add => "Importing the second identity into the same keychain.",
+        },
+    ));
+    run_signing_helper(
+        context.ssh_port,
+        context.username,
+        context.identity_path,
+        context.known_hosts_path,
+        context.helper_binary,
+        context.keychain_path,
+        &guest_p12,
+        &guest_der,
+        context.xcodebuild,
+        context.keychain_password,
+        password,
+        mode,
+    )?;
+
+    on_progress(signing_progress(
+        SigningProvisioningPhase::Verifying,
+        context.total_bytes,
+        context.total_bytes,
+        context.started_at,
+        "Verifying the imported certificate and proving that its private key can sign code.",
+    ));
+    let output = run_guest_command(
+        context.ssh_port,
+        context.username,
+        context.identity_path,
+        context.known_hosts_path,
+        &certificate_metadata_command(&guest_der),
+    )?;
+    let (certificate_expires_at, identity_sha1, certificate_sha256, team, identity_name) =
+        parse_certificate_metadata(&output)?;
+    if team != context.development_team {
+        return Err(ProviderError::GuestBridge(format!(
+            "the {label} belongs to team {team}, but the project uses team {}",
+            context.development_team
+        )));
+    }
+    if mode == HelperImportMode::Create {
+        install_apple_wwdr_g3_intermediate(
+            context.wwdr_g3_pem,
+            context.wwdr_g3_der,
+            context.keychain_path,
+            context.ssh_port,
+            context.username,
+            context.identity_path,
+            context.known_hosts_path,
+        )?;
+    }
+    verify_code_signing_identity(
+        &identity_sha1,
+        context.helper_binary,
+        context.keychain_path,
+        context.staging,
+        context.keychain_password,
+        context.ssh_port,
+        context.username,
+        context.identity_path,
+        context.known_hosts_path,
+    )?;
+
+    Ok(ProvisionedIdentity {
+        identity_name,
+        identity_sha1,
+        certificate_sha256,
+        certificate_expires_at,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn provision_signing<F>(
     material: &SigningMaterial<'_>,
@@ -2061,38 +2245,46 @@ where
 {
     validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
     validate_signing_target(development_team, bundle_identifier)?;
-    let certificate_password = material.certificate_password;
     let keychain_password = material.keychain_password;
-    let (certificate_path, profile_paths, total_bytes) = validate_signing_material(
-        material.certificate_path,
-        certificate_password,
-        material.profile_paths,
-        keychain_password,
-    )?;
-    let development = material
-        .development_certificate
-        .map(|(path, password)| -> Result<(PathBuf, &str), ProviderError> {
-            if password.is_empty() || password.len() > 512 {
-                return Err(ProviderError::GuestBridge(
-                    "store the development certificate passphrase in the operating-system vault first"
-                        .to_string(),
-                ));
-            }
-            let path = validate_signing_file(
-                path,
-                &["p12", "pfx"],
-                SIGNING_CERTIFICATE_MAX_BYTES,
-                "development certificate",
-            )?;
-            Ok((path, password))
+    let distribution = material
+        .distribution_certificate
+        .map(|(path, password)| {
+            validate_identity_material(path, password, "signing certificate")
+                .map(|(file, bytes)| (file, password, bytes))
         })
         .transpose()?;
-    let total_bytes = total_bytes
+    let development = material
+        .development_certificate
+        .map(|(path, password)| {
+            validate_identity_material(path, password, "development certificate")
+                .map(|(file, bytes)| (file, password, bytes))
+        })
+        .transpose()?;
+    if distribution.is_none() && development.is_none() {
+        return Err(ProviderError::GuestBridge(
+            "the signing kit holds no identity: store a distribution identity or a development identity first"
+                .to_string(),
+        ));
+    }
+    let (profile_paths, profile_bytes) = validate_signing_material(
+        material.profile_paths,
+        keychain_password,
+        distribution.is_some(),
+    )?;
+    let total_bytes = profile_bytes
+        + distribution
+            .as_ref()
+            .map(|(_, _, bytes)| *bytes)
+            .unwrap_or(0)
         + development
             .as_ref()
-            .and_then(|(path, _)| fs::metadata(path).ok())
-            .map(|metadata| metadata.len())
+            .map(|(_, _, bytes)| *bytes)
             .unwrap_or(0);
+    if total_bytes > SIGNING_MATERIAL_MAX_BYTES {
+        return Err(ProviderError::GuestBridge(
+            "the signing kit is larger than the material a provisioning run accepts".to_string(),
+        ));
+    }
     let started_at = Instant::now();
     let guest_home = format!("/Users/{username}");
     let guest_tools = format!("{guest_home}/.buildbridge/tools");
@@ -2106,8 +2298,6 @@ where
         .as_millis();
     let staging =
         format!("{guest_home}/Library/Caches/dev.buildbridge.desktop/signing-{operation_id}");
-    let guest_certificate = format!("{staging}/identity.p12");
-    let guest_certificate_der = format!("{staging}/identity.der");
     let guest_wwdr_g3_pem = format!("{staging}/AppleWWDRCAG3.pem");
     let guest_wwdr_g3_der = format!("{staging}/AppleWWDRCAG3.cer");
     let keychain_path = format!("{guest_home}/Library/Keychains/{SIGNING_KEYCHAIN_NAME}");
@@ -2172,18 +2362,6 @@ where
         )?;
 
         let mut completed_bytes = 0_u64;
-        stream_signing_file(
-            &certificate_path,
-            &guest_certificate,
-            total_bytes,
-            &mut completed_bytes,
-            started_at,
-            ssh_port,
-            username,
-            identity_path,
-            known_hosts_path,
-            &mut on_progress,
-        )?;
         let guest_profiles = profile_paths
             .iter()
             .enumerate()
@@ -2205,145 +2383,53 @@ where
             })
             .collect::<Result<Vec<_>, ProviderError>>()?;
 
-        on_progress(signing_progress(
-            SigningProvisioningPhase::ImportingCertificate,
-            total_bytes,
+        // The first identity creates the keychain and the second joins it, so one unlock serves
+        // both the archive and a device build. Each gets the team check and the signing probe.
+        let context = IdentityImportContext {
+            ssh_port,
+            username,
+            identity_path,
+            known_hosts_path,
+            helper_binary: &helper_binary,
+            keychain_path: &keychain_path,
+            staging: &staging,
+            xcodebuild: &xcodebuild,
+            keychain_password,
+            development_team,
+            wwdr_g3_pem: &guest_wwdr_g3_pem,
+            wwdr_g3_der: &guest_wwdr_g3_der,
             total_bytes,
             started_at,
-            "Creating the dedicated keychain and importing its non-extractable identity.",
-        ));
-        run_signing_helper(
-            ssh_port,
-            username,
-            identity_path,
-            known_hosts_path,
-            &helper_binary,
-            &keychain_path,
-            &guest_certificate,
-            &guest_certificate_der,
-            &xcodebuild,
-            keychain_password,
-            certificate_password,
-            HelperImportMode::Create,
-        )?;
-
-        on_progress(signing_progress(
-            SigningProvisioningPhase::Verifying,
-            total_bytes,
-            total_bytes,
-            started_at,
-            "Verifying the imported certificate and proving that its private key can sign code.",
-        ));
-        let certificate_output = run_guest_command(
-            ssh_port,
-            username,
-            identity_path,
-            known_hosts_path,
-            &certificate_metadata_command(&guest_certificate_der),
-        )?;
-        let (
-            certificate_expires_at,
-            identity_sha1,
-            certificate_sha256,
-            certificate_team,
-            identity_name,
-        ) = parse_certificate_metadata(&certificate_output)?;
-        if certificate_team != development_team {
-            return Err(ProviderError::GuestBridge(format!(
-                "the signing certificate belongs to team {certificate_team}, but the project uses team {development_team}"
-            )));
-        }
-        install_apple_wwdr_g3_intermediate(
-            &guest_wwdr_g3_pem,
-            &guest_wwdr_g3_der,
-            &keychain_path,
-            ssh_port,
-            username,
-            identity_path,
-            known_hosts_path,
-        )?;
-        verify_code_signing_identity(
-            &identity_sha1,
-            &helper_binary,
-            &keychain_path,
-            &staging,
-            keychain_password,
-            ssh_port,
-            username,
-            identity_path,
-            known_hosts_path,
-        )?;
-
-        // The development identity goes into the same keychain, so one unlock serves both
-        // the archive and a device build; it gets the same team check and signing probe.
-        let development_identity = match &development {
-            Some((development_path, development_password)) => {
-                let guest_development = format!("{staging}/development.p12");
-                let guest_development_der = format!("{staging}/development.der");
-                stream_signing_file(
-                    development_path,
-                    &guest_development,
-                    total_bytes,
+        };
+        let mut mode = HelperImportMode::Create;
+        let distribution_identity = match &distribution {
+            Some((path, password, _)) => {
+                let identity = import_signing_identity(
+                    &context,
+                    path,
+                    password,
+                    "identity",
+                    "signing certificate",
+                    mode,
                     &mut completed_bytes,
-                    started_at,
-                    ssh_port,
-                    username,
-                    identity_path,
-                    known_hosts_path,
                     &mut on_progress,
                 )?;
-                on_progress(signing_progress(
-                    SigningProvisioningPhase::ImportingCertificate,
-                    total_bytes,
-                    total_bytes,
-                    started_at,
-                    "Importing the development identity into the same keychain.",
-                ));
-                run_signing_helper(
-                    ssh_port,
-                    username,
-                    identity_path,
-                    known_hosts_path,
-                    &helper_binary,
-                    &keychain_path,
-                    &guest_development,
-                    &guest_development_der,
-                    &xcodebuild,
-                    keychain_password,
-                    development_password,
-                    HelperImportMode::Add,
-                )?;
-                let output = run_guest_command(
-                    ssh_port,
-                    username,
-                    identity_path,
-                    known_hosts_path,
-                    &certificate_metadata_command(&guest_development_der),
-                )?;
-                let (expires_at, sha1, sha256, team, name) = parse_certificate_metadata(&output)?;
-                if team != development_team {
-                    return Err(ProviderError::GuestBridge(format!(
-                        "the development certificate belongs to team {team}, but the project uses team {development_team}"
-                    )));
-                }
-                verify_code_signing_identity(
-                    &sha1,
-                    &helper_binary,
-                    &keychain_path,
-                    &staging,
-                    keychain_password,
-                    ssh_port,
-                    username,
-                    identity_path,
-                    known_hosts_path,
-                )?;
-                Some(ProvisionedIdentity {
-                    identity_name: name,
-                    identity_sha1: sha1,
-                    certificate_sha256: sha256,
-                    certificate_expires_at: expires_at,
-                })
+                mode = HelperImportMode::Add;
+                Some(identity)
             }
+            None => None,
+        };
+        let development_identity = match &development {
+            Some((path, password, _)) => Some(import_signing_identity(
+                &context,
+                path,
+                password,
+                "development",
+                "development certificate",
+                mode,
+                &mut completed_bytes,
+                &mut on_progress,
+            )?),
             None => None,
         };
 
@@ -2391,11 +2477,16 @@ where
                         "development",
                     )
                 } else {
-                    (Some(certificate_sha256.as_str()), "distribution")
+                    (
+                        distribution_identity
+                            .as_ref()
+                            .map(|identity| identity.certificate_sha256.as_str()),
+                        "distribution",
+                    )
                 };
             let Some(required_fingerprint) = required_fingerprint else {
                 return Err(ProviderError::GuestBridge(format!(
-                    "provisioning profile {} is a development profile, but the kit has no development identity",
+                    "provisioning profile {} is a {identity_label} profile, but the kit has no {identity_label} identity",
                     profile.uuid
                 )));
             };
@@ -2439,10 +2530,7 @@ where
 
         Ok(SigningProvisioningResult {
             keychain_path: keychain_path.clone(),
-            identity_name,
-            identity_sha1,
-            certificate_sha256,
-            certificate_expires_at,
+            distribution_identity,
             development_team: development_team.to_string(),
             bundle_identifier: bundle_identifier.to_string(),
             profiles,
@@ -2473,7 +2561,7 @@ where
         total_bytes,
         total_bytes,
         started_at,
-        "Signing identity and provisioning profiles are ready in macOS.",
+        "Signing identities and provisioning profiles are ready in macOS.",
     ));
 
     Ok(result)
@@ -3087,8 +3175,14 @@ where
             "the signing keychain credential is missing or invalid".to_string(),
         ));
     }
-    if signing.identity_sha1.len() != 40
-        || !signing
+    let identity = signing.distribution_identity.as_ref().ok_or_else(|| {
+        ProviderError::GuestBridge(
+            "no distribution identity is provisioned: the kit holds only a development identity, which signs a Debug build for a phone but not an App Store archive"
+                .to_string(),
+        )
+    })?;
+    if identity.identity_sha1.len() != 40
+        || !identity
             .identity_sha1
             .chars()
             .all(|character| character.is_ascii_hexdigit())
@@ -3152,7 +3246,7 @@ where
         &signing.development_team,
         &signing.bundle_identifier,
         &profile.uuid,
-        &signing.identity_sha1,
+        &identity.identity_sha1,
     );
 
     on_progress(archive_progress(
@@ -3209,7 +3303,7 @@ where
         let signing_settings = apple_archive_signing_xcconfig(
             &archive_target,
             &signing.development_team,
-            &signing.identity_sha1,
+            &identity.identity_sha1,
             &profile.uuid,
         );
         stream_bytes_to_guest(
@@ -4583,42 +4677,50 @@ fn validate_signing_target(
     Ok(())
 }
 
+/// One `.p12` and its passphrase, checked before anything is streamed to the guest.
+fn validate_identity_material(
+    path: &Path,
+    password: &str,
+    label: &str,
+) -> Result<(PathBuf, u64), ProviderError> {
+    if password.is_empty() || password.len() > 512 {
+        return Err(ProviderError::GuestBridge(format!(
+            "store the {label} passphrase in the operating-system vault first"
+        )));
+    }
+    let file = validate_signing_file(path, &["p12", "pfx"], SIGNING_CERTIFICATE_MAX_BYTES, label)?;
+    let bytes = fs::metadata(&file)
+        .map_err(|error| {
+            ProviderError::GuestBridge(format!("could not inspect the {label}: {error}"))
+        })?
+        .len();
+    Ok((file, bytes))
+}
+
+/// The profiles and the keychain password. A kit with a distribution identity must carry at
+/// least one profile, because that is what the archive signs with; a development-only kit may
+/// carry none yet, since the device step adds its profile later.
 fn validate_signing_material(
-    certificate_path: &Path,
-    certificate_password: &str,
     profile_paths: &[PathBuf],
     keychain_password: &str,
-) -> Result<(PathBuf, Vec<PathBuf>, u64), ProviderError> {
-    if certificate_password.is_empty() || certificate_password.len() > 512 {
-        return Err(ProviderError::GuestBridge(
-            "store the certificate passphrase in the operating-system vault first".to_string(),
-        ));
-    }
+    profiles_required: bool,
+) -> Result<(Vec<PathBuf>, u64), ProviderError> {
     if keychain_password.is_empty() || keychain_password.len() > 512 {
         return Err(ProviderError::GuestBridge(
             "store a dedicated guest keychain password in the operating-system vault first"
                 .to_string(),
         ));
     }
-    if profile_paths.is_empty() || profile_paths.len() > SIGNING_PROFILE_MAX_COUNT {
+    if (profiles_required && profile_paths.is_empty())
+        || profile_paths.len() > SIGNING_PROFILE_MAX_COUNT
+    {
         return Err(ProviderError::GuestBridge(format!(
-            "select between 1 and {SIGNING_PROFILE_MAX_COUNT} provisioning profiles"
+            "select between {} and {SIGNING_PROFILE_MAX_COUNT} provisioning profiles",
+            u8::from(profiles_required)
         )));
     }
 
-    let certificate = validate_signing_file(
-        certificate_path,
-        &["p12", "pfx"],
-        SIGNING_CERTIFICATE_MAX_BYTES,
-        "signing certificate",
-    )?;
-    let mut total_bytes = fs::metadata(&certificate)
-        .map_err(|error| {
-            ProviderError::GuestBridge(format!(
-                "could not inspect the signing certificate: {error}"
-            ))
-        })?
-        .len();
+    let mut total_bytes = 0_u64;
     let mut profiles = Vec::with_capacity(profile_paths.len());
     for profile_path in profile_paths {
         let profile = validate_signing_file(
@@ -4647,13 +4749,8 @@ fn validate_signing_material(
             })?;
         profiles.push(profile);
     }
-    if total_bytes > SIGNING_MATERIAL_MAX_BYTES {
-        return Err(ProviderError::GuestBridge(
-            "the signing kit exceeds the 128 MiB safety limit".to_string(),
-        ));
-    }
 
-    Ok((certificate, profiles, total_bytes))
+    Ok((profiles, total_bytes))
 }
 
 fn validate_signing_file(
@@ -5130,13 +5227,14 @@ fn profile_matches_project(
 pub fn select_app_store_profile(
     signing: &SigningProvisioningResult,
 ) -> Option<&ProvisioningProfileSummary> {
+    let identity = signing.distribution_identity.as_ref()?;
     signing.profiles.iter().find(|profile| {
         matches!(profile.kind, Some(ProfileKind::AppStore) | None)
             && profile_matches_project(profile, signing)
             && profile
                 .developer_certificate_sha256
                 .iter()
-                .any(|fingerprint| fingerprint == &signing.certificate_sha256)
+                .any(|fingerprint| fingerprint == &identity.certificate_sha256)
     })
 }
 
@@ -7208,6 +7306,40 @@ mod tests {
             serde_json::from_str::<UnsignedBuildTarget>("\"simulator\"").unwrap(),
             UnsignedBuildTarget::Simulator
         );
+    }
+
+    #[test]
+    fn a_signing_record_from_before_the_distribution_identity_was_optional_still_reads() {
+        let legacy = r#"{"keychainPath":"/k","identityName":"iPhone Distribution: Example (TEAM123456)","identitySha1":"1111","certificateSha256":"aaaa","certificateExpiresAt":"2027-09-02T00:00:00Z","developmentTeam":"TEAM123456","bundleIdentifier":"com.example.app","profiles":[]}"#;
+        let read: SigningProvisioningResult = serde_json::from_str(legacy).unwrap();
+        let distribution = read.distribution_identity.as_ref().expect("legacy fields");
+        assert_eq!(distribution.identity_sha1, "1111");
+        assert_eq!(distribution.certificate_sha256, "aaaa");
+        assert!(read.development_identity.is_none());
+
+        // The new shape round-trips, with either identity absent.
+        let development_only = SigningProvisioningResult {
+            keychain_path: "/k".to_string(),
+            distribution_identity: None,
+            development_team: "TEAM123456".to_string(),
+            bundle_identifier: "com.example.app".to_string(),
+            profiles: Vec::new(),
+            development_identity: Some(ProvisionedIdentity {
+                identity_name: "Apple Development: Example (TEAM123456)".to_string(),
+                identity_sha1: "2222".to_string(),
+                certificate_sha256: "bbbb".to_string(),
+                certificate_expires_at: "2027-09-02T00:00:00Z".to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&development_only).unwrap();
+        assert!(json.contains("\"distributionIdentity\":null"));
+        assert!(!json.contains("\"identityName\":\"iPhone"));
+        assert_eq!(
+            serde_json::from_str::<SigningProvisioningResult>(&json).unwrap(),
+            development_only
+        );
+        // A development-only record never yields an App Store profile to archive with.
+        assert!(select_app_store_profile(&development_only).is_none());
     }
 
     #[test]

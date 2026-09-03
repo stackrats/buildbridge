@@ -106,20 +106,39 @@ async function remove(): Promise<void> {
 
         <div class="space-y-3">
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                BuildBridge creates a dedicated keychain in the guest, imports exactly one identity
-                as non-extractable, installs the matching profiles, and proves the private key works
-                by signing and strictly verifying a disposable binary. Passwords travel from the
-                vault to a fixed native helper over protected SSH input and never appear in
+                BuildBridge creates a dedicated keychain in the guest, imports the kit's identities
+                as non-extractable, installs the matching profiles, and proves each private key
+                works by signing and strictly verifying a disposable binary. Passwords travel from
+                the vault to a fixed native helper over protected SSH input and never appear in
                 arguments or logs.
             </p>
+
+            <Callout
+                v-if="signing && !signing.distributionIdentity"
+                tone="warn"
+                title="Development identity only"
+            >
+                The guest keychain holds a development identity and no distribution identity, so
+                this machine can run Debug builds on a registered iPhone but cannot sign an App
+                Store archive. Add a distribution identity and an App Store profile to the kit, then
+                provision again.
+            </Callout>
 
             <KeyValue
                 v-if="signing"
                 :items="[
-                    { label: 'Identity', value: signing.identityName },
+                    {
+                        label: 'Distribution identity',
+                        value:
+                            signing.distributionIdentity?.identityName ??
+                            'None · needed to sign an App Store archive',
+                    },
                     {
                         label: 'Certificate valid until',
-                        value: formatDate(signing.certificateExpiresAt),
+                        value: formatDate(
+                            (signing.distributionIdentity ?? signing.developmentIdentity)
+                                ?.certificateExpiresAt ?? '',
+                        ),
                     },
                     {
                         label: 'Development identity',

@@ -3109,14 +3109,18 @@ async fn provision_with_kit(
         })
         .unwrap_or_default();
 
-    let certificate_path = PathBuf::from(
-        secrets
-            .signing_certificate_path
-            .ok_or_else(|| "Choose a .p12 or .pfx signing certificate first.".to_string())?,
-    );
-    let certificate_password = secrets.signing_certificate_password.ok_or_else(|| {
-        "Store the certificate passphrase in the operating-system vault first.".to_string()
-    })?;
+    let distribution_certificate = match (
+        secrets.signing_certificate_path,
+        secrets.signing_certificate_password,
+    ) {
+        (Some(path), Some(password)) => Some((PathBuf::from(path), password)),
+        (Some(_), None) => {
+            return Err(
+                "Store the certificate passphrase in the operating-system vault first.".to_string(),
+            );
+        }
+        (None, _) => None,
+    };
     let development_certificate = match (
         secrets.development_certificate_path,
         secrets.development_certificate_password,
@@ -3130,12 +3134,18 @@ async fn provision_with_kit(
         }
         (None, _) => None,
     };
+    if distribution_certificate.is_none() && development_certificate.is_none() {
+        return Err(
+            "This kit holds no signing identity. Store a distribution identity with its App Store profile, or a development identity for phone builds, first."
+                .to_string(),
+        );
+    }
     let profile_paths = secrets
         .provisioning_profile_paths
         .into_iter()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    if profile_paths.is_empty() {
+    if distribution_certificate.is_some() && profile_paths.is_empty() {
         return Err("Choose at least one .mobileprovision profile first.".to_string());
     }
     let keychain_password = secrets.guest_keychain_password.ok_or_else(|| {
@@ -3169,8 +3179,9 @@ async fn provision_with_kit(
             .map_err(|error| error.to_string())?;
         }
         let material = buildbridge_docker_osx::SigningMaterial {
-            certificate_path: &certificate_path,
-            certificate_password: &certificate_password,
+            distribution_certificate: distribution_certificate
+                .as_ref()
+                .map(|(path, password)| (path.as_path(), password.as_str())),
             development_certificate: development_certificate
                 .as_ref()
                 .map(|(path, password)| (path.as_path(), password.as_str())),
@@ -3955,6 +3966,10 @@ async fn run_apple_signed_archive(
         .signing
         .clone()
         .ok_or_else(|| "Provision and verify signing in macOS first.".to_string())?;
+    let distribution = signing.distribution_identity.clone().ok_or_else(|| {
+        "The provisioned kit holds only a development identity. A signed archive needs a distribution identity and an App Store profile; add them to the kit and provision again."
+            .to_string()
+    })?;
     if workspace.development_team.as_deref() != Some(&signing.development_team)
         || workspace.bundle_identifier.as_deref() != Some(&signing.bundle_identifier)
     {
@@ -3978,7 +3993,7 @@ async fn run_apple_signed_archive(
     let output_directory = prepare_apple_archive_output_dir(&paths)?;
     let identity_path = paths.guest_identity();
     let known_hosts_path = paths.known_hosts();
-    let signing_certificate_sha256 = signing.certificate_sha256.clone();
+    let signing_certificate_sha256 = distribution.certificate_sha256;
     let guard = match begin_machine_operation(&app, &machine_id, "archiving") {
         Ok(guard) => guard,
         Err(error) => {
@@ -4142,7 +4157,13 @@ async fn build_machine_list_view(app: &AppHandle) -> Result<MachineListView, Str
                 workspace_name,
                 signing_kit_name: None,
                 signing_provisioned: signing.is_some(),
-                signing_identity: signing.map(|stored| stored.result.identity_name),
+                signing_identity: signing.and_then(|stored| {
+                    let result = stored.result;
+                    result
+                        .distribution_identity
+                        .or(result.development_identity)
+                        .map(|identity| identity.identity_name)
+                }),
                 archive_retained: paths.apple_archive_record().is_file(),
                 env_set_name: None,
                 usb_ready: buildbridge_docker_osx::inspect_container_layout(&paths.container_name)
@@ -5421,11 +5442,22 @@ fn resolve_signing_kit<'a>(
 }
 
 /// Whether a kit holds everything provisioning needs.
+/// A kit provisions with either identity. The distribution set — identity, passphrase and at
+/// least one profile — is what an archive needs; a development identity with its passphrase is
+/// enough to run on a phone, and a kit holding only that is complete for that route alone.
 fn kit_is_complete(kit: &StoredSigningKit) -> bool {
+    kit.guest_keychain_password.is_some()
+        && (kit_has_distribution_set(kit) || kit_has_development_identity(kit))
+}
+
+fn kit_has_distribution_set(kit: &StoredSigningKit) -> bool {
     kit.signing_certificate_path.is_some()
         && kit.signing_certificate_password.is_some()
         && !kit.provisioning_profile_paths.is_empty()
-        && kit.guest_keychain_password.is_some()
+}
+
+fn kit_has_development_identity(kit: &StoredSigningKit) -> bool {
+    kit.development_certificate_path.is_some() && kit.development_certificate_password.is_some()
 }
 
 /// Classifies what a machine can do about signing right now.
@@ -6636,6 +6668,30 @@ mod tests {
                 "a kit without its {missing} cannot provision"
             );
         }
+    }
+
+    #[test]
+    fn a_development_identity_alone_completes_a_kit_for_the_phone_route() {
+        let mut dev_only = kit("team", true);
+        dev_only.signing_certificate_path = None;
+        dev_only.signing_certificate_password = None;
+        dev_only.provisioning_profile_paths.clear();
+        assert!(!kit_is_complete(&dev_only), "no identity at all");
+
+        dev_only.development_certificate_path = Some("/kits/development.p12".to_string());
+        assert!(!kit_is_complete(&dev_only), "a .p12 without its passphrase");
+
+        dev_only.development_certificate_password = Some("secret".to_string());
+        assert!(
+            kit_is_complete(&dev_only),
+            "a development identity with no profile yet"
+        );
+
+        dev_only.guest_keychain_password = None;
+        assert!(
+            !kit_is_complete(&dev_only),
+            "the keychain password is always needed"
+        );
     }
 
     #[test]

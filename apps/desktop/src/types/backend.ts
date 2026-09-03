@@ -338,10 +338,8 @@ export interface ProvisionedIdentity {
 
 export interface SigningProvisioningResult {
     keychainPath: string;
-    identityName: string;
-    identitySha1: string;
-    certificateSha256: string;
-    certificateExpiresAt: string;
+    /** The distribution identity, when the kit holds one; an App Store archive needs it. */
+    distributionIdentity: ProvisionedIdentity | null;
     developmentTeam: string;
     bundleIdentifier: string;
     profiles: ProvisioningProfileSummary[];

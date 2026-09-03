@@ -181,7 +181,7 @@ async function save(): Promise<void> {
                             Signing files
                         </h4>
                         <p class="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-                            All four are needed before this kit can sign a build.
+                            All four are needed to sign an App Store archive.
                         </p>
                     </div>
                     <span
@@ -328,8 +328,10 @@ async function save(): Promise<void> {
                     v-if="missing.length"
                     class="text-[11px] leading-4 text-amber-700 dark:text-amber-400"
                 >
-                    Still needed: {{ missing.map((item) => item.label).join(', ') }}. A kit can be
-                    saved incomplete, but it cannot provision until all four are present.
+                    Still needed for archives: {{ missing.map((item) => item.label).join(', ') }}. A
+                    kit can be saved incomplete. With a development identity below it can still
+                    provision and run Debug builds on a phone, but the archive step stays locked
+                    until all four are present.
                 </p>
             </section>
 

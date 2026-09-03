@@ -35,6 +35,64 @@ export function developmentIdentityStatus(
     return 'none';
 }
 
+/**
+ * The two routes a stored kit can be complete for. The distribution set — identity, export
+ * password and at least one profile — signs an App Store archive; a development identity with
+ * its password signs a Debug build for a registered phone. Either one, with the guest keychain
+ * password, lets a machine provision; only the distribution set unlocks the archive.
+ */
+export interface SigningKitReadiness {
+    distribution: boolean;
+    development: boolean;
+    keychain: boolean;
+    provisionable: boolean;
+}
+
+export function kitReadiness(kit: SigningKitSummary | null | undefined): SigningKitReadiness {
+    const distribution =
+        !!kit &&
+        kit.signingCertificateConfigured &&
+        kit.signingCertificatePasswordStored &&
+        kit.provisioningProfileNames.length > 0;
+    const development =
+        !!kit && kit.developmentCertificateConfigured && kit.developmentCertificatePasswordStored;
+    const keychain = !!kit && kit.guestKeychainConfigured;
+    return {
+        distribution,
+        development,
+        keychain,
+        provisionable: keychain && (distribution || development),
+    };
+}
+
+export function kitIsProvisionable(kit: SigningKitSummary | null | undefined): boolean {
+    return kitReadiness(kit).provisionable;
+}
+
+/** What a stored kit still lacks before it can provision, as the attach step lists it. */
+export function kitShortfall(kit: SigningKitSummary): string[] {
+    const readiness = kitReadiness(kit);
+    const missing: string[] = [];
+    if (!readiness.distribution && !readiness.development) {
+        if (kit.signingCertificateConfigured) {
+            if (!kit.signingCertificatePasswordStored) {
+                missing.push('export password');
+            }
+            if (kit.provisioningProfileNames.length === 0) {
+                missing.push('provisioning profile');
+            }
+        } else if (kit.developmentCertificateConfigured) {
+            missing.push('development identity export password');
+        } else {
+            missing.push('a distribution or development identity');
+        }
+    }
+    if (!readiness.keychain) {
+        missing.push('keychain password');
+    }
+    return missing;
+}
+
 export interface SigningKitDraft {
     certificatePath: string;
     certificatePassword: string;

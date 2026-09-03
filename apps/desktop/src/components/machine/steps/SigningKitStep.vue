@@ -6,7 +6,8 @@ import { computed, ref, watch } from 'vue';
 
 import type { JourneyStep } from '../../../model/steps';
 import { useMachinesStore, type MachineSession } from '../../../stores/machines';
-import { kitIsProvisionable, useSigningStore } from '../../../stores/signing';
+import { kitReadiness } from '../../../model/signing';
+import { useSigningStore } from '../../../stores/signing';
 import { useUi } from '../../../stores/ui';
 import Button from '../../ui/Button.vue';
 import Callout from '../../ui/Callout.vue';
@@ -42,7 +43,10 @@ const options = computed(() => [
     ...kits.value.map((entry) => ({ value: entry.id, label: entry.name })),
 ]);
 const detaching = computed(() => selected.value === '' && kit.value !== null);
-const complete = computed(() => kitIsProvisionable(kit.value));
+const readiness = computed(() => kitReadiness(kit.value));
+const complete = computed(() => readiness.value.provisionable);
+// Complete for the phone route only: it provisions, and the archive step stays locked.
+const developmentOnly = computed(() => complete.value && !readiness.value.distribution);
 const changed = computed(() => selected.value !== (kit.value?.id ?? ''));
 const vaultBroken = computed(
     () =>
@@ -76,6 +80,12 @@ const details = computed(() =>
                   tone: kit.value.guestKeychainConfigured
                       ? ('default' as const)
                       : ('warn' as const),
+              },
+              {
+                  label: 'Development identity',
+                  value:
+                      kit.value.developmentCertificateName ??
+                      'Not stored · optional, for iPhone builds',
               },
           ]
         : [],
@@ -178,12 +188,28 @@ async function attach(): Promise<void> {
 
                 <template v-if="kit">
                     <KeyValue :items="details" :columns="3" />
+                    <Callout
+                        v-if="developmentOnly"
+                        tone="warn"
+                        title="Development identity only"
+                        class="mt-3"
+                    >
+                        This kit can provision and run Debug builds on a registered iPhone, but it
+                        holds no distribution identity or App Store profile, so the signed archive
+                        step stays locked. Add them to the kit and provision again to unlock it.
+                    </Callout>
                     <div class="flex flex-wrap items-center gap-1.5">
                         <Chip
                             :interactive="false"
                             :dot="complete ? 'bg-emerald-500' : 'bg-amber-500'"
                         >
-                            {{ complete ? 'Ready to provision' : 'Incomplete kit' }}
+                            {{
+                                complete
+                                    ? developmentOnly
+                                        ? 'Ready to provision · phone only'
+                                        : 'Ready to provision'
+                                    : 'Incomplete kit'
+                            }}
                         </Chip>
                         <Chip
                             v-if="kit.appStoreConnectKeyId"

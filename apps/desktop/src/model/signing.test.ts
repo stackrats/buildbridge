@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vite-plus/test';
 
 import type { SigningKitSummary } from '../types/backend';
-import { appStoreConnectIsPartial, kitHoldsProfile, missingKitRequirements } from './signing';
+import {
+    appStoreConnectIsPartial,
+    kitHoldsProfile,
+    kitReadiness,
+    kitShortfall,
+    missingKitRequirements,
+} from './signing';
 
 const emptyDraft = {
     certificatePath: '',
@@ -122,5 +128,70 @@ describe('profile already in the kit', () => {
         const kit = storedKit({ provisioningProfileNames: ['AppStore.mobileprovision'] });
 
         expect(kitHoldsProfile(kit, uuid)).toBe(false);
+    });
+});
+
+describe('kit readiness', () => {
+    const distribution = {
+        signingCertificateConfigured: true,
+        signingCertificatePasswordStored: true,
+        provisioningProfileNames: ['11111111-2222-3333-4444-555555555555.mobileprovision'],
+        guestKeychainConfigured: true,
+    };
+    const development = {
+        developmentCertificateConfigured: true,
+        developmentCertificatePasswordStored: true,
+        guestKeychainConfigured: true,
+    };
+
+    it('provisions with the distribution set, the development identity, or both', () => {
+        expect(kitReadiness(storedKit(distribution))).toEqual({
+            distribution: true,
+            development: false,
+            keychain: true,
+            provisionable: true,
+        });
+        expect(kitReadiness(storedKit(development))).toEqual({
+            distribution: false,
+            development: true,
+            keychain: true,
+            provisionable: true,
+        });
+        expect(kitReadiness(storedKit({ ...distribution, ...development })).provisionable).toBe(
+            true,
+        );
+    });
+
+    it('always needs the keychain password, and a .p12 without its password is not an identity', () => {
+        expect(
+            kitReadiness(storedKit({ ...development, guestKeychainConfigured: false }))
+                .provisionable,
+        ).toBe(false);
+        expect(
+            kitReadiness(storedKit({ ...development, developmentCertificatePasswordStored: false }))
+                .provisionable,
+        ).toBe(false);
+        expect(kitReadiness(null).provisionable).toBe(false);
+    });
+
+    it('lists the shortest route to provisioning', () => {
+        expect(kitShortfall(storedKit())).toEqual([
+            'a distribution or development identity',
+            'keychain password',
+        ]);
+        expect(
+            kitShortfall(
+                storedKit({ signingCertificateConfigured: true, guestKeychainConfigured: true }),
+            ),
+        ).toEqual(['export password', 'provisioning profile']);
+        expect(
+            kitShortfall(
+                storedKit({
+                    developmentCertificateConfigured: true,
+                    guestKeychainConfigured: true,
+                }),
+            ),
+        ).toEqual(['development identity export password']);
+        expect(kitShortfall(storedKit(development))).toEqual([]);
     });
 });

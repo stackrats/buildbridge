@@ -843,6 +843,13 @@ The following decisions should be treated as settled until this document is deli
     comes from the attached phone, and device registration, development certificate and
     development profile are confirmed, non-revoking mutations at Apple. Trust and Developer Mode
     stay the user's actions on the phone.
+40. A kit provisions with either identity. The distribution set — identity, export password and
+    an App Store profile — is what the archive needs; a development identity with its password
+    is enough to run on a phone. A development-only kit is complete for that route alone, and
+    the interface says so wherever it is shown: the archive step stays locked with the reason,
+    and the kit card, the attach step and the provision step each name the limitation. Apple
+    counts certificates per team, so one kit per team holding both identities is the intended
+    shape, not one kit per identity.
 
 ### Credential loss and recovery
 
@@ -989,6 +996,10 @@ ladder is shown as a readiness grid and every rung has one primary action:
    `get-task-allow`), then a detached guest job runs `devicectl device install app` and
    `devicectl device process launch --console --terminate-existing`. Stop ends the console and
    keeps the run; every line reaches the drawer's **Device console** tab.
+
+A team's kit may hold only a development identity. Such a kit provisions and carries a machine
+through this step, but the signed archive stays locked until a distribution identity and an App
+Store profile are added, and every place the kit appears says so.
 
 Why not Docker-OSX's documented `usbfluxd` route: since iOS 17, developer services run as
 CoreDevice/RemoteXPC over the phone's USB Ethernet interface, which a `usbmuxd` proxy never

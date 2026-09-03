@@ -235,10 +235,12 @@ function provisionedView(): MacBuilderView {
     };
     view.signing = {
         keychainPath: '/k',
-        identityName: 'iPhone Distribution: Example Developer (TEAM123456)',
-        identitySha1: 'sha1',
-        certificateSha256: 'sha256',
-        certificateExpiresAt: '2027-09-02T00:00:00Z',
+        distributionIdentity: {
+            identityName: 'iPhone Distribution: Example Developer (TEAM123456)',
+            identitySha1: 'sha1',
+            certificateSha256: 'sha256',
+            certificateExpiresAt: '2027-09-02T00:00:00Z',
+        },
         developmentTeam: 'TEAM123456',
         bundleIdentifier: 'com.example.app',
         profiles: [],
@@ -327,10 +329,12 @@ describe('deriveBuildSteps', () => {
         };
         view.signing = {
             keychainPath: '/k',
-            identityName: 'iPhone Distribution: Example (TEAM123456)',
-            identitySha1: 'sha1',
-            certificateSha256: 'sha256',
-            certificateExpiresAt: '2027-09-02T00:00:00Z',
+            distributionIdentity: {
+                identityName: 'iPhone Distribution: Example (TEAM123456)',
+                identitySha1: 'sha1',
+                certificateSha256: 'sha256',
+                certificateExpiresAt: '2027-09-02T00:00:00Z',
+            },
             developmentTeam: 'TEAM123456',
             bundleIdentifier: 'nz.co.example.app',
             profiles: [],
@@ -419,6 +423,65 @@ describe('deriveBuildSteps', () => {
 
         expect(steps.find((step) => step.id === 'signing-kit')?.status).toBe('done');
         expect(steps.find((step) => step.id === 'archive')?.status).toBe('active');
+    });
+});
+
+describe('development-only kit', () => {
+    function developmentOnlyView(): MacBuilderView {
+        const view = provisionedView();
+        view.signingHealth = 'ready';
+        view.signingKit = {
+            id: 'dev-kit',
+            name: 'Dev kit',
+            appStoreConnectConfigured: true,
+            appStoreConnectKeyId: 'KEYID12345',
+            signingCertificateConfigured: false,
+            signingCertificateName: null,
+            signingCertificatePasswordStored: false,
+            provisioningProfileNames: [],
+            guestKeychainConfigured: true,
+            createdAtEpochSeconds: 0,
+            attachedMachines: ['Local macOS builder'],
+            developmentCertificateConfigured: true,
+            developmentCertificateName: 'development.p12',
+            developmentCertificatePasswordStored: true,
+        };
+        view.signing = {
+            ...view.signing!,
+            distributionIdentity: null,
+            developmentIdentity: {
+                identityName: 'Apple Development: Example Developer (TEAM123456)',
+                identitySha1: 'dev1',
+                certificateSha256: 'devsha256',
+                certificateExpiresAt: '2027-09-02T00:00:00Z',
+            },
+        };
+        return view;
+    }
+
+    it('attaches and provisions, and says the archive stays locked', () => {
+        const steps = deriveBuildSteps(developmentOnlyView(), { runningStep: null });
+        const byId = (id: string) => steps.find((step) => step.id === id)!;
+        expect(byId('signing-kit').status).toBe('done');
+        expect(byId('signing-kit').summary).toContain('development identity only');
+        expect(byId('provision').status).toBe('done');
+        expect(byId('provision').summary).toContain('development only');
+        expect(byId('archive').status).toBe('pending');
+        expect(byId('archive').summary).toContain(
+            'Locked: the kit holds only a development identity',
+        );
+        expect(byId('run-device').status).toBe('active');
+    });
+
+    it('names what an unfinished kit still lacks', () => {
+        const view = developmentOnlyView();
+        view.signingKit = { ...view.signingKit!, developmentCertificatePasswordStored: false };
+        view.signing = null;
+        const step = deriveBuildSteps(view, { runningStep: null }).find(
+            (step) => step.id === 'signing-kit',
+        )!;
+        expect(step.status).toBe('active');
+        expect(step.summary).toContain('development identity export password missing');
     });
 });
 
