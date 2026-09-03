@@ -64,6 +64,14 @@ pub(crate) struct AppleCertificateSummary {
     pub(crate) expiration_date: String,
 }
 
+/// A certificate Apple has just issued for a CSR this host generated: its metadata and its DER
+/// content. The private key never leaves the host, so this plus that key is a complete identity.
+#[derive(Debug)]
+pub(crate) struct CreatedAppleCertificate {
+    pub(crate) certificate: AppleCertificateSummary,
+    pub(crate) content: Vec<u8>,
+}
+
 pub(crate) struct CreatedAppleProfile {
     pub(crate) profile: AppleProvisioningProfileSummary,
     pub(crate) certificate: AppleCertificateSummary,
@@ -157,9 +165,16 @@ struct CertificateResource {
     attributes: Option<CertificateAttributes>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CertificateResponse {
+    data: CertificateResource,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CertificateAttributes {
+    #[serde(default)]
+    certificate_content: Option<String>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -597,6 +612,156 @@ pub(crate) async fn create_replacement_profile(
     })
 }
 
+/// Asks Apple to issue an Apple Distribution certificate for a CSR whose private key was
+/// generated on this host. This is the one step that used to need a Mac; with the key made here
+/// and the signature fetched from Apple, no Mac is involved at all. Nothing at Apple is revoked
+/// or replaced: if the team is at its limit, Apple refuses and that refusal is shown as is.
+pub(crate) async fn create_distribution_certificate(
+    key_id: &str,
+    issuer_id: &str,
+    private_key: &str,
+    csr_pem: &str,
+) -> Result<CreatedAppleCertificate, String> {
+    if !valid_csr_pem(csr_pem) {
+        return Err("BuildBridge generated an unreadable certificate signing request.".to_string());
+    }
+    let now = unix_timestamp()?;
+    let token = create_token(key_id, issuer_id, private_key, now)?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent(concat!("BuildBridge/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| format!("Could not prepare the Apple API connection: {error}"))?;
+
+    // A key that cannot read certificates cannot create them either; say so before trying.
+    let (_, accessible, issue) = fetch_certificates(&client, &token).await?;
+    if !accessible {
+        return Err(issue.unwrap_or_else(|| {
+            "The Team key cannot access distribution certificates.".to_string()
+        }));
+    }
+
+    let response = client
+        .post(APP_STORE_CONNECT_CERTIFICATES_URL)
+        .bearer_auth(&token)
+        .json(&certificate_request(csr_pem))
+        .send()
+        .await
+        .map_err(|error| connection_error("distribution certificate", &error))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Could not read Apple's created-certificate response: {error}"))?;
+    if status != StatusCode::CREATED {
+        return Err(apple_error_message(
+            status,
+            &body,
+            "distribution certificate",
+        ));
+    }
+
+    parse_created_certificate(&body)
+}
+
+/// The typed create request: one certificate type, one CSR, nothing else Apple could act on.
+fn certificate_request(csr_pem: &str) -> serde_json::Value {
+    serde_json::json!({
+        "data": {
+            "type": "certificates",
+            "attributes": {
+                "certificateType": "DISTRIBUTION",
+                "csrContent": csr_pem,
+            }
+        }
+    })
+}
+
+fn parse_created_certificate(body: &str) -> Result<CreatedAppleCertificate, String> {
+    let response: CertificateResponse = serde_json::from_str(body).map_err(|_| {
+        "Apple created the certificate but returned an unreadable response.".to_string()
+    })?;
+    let mut resource = response.data;
+    let encoded = resource
+        .attributes
+        .as_mut()
+        .and_then(|attributes| attributes.certificate_content.take())
+        .ok_or_else(|| {
+            "Apple created the certificate but did not return its content. Nothing was revoked; it can be downloaded from the developer portal."
+                .to_string()
+        })?;
+    let content = decode_certificate_content(&encoded)?;
+    let certificate = certificate_summary(resource);
+    if !is_distribution_certificate(&certificate) {
+        return Err(format!(
+            "Apple returned a {} certificate instead of a distribution certificate; it was not retained.",
+            certificate.certificate_type
+        ));
+    }
+
+    Ok(CreatedAppleCertificate {
+        certificate,
+        content,
+    })
+}
+
+fn decode_certificate_content(encoded: &str) -> Result<Vec<u8>, String> {
+    if encoded.is_empty() || encoded.len() > 64 * 1024 {
+        return Err("Apple returned certificate content with an unsafe size.".to_string());
+    }
+    let content = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|_| "Apple returned invalid encoded certificate content.".to_string())?;
+    if content.is_empty() || content.len() > 32 * 1024 {
+        return Err("Apple returned certificate content with an unsafe size.".to_string());
+    }
+
+    Ok(content)
+}
+
+/// A PEM certificate signing request as OpenSSL writes it, with nothing else in it.
+pub(crate) fn valid_csr_pem(csr: &str) -> bool {
+    let trimmed = csr.trim();
+    trimmed.starts_with("-----BEGIN CERTIFICATE REQUEST-----")
+        && trimmed.ends_with("-----END CERTIFICATE REQUEST-----")
+        && trimmed.len() < 16 * 1024
+        && trimmed.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | ' ' | '\n' | '\r')
+        })
+}
+
+/// Downloads one existing profile by its opaque Apple id, including its content.
+///
+/// The same request serves a freshly created profile and one that already existed: a kit that
+/// lost its local copy can take it back from Apple rather than hunting for the file.
+pub(crate) async fn download_profile(
+    key_id: &str,
+    issuer_id: &str,
+    private_key: &str,
+    profile_id: &str,
+) -> Result<(AppleProvisioningProfileSummary, Vec<u8>), String> {
+    validate_profile_id(profile_id)?;
+
+    let now = unix_timestamp()?;
+    let token = create_token(key_id, issuer_id, private_key, now)?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent(concat!("BuildBridge/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| format!("Could not prepare the Apple API connection: {error}"))?;
+    let resource = fetch_created_profile(&client, &token, profile_id).await?;
+    let mut attributes = resource.attributes.ok_or_else(|| {
+        "Apple returned the profile without any metadata. Verify again and retry.".to_string()
+    })?;
+    let encoded = attributes.profile_content.take().ok_or_else(|| {
+        "Apple did not return the profile's content. Verify again and retry.".to_string()
+    })?;
+    let content = decode_profile_content(&encoded)?;
+    let summary = profile_summary(resource.id, attributes);
+
+    Ok((summary, content))
+}
+
 async fn fetch_created_profile(
     client: &Client,
     token: &str,
@@ -809,6 +974,19 @@ fn certificate_summary(certificate: CertificateResource) -> AppleCertificateSumm
     }
 }
 
+fn validate_profile_id(profile_id: &str) -> Result<(), String> {
+    if profile_id.is_empty()
+        || profile_id.len() > 128
+        || !profile_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    {
+        return Err("That provisioning profile identifier is not valid.".to_string());
+    }
+
+    Ok(())
+}
+
 fn validate_certificate_id(certificate_id: &str) -> Result<(), String> {
     if certificate_id.is_empty()
         || certificate_id.len() > 128
@@ -849,6 +1027,12 @@ fn apple_error_message(status: StatusCode, body: &str, resource: &str) -> String
         StatusCode::TOO_MANY_REQUESTS => format!(
             "Apple temporarily rate-limited the {resource} check. Wait a moment and try again."
         ),
+        StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY
+            if resource == "distribution certificate" =>
+        {
+            "Apple refused to issue another distribution certificate. Apple allows only a few active ones per team: revoke an unused one in the developer portal, or export an existing one from the Mac that holds its key."
+                .to_string()
+        }
         StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY => format!(
             "Apple rejected the requested {resource}. Verify the Bundle ID and selected distribution certificate, then try again."
         ),
@@ -885,6 +1069,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_created_certificate_is_read_with_its_content() {
+        let created = parse_created_certificate(
+            r#"{
+                "data": {
+                    "type": "certificates",
+                    "id": "CERT123",
+                    "attributes": {
+                        "name": "Apple Distribution: Example Developer (TEAM123456)",
+                        "displayName": "Example Developer",
+                        "certificateType": "DISTRIBUTION",
+                        "serialNumber": "0123456789ABCDEF",
+                        "platform": "IOS",
+                        "expirationDate": "2027-09-03T10:00:00.000+00:00",
+                        "certificateContent": "MIIBAQ=="
+                    }
+                }
+            }"#,
+        )
+        .expect("a created certificate decodes");
+
+        assert_eq!(created.certificate.id, "CERT123");
+        assert_eq!(created.certificate.certificate_type, "DISTRIBUTION");
+        assert_eq!(created.content, vec![0x30, 0x82, 0x01, 0x01]);
+    }
+
+    #[test]
+    fn a_certificate_of_the_wrong_kind_or_without_content_is_refused() {
+        let development = parse_created_certificate(
+            r#"{"data": {"type": "certificates", "id": "C1", "attributes": {"certificateType": "DEVELOPMENT", "certificateContent": "MIIBAQ=="}}}"#,
+        );
+        assert!(development.is_err());
+
+        let empty = parse_created_certificate(
+            r#"{"data": {"type": "certificates", "id": "C1", "attributes": {"certificateType": "DISTRIBUTION"}}}"#,
+        );
+        assert!(empty.unwrap_err().contains("did not return its content"));
+    }
+
+    #[test]
+    fn the_certificate_request_carries_only_a_type_and_the_csr() {
+        let csr = "-----BEGIN CERTIFICATE REQUEST-----\nMIIB\n-----END CERTIFICATE REQUEST-----";
+        let request = certificate_request(csr);
+
+        assert_eq!(request["data"]["type"], "certificates");
+        assert_eq!(
+            request["data"]["attributes"]["certificateType"],
+            "DISTRIBUTION"
+        );
+        assert_eq!(request["data"]["attributes"]["csrContent"], csr);
+        assert!(request["data"].get("relationships").is_none());
+        assert!(valid_csr_pem(csr));
+        assert!(!valid_csr_pem(
+            "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"
+        ));
+        assert!(!valid_csr_pem(
+            "-----BEGIN CERTIFICATE REQUEST-----\n$(rm)\n-----END CERTIFICATE REQUEST-----"
+        ));
+    }
+
+    #[test]
+    fn accepts_the_opaque_identifiers_apple_issues_for_profiles() {
+        assert!(validate_profile_id("ABCD1234EF").is_ok());
+        assert!(validate_profile_id("2f3d9c10-0a6b-4f4e-9c2e-1d0b7a5e6c11").is_ok());
+    }
+
+    #[test]
+    fn rejects_a_profile_identifier_that_could_reshape_the_request_path() {
+        assert!(validate_profile_id("").is_err());
+        assert!(validate_profile_id("../v1/users").is_err());
+        assert!(validate_profile_id("id?include=bundleId").is_err());
+        assert!(validate_profile_id(&"a".repeat(129)).is_err());
+    }
+
+    #[test]
     fn parses_an_exact_bundle_identifier_match() {
         let bundle = parse_bundle_id_response(
             r#"{
@@ -903,20 +1161,20 @@ mod tests {
                         "type": "bundleIds",
                         "id": "opaque-id",
                         "attributes": {
-                            "name": "ThinkSolar",
-                            "identifier": "nz.co.thinksolar.app",
+                            "name": "Example app",
+                            "identifier": "com.example.app",
                             "platform": "IOS",
                             "seedId": "TEAM123456"
                         }
                     }
                 ]
             }"#,
-            "nz.co.thinksolar.app",
+            "com.example.app",
         )
         .expect("response should parse")
         .expect("bundle should match");
 
-        assert_eq!(bundle.attributes.name, "ThinkSolar");
+        assert_eq!(bundle.attributes.name, "Example app");
         assert_eq!(bundle.attributes.platform, "IOS");
         assert_eq!(bundle.attributes.seed_id.as_deref(), Some("TEAM123456"));
     }
@@ -930,7 +1188,7 @@ mod tests {
                         "type": "profiles",
                         "id": "profile-resource-id",
                         "attributes": {
-                            "name": "Think Solar App Store",
+                            "name": "Example App Store",
                             "platform": "IOS",
                             "profileType": "IOS_APP_STORE",
                             "profileState": "INVALID",
@@ -1055,25 +1313,25 @@ mod tests {
                     "type": "apps",
                     "id": "1234567890",
                     "attributes": {
-                        "name": "ThinkSolar",
-                        "bundleId": "nz.co.thinksolar.app"
+                        "name": "Example app",
+                        "bundleId": "com.example.app"
                     }
                 }]
             }"#,
-            "nz.co.thinksolar.app",
+            "com.example.app",
         )
         .expect("response should parse")
         .expect("app should match");
 
         assert_eq!(app.id, "1234567890");
-        assert_eq!(app.attributes.name, "ThinkSolar");
+        assert_eq!(app.attributes.name, "Example app");
     }
 
     #[test]
     fn successful_empty_responses_are_distinct_from_api_errors() {
-        let app = parse_app_response(r#"{"data": []}"#, "nz.co.thinksolar.app")
+        let app = parse_app_response(r#"{"data": []}"#, "com.example.app")
             .expect("app response should parse");
-        let bundle = parse_bundle_id_response(r#"{"data": []}"#, "nz.co.thinksolar.app")
+        let bundle = parse_bundle_id_response(r#"{"data": []}"#, "com.example.app")
             .expect("bundle response should parse");
 
         assert!(app.is_none());

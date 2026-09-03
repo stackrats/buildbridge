@@ -1,35 +1,280 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use buildbridge_contract::{
-    CompleteBuildRequest, HeartbeatRequest, PROTOCOL_VERSION, PairRunnerRequest,
-    RealtimeAuthorizationRequest, RealtimeConfiguration,
+    AppleArchivePayload, BuildLogLine, ClaimedBuild, CompleteBuildRequest, CompletionStatus,
+    HeartbeatRequest, LogStream, MachineReport, PROTOCOL_VERSION, PairRunnerRequest,
+    RealtimeAuthorizationRequest, RealtimeConfiguration, valid_git_ref,
 };
 use buildbridge_docker_osx::{
-    AppleArchiveProgress, AppleArchiveResult, AppleProjectProgress, AppleSmokeBuildResult,
-    AppleWorkspaceSyncResult, ContainerState, GuestDiagnostics, GuestSshStatus, GuestTrustState,
-    MacBuilderConfig, RuntimeStatus, SigningProvisioningProgress, SigningProvisioningResult,
-    XcodeImportProgress,
+    AppleArchiveArtifact, AppleArchiveProgress, AppleArchiveResult, AppleProjectProgress,
+    AppleSmokeBuildResult, AppleWorkspaceSyncResult, ContainerState, GuestDiagnostics,
+    GuestEnvFiles, GuestOptimization, GuestSshStatus, GuestTrustState, HostPrerequisites,
+    MacBuilderConfig, OperationScope, RuntimeStatus, SigningProvisioningProgress,
+    SigningProvisioningResult, XcodeImportProgress,
 };
 use buildbridge_runner::{ApiClient, execute};
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Listener, Manager, State};
+
+use crate::machines::{MachinePaths, StoredMachine};
 
 mod apple_api;
+mod machines;
 mod tray;
+
+/// Event names shared with the desktop frontend. Every payload carries `machineId`.
+const MACHINE_CHANGED_EVENT: &str = "machine-changed";
+const LAUNCH_PROGRESS_EVENT: &str = "machine-launch-progress";
+const XCODE_PROGRESS_EVENT: &str = "machine-xcode-progress";
+const SIGNING_PROGRESS_EVENT: &str = "machine-signing-progress";
+const PROJECT_PROGRESS_EVENT: &str = "machine-project-progress";
+const ARCHIVE_PROGRESS_EVENT: &str = "machine-archive-progress";
 
 const CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop";
 const MAC_BUILDER_CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop.macos-builder";
 const MAC_BUILDER_CREDENTIAL_ACCOUNT: &str = "default";
+/// Identifier given to the kit migrated from the pre-registry vault record.
+const DEFAULT_SIGNING_KIT_ID: &str = "default";
+/// Upper bound on stored kits; each one holds credentials for a developer team.
+const MAX_SIGNING_KITS: usize = 12;
+const MAX_PROVISIONING_PROFILES: usize = 20;
+const ENV_SET_CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop.env-sets";
+const MAX_ENV_SETS: usize = 12;
+const MAX_ENV_VARIABLES: usize = 100;
+const MAX_ENV_VALUE_LENGTH: usize = 4096;
 
 #[derive(Default)]
 struct AppState {
     runner_running: AtomicBool,
-    builder_running: AtomicBool,
+    /// Machines with a long-running operation in flight, keyed by machine id. The value is a
+    /// stable snake_case operation key that the frontend maps back to a step.
+    busy_machines: Mutex<HashMap<String, &'static str>>,
+    /// The cancellable scope of each in-flight operation, keyed by machine id.
+    operation_scopes: Mutex<HashMap<String, Arc<OperationScope>>>,
+}
+
+/// Marks one machine busy until dropped so concurrent operations cannot interleave.
+struct MachineOperationGuard {
+    app: AppHandle,
+    machine_id: String,
+    scope: Arc<OperationScope>,
+}
+
+impl MachineOperationGuard {
+    /// The scope a blocking closure enters so its child processes can be stopped.
+    fn scope(&self) -> Arc<OperationScope> {
+        Arc::clone(&self.scope)
+    }
+}
+
+impl Drop for MachineOperationGuard {
+    fn drop(&mut self) {
+        if let Ok(mut busy) = self.app.state::<AppState>().busy_machines.lock() {
+            busy.remove(&self.machine_id);
+        }
+        if let Ok(mut scopes) = self.app.state::<AppState>().operation_scopes.lock() {
+            scopes.remove(&self.machine_id);
+        }
+        let _ = self.app.emit(
+            MACHINE_CHANGED_EVENT,
+            MachineChangedEvent {
+                machine_id: Some(self.machine_id.clone()),
+            },
+        );
+    }
+}
+
+fn begin_machine_operation(
+    app: &AppHandle,
+    machine_id: &str,
+    label: &'static str,
+) -> Result<MachineOperationGuard, String> {
+    let state = app.state::<AppState>();
+    let mut busy = state
+        .busy_machines
+        .lock()
+        .map_err(|_| "The machine operation registry is poisoned.".to_string())?;
+    if busy.contains_key(machine_id) {
+        return Err(
+            "Another operation is still running on this machine. Wait for it to finish."
+                .to_string(),
+        );
+    }
+    busy.insert(machine_id.to_string(), label);
+    drop(busy);
+    let scope = OperationScope::new();
+    if let Ok(mut scopes) = state.operation_scopes.lock() {
+        scopes.insert(machine_id.to_string(), Arc::clone(&scope));
+    }
+    let _ = app.emit(
+        MACHINE_CHANGED_EVENT,
+        MachineChangedEvent {
+            machine_id: Some(machine_id.to_string()),
+        },
+    );
+
+    Ok(MachineOperationGuard {
+        app: app.clone(),
+        machine_id: machine_id.to_string(),
+        scope,
+    })
+}
+
+/// Stops whatever is running on a machine: kills the operation's host-side children, and for
+/// a build that deliberately outlives its SSH session, the job inside the guest as well. The
+/// operation then returns as stopped rather than as a failure.
+#[tauri::command]
+async fn cancel_machine_operation(app: AppHandle, machine_id: String) -> Result<(), String> {
+    let scope = app
+        .state::<AppState>()
+        .operation_scopes
+        .lock()
+        .map_err(|_| "The machine operation registry is poisoned.".to_string())?
+        .get(&machine_id)
+        .cloned();
+    let label = busy_operation(&app, &machine_id)?;
+    let Some(scope) = scope else {
+        return Err("Nothing is running on this machine.".to_string());
+    };
+    scope.cancel();
+
+    if matches!(label.as_deref(), Some("test_building" | "archiving")) {
+        let paths = MachinePaths::resolve(&app, &machine_id)?;
+        if let Some(access) = load_mac_guest_access(&paths)?
+            && let Ok(registry) = machines::load_registry(&app)
+            && let Ok(machine) = registry.find(&machine_id)
+        {
+            let ssh_port = machine.config.ssh_port;
+            let identity = paths.guest_identity();
+            let known_hosts = paths.known_hosts();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                buildbridge_docker_osx::stop_guest_jobs(
+                    ssh_port,
+                    &access.username,
+                    &identity,
+                    &known_hosts,
+                )
+            })
+            .await;
+        }
+    }
+
+    Ok(())
+}
+
+/// The outcome of a blocking operation, with a stop reported as a stop rather than as whatever
+/// error the killed process happened to produce.
+fn finish_operation<T>(
+    scope: &OperationScope,
+    joined: Result<Result<T, String>, String>,
+) -> Result<T, String> {
+    match joined {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) | Err(error) => {
+            if scope.is_cancelled() {
+                Err(CANCELLED_MESSAGE.to_string())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+const CANCELLED_MESSAGE: &str = "Stopped.";
+
+fn busy_operation(app: &AppHandle, machine_id: &str) -> Result<Option<String>, String> {
+    let state = app.state::<AppState>();
+    let busy = state
+        .busy_machines
+        .lock()
+        .map_err(|_| "The machine operation registry is poisoned.".to_string())?;
+
+    Ok(busy.get(machine_id).map(|label| (*label).to_string()))
+}
+
+fn emit_machine_progress<T: Serialize + Clone>(
+    app: &AppHandle,
+    event: &str,
+    machine_id: &str,
+    progress: T,
+) {
+    let _ = app.emit(
+        event,
+        MachineProgressEvent {
+            machine_id: machine_id.to_string(),
+            progress,
+        },
+    );
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MachineProgressEvent<T: Serialize> {
+    machine_id: String,
+    #[serde(flatten)]
+    progress: T,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MachineChangedEvent {
+    pub(crate) machine_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfirmInput {
+    confirmed: bool,
+}
+
+/// What a machine can do about signing, including the state left behind when the host's
+/// credential vault is cleared while the guest keeps its provisioned keychain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SigningHealth {
+    /// No kit resolved, and none has been used on this machine before.
+    Unconfigured,
+    /// A kit is resolved and holds everything provisioning needs.
+    Ready,
+    /// A kit is resolved but is missing a certificate, profile or password.
+    Incomplete,
+    /// This machine has provisioned signing, but no kit remains in the vault.
+    KitMissing,
+    /// The credential vault itself could not be read.
+    VaultUnavailable,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MachineSummary {
+    id: String,
+    config: MacBuilderConfig,
+    created_at_epoch_seconds: u64,
+    state: ContainerState,
+    container_id: Option<String>,
+    busy_operation: Option<String>,
+    guest_configured: bool,
+    trust_pinned: bool,
+    workspace_name: Option<String>,
+    signing_kit_name: Option<String>,
+    signing_provisioned: bool,
+    signing_identity: Option<String>,
+    archive_retained: bool,
+    env_set_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MachineListView {
+    host: HostPrerequisites,
+    machines: Vec<MachineSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +288,8 @@ struct StoredConfig {
 #[serde(rename_all = "camelCase")]
 struct DesktopStatus {
     paired: bool,
+    /// A runner is configured on this host but its token is gone from the vault: pair again.
+    credentials_missing: bool,
     server_url: Option<String>,
     runner_id: Option<String>,
     runner_name: Option<String>,
@@ -74,9 +321,17 @@ struct RunOnceResult {
     message: String,
 }
 
+/// One named set of Apple signing material, held in the operating-system vault.
+///
+/// A host can hold several: one per developer team or per app. A machine is attached to one
+/// kit, and provisioning imports that kit's identity into that machine's guest keychain.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct StoredMacBuilderSecrets {
+struct StoredSigningKit {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
     app_store_connect_key_id: Option<String>,
     app_store_connect_issuer_id: Option<String>,
     app_store_connect_private_key: Option<String>,
@@ -84,11 +339,23 @@ struct StoredMacBuilderSecrets {
     signing_certificate_password: Option<String>,
     provisioning_profile_paths: Vec<String>,
     guest_keychain_password: Option<String>,
+    #[serde(default)]
+    created_at_epoch_seconds: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredSigningKits {
+    #[serde(default)]
+    kits: Vec<StoredSigningKit>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct MacBuilderSecretsInput {
+struct SigningKitInput {
+    /// Absent creates a kit; present updates that kit in place.
+    kit_id: Option<String>,
+    name: String,
     app_store_connect_key_id: String,
     app_store_connect_issuer_id: String,
     app_store_connect_private_key_path: String,
@@ -98,15 +365,29 @@ struct MacBuilderSecretsInput {
     guest_keychain_password: String,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct MacBuilderSecretSummary {
+struct AttachSigningKitInput {
+    /// Null detaches the machine from every kit.
+    kit_id: Option<String>,
+}
+
+/// Everything about a kit that is safe to show: names and counts, never a secret value.
+#[derive(Debug, Default, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SigningKitSummary {
+    id: String,
+    name: String,
     app_store_connect_configured: bool,
     app_store_connect_key_id: Option<String>,
     signing_certificate_configured: bool,
     signing_certificate_name: Option<String>,
-    provisioning_profile_count: usize,
+    signing_certificate_password_stored: bool,
+    provisioning_profile_names: Vec<String>,
     guest_keychain_configured: bool,
+    created_at_epoch_seconds: u64,
+    /// Machines currently attached to this kit, by display name.
+    attached_machines: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,13 +397,122 @@ struct CreateAppleProfileInput {
     confirmed: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateAppleCertificateInput {
+    confirmed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateAppleCertificateResult {
+    certificate: apple_api::AppleCertificateSummary,
+    saved_path: String,
+    kit: SigningKitSummary,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadAppleProfileResult {
+    profile: apple_api::AppleProvisioningProfileSummary,
+    saved_path: String,
+    kit: SigningKitSummary,
+}
+
+/// One named set of environment variables for a build, held in the host's vault like a signing
+/// kit and attached per machine. A plain variable's value is shown back in the interface; a
+/// secret's is left out of every summary and comes back only to the editor, on request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredEnvVariable {
+    key: String,
+    value: String,
+    /// Masked in the interface and left out of every summary; `reveal_env_secrets` hands a set's
+    /// secrets to the editor on request. Sets stored before the distinction existed were promised
+    /// their values would not be shown, so a missing flag reads as a secret.
+    #[serde(default = "stored_as_secret")]
+    secret: bool,
+}
+
+fn stored_as_secret() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredEnvSet {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    variables: Vec<StoredEnvVariable>,
+    #[serde(default)]
+    created_at_epoch_seconds: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredEnvSets {
+    #[serde(default)]
+    sets: Vec<StoredEnvSet>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvVariableInput {
+    key: String,
+    /// `None` keeps the value already stored under this key.
+    value: Option<String>,
+    /// Masked in the interface and left out of every summary once stored.
+    secret: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvSetInput {
+    /// Absent creates a set; present updates that set in place.
+    set_id: Option<String>,
+    name: String,
+    /// The complete variable list: a stored key that is not listed is removed.
+    variables: Vec<EnvVariableInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AttachEnvSetInput {
+    /// Null detaches the machine from every set.
+    set_id: Option<String>,
+}
+
+/// One variable as the interface shows it, value included.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvVariableSummary {
+    key: String,
+    value: String,
+}
+
+/// An env set as the interface may show it: plain variables with their values, secrets by key.
+#[derive(Debug, Default, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvSetSummary {
+    id: String,
+    name: String,
+    variables: Vec<EnvVariableSummary>,
+    /// Their values are left out; `reveal_env_secrets` hands them to the editor on request.
+    secret_keys: Vec<String>,
+    created_at_epoch_seconds: u64,
+    attached_machines: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateAppleProfileResult {
     profile: apple_api::AppleProvisioningProfileSummary,
     certificate: apple_api::AppleCertificateSummary,
     saved_path: String,
-    secrets: MacBuilderSecretSummary,
+    kit: SigningKitSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +525,23 @@ struct StoredMacGuestAccess {
 #[serde(rename_all = "camelCase")]
 struct MacGuestAccessInput {
     username: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthorizeMacGuestKeyInput {
+    username: String,
+    password: String,
+}
+
+impl std::fmt::Debug for AuthorizeMacGuestKeyInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthorizeMacGuestKeyInput")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,6 +580,29 @@ struct StoredAppleWorkspace {
     last_xcode_version: Option<String>,
     #[serde(default)]
     last_native_lock_updated: bool,
+    /// What the last snapshot was taken from: the approved folder as it was, or a checked-out
+    /// revision of it requested by a remote build.
+    #[serde(default)]
+    last_source: Option<WorkspaceSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceSource {
+    /// `folder` or `git`.
+    kind: String,
+    git_ref: Option<String>,
+    commit: Option<String>,
+}
+
+impl WorkspaceSource {
+    fn folder() -> Self {
+        Self {
+            kind: "folder".to_string(),
+            git_ref: None,
+            commit: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,6 +619,9 @@ struct StoredAppleArchive {
     snapshot_sha256: String,
     signing_certificate_sha256: String,
     result: AppleArchiveResult,
+    /// The env set the web assets were built with, if the build chose one.
+    #[serde(default)]
+    env_set_name: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -203,13 +636,23 @@ struct MacGuestAccessView {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MacBuilderView {
-    profile: Option<MacBuilderConfig>,
+    machine_id: String,
+    profile: MacBuilderConfig,
+    busy_operation: Option<String>,
     runtime: RuntimeStatus,
-    secrets: MacBuilderSecretSummary,
+    /// The signing kit this machine will provision, resolved through its attachment.
+    signing_kit: Option<SigningKitSummary>,
+    /// The env set written into the guest workspace at sync, if one is attached.
+    env_set: Option<EnvSetSummary>,
+    signing_health: SigningHealth,
+    /// Why the credential vault could not be read, when that is the problem.
+    vault_issue: Option<String>,
     guest: MacGuestAccessView,
     apple_workspace: Option<StoredAppleWorkspace>,
     signing: Option<SigningProvisioningResult>,
     archive: Option<AppleArchiveResult>,
+    /// The env set the retained archive was built with, if any.
+    archive_env_set: Option<String>,
     archive_error: Option<String>,
     logs: Vec<String>,
 }
@@ -248,6 +691,8 @@ struct RunAppleArchiveResult {
 enum RunState {
     Idle,
     Completed,
+    /// The build ran and was reported, but did not succeed.
+    Failed,
     Busy,
 }
 
@@ -261,6 +706,9 @@ async fn get_runner_status(app: AppHandle) -> Result<DesktopStatus, String> {
 
     Ok(DesktopStatus {
         paired,
+        // Configuration without a token is the shape a cleared keyring leaves behind. Saying
+        // "not paired" there would send someone looking for a pairing code they already used.
+        credentials_missing: config.is_some() && !paired,
         server_url: config.as_ref().map(|value| value.server_url.clone()),
         runner_id: config.as_ref().map(|value| value.runner_id.clone()),
         runner_name: config.as_ref().map(|value| value.runner_name.clone()),
@@ -343,13 +791,25 @@ async fn authorize_realtime(
 }
 
 #[tauri::command]
-async fn heartbeat_runner(app: AppHandle) -> Result<(), String> {
+async fn heartbeat_runner(app: AppHandle) -> Result<HeartbeatSummary, String> {
     let (_, client) = paired_client(&app).await?;
 
-    client
-        .heartbeat(&heartbeat_request())
+    let response = client
+        .heartbeat(&heartbeat_request(&app).await)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+    Ok(HeartbeatSummary {
+        queued_builds: response.queued_builds,
+    })
+}
+
+/// The part of a heartbeat reply the interface acts on.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HeartbeatSummary {
+    /// Work waiting for this runner. Non-zero means a queue event was missed; claim now.
+    queued_builds: u64,
 }
 
 #[tauri::command]
@@ -372,7 +832,7 @@ async fn run_once_inner(app: &AppHandle) -> Result<RunOnceResult, String> {
     let (_, client) = paired_client(app).await?;
 
     client
-        .heartbeat(&heartbeat_request())
+        .heartbeat(&heartbeat_request(app).await)
         .await
         .map_err(|error| error.to_string())?;
 
@@ -384,11 +844,16 @@ async fn run_once_inner(app: &AppHandle) -> Result<RunOnceResult, String> {
         });
     };
 
-    let execution = execute(&build);
+    // The runner crate runs what it can by itself; anything that needs a managed machine is
+    // executed here, where the machines live.
+    let Some(execution) = execute(&build) else {
+        return execute_apple_archive_build(app, &client, &build).await;
+    };
     client
         .append_logs(&build.id, execution.logs)
         .await
         .map_err(|error| error.to_string())?;
+    let succeeded = execution.status == CompletionStatus::Succeeded;
     client
         .complete(
             &build.id,
@@ -396,119 +861,1226 @@ async fn run_once_inner(app: &AppHandle) -> Result<RunOnceResult, String> {
                 status: execution.status,
                 exit_code: Some(execution.exit_code),
                 error: execution.error,
+                result: None,
             },
         )
         .await
         .map_err(|error| error.to_string())?;
 
     Ok(RunOnceResult {
-        state: RunState::Completed,
+        state: if succeeded {
+            RunState::Completed
+        } else {
+            RunState::Failed
+        },
         build_id: Some(build.id),
         message: "Build completed and reported to the control plane.".to_string(),
     })
 }
 
+/// How often buffered log lines are sent, and how many of those intervals pass between lease
+/// renewals. Two minutes is the lease; renewing every minute leaves room for a slow request.
+const LOG_PUMP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+const LEASE_RENEWAL_TICKS: u32 = 30;
+
+/// Turns what a machine reports to the desktop's own interface into control-plane log lines.
+/// Every progress event the archive pipeline emits is observed here, so the remote log is the
+/// same story the Build tab tells, in the same order.
+struct LogForwarder {
+    pending: Vec<BuildLogLine>,
+    next_sequence: u64,
+    last_phase: HashMap<String, String>,
+}
+
+impl LogForwarder {
+    fn new(next_sequence: u64) -> Self {
+        Self {
+            pending: Vec::new(),
+            next_sequence,
+            last_phase: HashMap::new(),
+        }
+    }
+
+    fn push(&mut self, stream: LogStream, message: impl Into<String>) {
+        self.pending.push(BuildLogLine {
+            sequence: self.next_sequence,
+            stream,
+            message: message.into(),
+        });
+        self.next_sequence += 1;
+    }
+
+    fn observe(&mut self, event: &str, payload: &serde_json::Value, machine_id: &str) {
+        if payload.get("machineId").and_then(serde_json::Value::as_str) != Some(machine_id) {
+            return;
+        }
+        let Some(progress) = payload.get("progress") else {
+            return;
+        };
+        let phase = progress
+            .get("phase")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if !phase.is_empty() && self.last_phase.get(event) != Some(&phase) {
+            self.last_phase.insert(event.to_string(), phase.clone());
+            let detail = progress
+                .get("detail")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            self.push(
+                LogStream::System,
+                format!("[{}] {detail}", phase.replace('_', " "))
+                    .trim_end()
+                    .to_string(),
+            );
+        }
+        let line = progress
+            .get("logLine")
+            .or_else(|| progress.get("log_line"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if !line.trim().is_empty() {
+            self.push(LogStream::Stdout, line);
+        }
+    }
+
+    fn take(&mut self) -> Vec<BuildLogLine> {
+        std::mem::take(&mut self.pending)
+    }
+}
+
+/// Sends buffered lines every couple of seconds and keeps the lease alive, on a plain thread so
+/// it runs regardless of what the archive pipeline is blocking on. Returns the first failure.
+fn spawn_log_pump(
+    client: ApiClient,
+    build_id: String,
+    forwarder: Arc<Mutex<LogForwarder>>,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<Option<String>> {
+    std::thread::spawn(move || {
+        let mut ticks: u32 = 0;
+        let mut failure: Option<String> = None;
+        loop {
+            let stopping = stop.load(Ordering::Acquire);
+            let lines = forwarder
+                .lock()
+                .map(|mut forwarder| forwarder.take())
+                .unwrap_or_default();
+            if !lines.is_empty()
+                && let Err(error) =
+                    tauri::async_runtime::block_on(client.append_logs(&build_id, lines))
+            {
+                failure.get_or_insert(format!("log forwarding failed: {error}"));
+            }
+            if stopping {
+                break;
+            }
+            ticks += 1;
+            if ticks.is_multiple_of(LEASE_RENEWAL_TICKS)
+                && let Err(error) = tauri::async_runtime::block_on(client.renew_lease(&build_id))
+            {
+                failure.get_or_insert(format!("lease renewal failed: {error}"));
+            }
+            std::thread::sleep(LOG_PUMP_INTERVAL);
+        }
+        failure
+    })
+}
+
+/// Runs a claimed `apple_archive` build on one of this host's machines and reports it.
+async fn execute_apple_archive_build(
+    app: &AppHandle,
+    client: &ApiClient,
+    build: &ClaimedBuild,
+) -> Result<RunOnceResult, String> {
+    let payload = AppleArchivePayload::from_value(&build.payload)?;
+    let forwarder = Arc::new(Mutex::new(LogForwarder::new(build.next_log_sequence)));
+    let stop = Arc::new(AtomicBool::new(false));
+    let pump = spawn_log_pump(
+        client.clone(),
+        build.id.clone(),
+        Arc::clone(&forwarder),
+        Arc::clone(&stop),
+    );
+
+    // The pipeline emits the same events the Build tab listens to; forward them as the log.
+    let listeners: Vec<tauri::EventId> = [PROJECT_PROGRESS_EVENT, ARCHIVE_PROGRESS_EVENT]
+        .into_iter()
+        .map(|event| {
+            let forwarder = Arc::clone(&forwarder);
+            let machine_id = payload.machine_id.clone();
+            app.listen(event, move |emitted| {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(emitted.payload())
+                    && let Ok(mut forwarder) = forwarder.lock()
+                {
+                    forwarder.observe(event, &value, &machine_id);
+                }
+            })
+        })
+        .collect();
+
+    let outcome = run_remote_apple_archive(app, &payload, &forwarder).await;
+    let env_set_name = match payload.env_set.clone() {
+        Some(name) => Some(name),
+        None => match attached_env_set_id(app, &payload.machine_id) {
+            Ok(Some(id)) => read_env_sets()
+                .await
+                .ok()
+                .and_then(|stored| stored.sets.into_iter().find(|set| set.id == id))
+                .map(|set| set.name),
+            _ => None,
+        },
+    };
+
+    for id in listeners {
+        app.unlisten(id);
+    }
+    if let Err(error) = &outcome
+        && let Ok(mut forwarder) = forwarder.lock()
+    {
+        forwarder.push(LogStream::Stderr, error.clone());
+    }
+    stop.store(true, Ordering::Release);
+    let pump_failure = pump.join().ok().flatten();
+
+    let request = match &outcome {
+        Ok(archive) => CompleteBuildRequest {
+            status: CompletionStatus::Succeeded,
+            exit_code: Some(0),
+            error: pump_failure,
+            result: Some(archive_result_json(archive, env_set_name.as_deref())),
+        },
+        Err(error) => CompleteBuildRequest {
+            status: CompletionStatus::Failed,
+            exit_code: Some(1),
+            error: Some(error.clone()),
+            result: None,
+        },
+    };
+    client
+        .complete(&build.id, &request)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    Ok(match outcome {
+        Ok(archive) => RunOnceResult {
+            state: RunState::Completed,
+            build_id: Some(build.id.clone()),
+            message: format!(
+                "Signed archive {} ({}) built and reported to the control plane.",
+                archive.marketing_version, archive.build_number
+            ),
+        },
+        Err(error) => RunOnceResult {
+            state: RunState::Failed,
+            build_id: Some(build.id.clone()),
+            message: format!("Signed archive failed: {error}"),
+        },
+    })
+}
+
+/// The remote pipeline is the Build tab's own steps in order — synchronize, test build, signed
+/// archive — on the approved folder or on a fetched revision of the same project.
+async fn run_remote_apple_archive(
+    app: &AppHandle,
+    payload: &AppleArchivePayload,
+    forwarder: &Arc<Mutex<LogForwarder>>,
+) -> Result<AppleArchiveResult, String> {
+    let log = |stream: LogStream, message: String| {
+        if let Ok(mut forwarder) = forwarder.lock() {
+            forwarder.push(stream, message);
+        }
+    };
+    let machine = machines::load_registry(app)?
+        .find(&payload.machine_id)?
+        .clone();
+    let paths = MachinePaths::resolve(app, &payload.machine_id)?;
+    let approved = load_apple_workspace(&paths)?.ok_or_else(|| {
+        "No project is approved on this machine. Approve one in the desktop first.".to_string()
+    })?;
+    log(
+        LogStream::System,
+        format!(
+            "BuildBridge {} · signed archive of {} on {}",
+            env!("CARGO_PKG_VERSION"),
+            approved.name,
+            machine.config.name
+        ),
+    );
+
+    let source = match payload.git_ref.as_deref() {
+        Some(git_ref) => {
+            let remote = project_remote_url(&approved.local_path).ok_or_else(|| {
+                "The approved project has no git remote, so only its folder as-is can be built."
+                    .to_string()
+            })?;
+            log(
+                LogStream::System,
+                format!("$ git fetch {} {git_ref}", redact_remote(&remote)),
+            );
+            let checkout = paths.checkout_dir();
+            let fetch_ref = git_ref.to_string();
+            let fetch_dir = checkout.clone();
+            let commit = tauri::async_runtime::spawn_blocking(move || {
+                checkout_project_ref(&remote, &fetch_ref, &fetch_dir)
+            })
+            .await
+            .map_err(|error| error.to_string())??;
+            log(
+                LogStream::System,
+                format!("Checked out {git_ref} at {commit}"),
+            );
+
+            let inspected = inspect_apple_workspace(&checkout.to_string_lossy())?;
+            if inspected.bundle_identifier != approved.bundle_identifier
+                || inspected.development_team != approved.development_team
+            {
+                return Err(
+                    "That revision targets a different bundle identifier or team than the approved project, so the provisioned signing would not match it."
+                        .to_string(),
+                );
+            }
+            Some((
+                checkout,
+                WorkspaceSource {
+                    kind: "git".to_string(),
+                    git_ref: Some(git_ref.to_string()),
+                    commit: Some(commit),
+                },
+            ))
+        }
+        None => None,
+    };
+
+    // A remote build names a set; the runner only ever builds with a set it already holds.
+    let env_set_id = match payload.env_set.as_deref() {
+        Some(name) => Some(
+            read_env_sets()
+                .await?
+                .sets
+                .into_iter()
+                .find(|set| set.name == name)
+                .map(|set| set.id)
+                .ok_or_else(|| format!("No env set named {name} is stored on this host."))?,
+        ),
+        None => attached_env_set_id(app, &payload.machine_id)?,
+    };
+    log(
+        LogStream::System,
+        match &env_set_id {
+            Some(_) => format!(
+                "Env set: {}",
+                payload
+                    .env_set
+                    .clone()
+                    .unwrap_or_else(|| "attached to the machine".to_string())
+            ),
+            None => "Env set: none".to_string(),
+        },
+    );
+
+    sync_apple_workspace_from(app, &payload.machine_id, source).await?;
+    run_apple_smoke_build(app.clone(), payload.machine_id.clone()).await?;
+    let archived =
+        run_apple_signed_archive(app.clone(), payload.machine_id.clone(), env_set_id).await?;
+
+    Ok(archived.archive)
+}
+
+/// What the control plane keeps about a finished archive: names, sizes and checksums. The files
+/// themselves stay on this host.
+fn archive_result_json(archive: &AppleArchiveResult, env_set: Option<&str>) -> serde_json::Value {
+    let artifact = |artifact: &AppleArchiveArtifact| {
+        serde_json::json!({
+            "name": std::path::Path::new(&artifact.path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| artifact.path.clone()),
+            "bytes": artifact.bytes,
+            "sha256": artifact.sha256,
+        })
+    };
+
+    serde_json::json!({
+        "version": archive.marketing_version,
+        "build_number": archive.build_number,
+        "bundle_identifier": archive.bundle_identifier,
+        "scheme": archive.scheme,
+        "export_method": archive.export_method,
+        "env_set": env_set,
+        "artifacts": [artifact(&archive.ipa), artifact(&archive.archive)],
+    })
+}
+
 #[tauri::command]
-async fn get_mac_builder_status(app: AppHandle) -> Result<MacBuilderView, String> {
-    build_mac_builder_view(&app).await
+async fn list_machines(app: AppHandle) -> Result<MachineListView, String> {
+    build_machine_list_view(&app).await
+}
+
+#[tauri::command]
+async fn create_machine(
+    app: AppHandle,
+    profile: MacBuilderConfig,
+) -> Result<MachineListView, String> {
+    profile.validate().map_err(|error| error.to_string())?;
+    let mut registry = machines::load_registry(&app)?;
+    if registry.machines.len() >= machines::MAX_MACHINES {
+        return Err(format!(
+            "BuildBridge manages at most {} machines on one host.",
+            machines::MAX_MACHINES
+        ));
+    }
+    registry.ensure_unique_ssh_port(&profile, None)?;
+    let existing = registry
+        .machines
+        .iter()
+        .map(|machine| machine.id.as_str())
+        .collect::<Vec<_>>();
+    let id = machines::machine_id_from_name(&profile.name, &existing);
+    // Nothing is attached on creation: which kit signs, and which env a build runs with, are
+    // choices the machine page asks for.
+    registry.machines.push(StoredMachine {
+        id,
+        config: profile,
+        created_at_epoch_seconds: machines::now_epoch_seconds(),
+        signing_kit_id: None,
+        env_set_id: None,
+    });
+    machines::save_registry(&app, &registry)?;
+    tray::refresh(&app);
+
+    build_machine_list_view(&app).await
+}
+
+#[tauri::command]
+async fn delete_machine(
+    app: AppHandle,
+    machine_id: String,
+    input: ConfirmInput,
+) -> Result<MachineListView, String> {
+    if !input.confirmed {
+        return Err("Confirm the machine deletion before continuing.".to_string());
+    }
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let mut registry = machines::load_registry(&app)?;
+    let index = registry.position(&machine_id)?;
+    let guard = begin_machine_operation(&app, &machine_id, "deleting")?;
+    let container_name = paths.container_name.clone();
+    let scope = guard.scope();
+    let removal = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        let runtime =
+            buildbridge_docker_osx::status(&container_name).map_err(|error| error.to_string())?;
+        if is_live(runtime.state) {
+            return Err("Stop the machine before deleting it.".to_string());
+        }
+        buildbridge_docker_osx::remove(&container_name).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string());
+    let removal = removal.and_then(|result| result.map(|_| ()));
+    if let Err(error) = removal {
+        drop(guard);
+        return Err(error);
+    }
+    paths.remove_machine_files()?;
+    registry.machines.remove(index);
+    machines::save_registry(&app, &registry)?;
+    drop(guard);
+    tray::refresh(&app);
+
+    build_machine_list_view(&app).await
+}
+
+#[tauri::command]
+async fn discard_machine_container(
+    app: AppHandle,
+    machine_id: String,
+    input: ConfirmInput,
+) -> Result<MacBuilderView, String> {
+    if !input.confirmed {
+        return Err("Confirm discarding the macOS disk before continuing.".to_string());
+    }
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    machines::load_registry(&app)?.find(&machine_id)?;
+    let guard = begin_machine_operation(&app, &machine_id, "discarding")?;
+    let container_name = paths.container_name.clone();
+    let scope = guard.scope();
+    let removal = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        buildbridge_docker_osx::remove(&container_name).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())
+    .and_then(|result| result.map(|_| ()));
+    if let Err(error) = removal {
+        drop(guard);
+        return Err(error);
+    }
+    remove_file_if_present(&paths.known_hosts())?;
+    remove_signing_provisioning_record(&paths)?;
+    drop(guard);
+    tray::refresh(&app);
+
+    build_mac_builder_view(&app, &paths).await
+}
+
+#[tauri::command]
+async fn get_mac_builder_status(
+    app: AppHandle,
+    machine_id: String,
+) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+
+    build_mac_builder_view(&app, &paths).await
 }
 
 #[tauri::command]
 async fn configure_mac_builder(
     app: AppHandle,
+    machine_id: String,
     profile: MacBuilderConfig,
 ) -> Result<MacBuilderView, String> {
     profile.validate().map_err(|error| error.to_string())?;
-    ensure_mac_builder_profile_can_change(&app, &profile).await?;
-    save_mac_builder_config(&app, &profile)?;
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let mut registry = machines::load_registry(&app)?;
+    let index = registry.position(&machine_id)?;
+    registry.ensure_unique_ssh_port(&profile, Some(&machine_id))?;
+    ensure_mac_builder_profile_can_change(&paths, &registry.machines[index].config, &profile)
+        .await?;
+    registry.machines[index].config = profile;
+    machines::save_registry(&app, &registry)?;
+    tray::refresh(&app);
 
-    build_mac_builder_view(&app).await
+    build_mac_builder_view(&app, &paths).await
 }
 
 #[tauri::command]
-async fn launch_mac_builder(
-    state: State<'_, AppState>,
-    app: AppHandle,
-    profile: MacBuilderConfig,
-) -> Result<MacBuilderView, String> {
-    profile.validate().map_err(|error| error.to_string())?;
-    ensure_mac_builder_profile_can_change(&app, &profile).await?;
-    save_mac_builder_config(&app, &profile)?;
-    let identity_path = mac_builder_identity_path(&app)?;
-
-    if state.builder_running.swap(true, Ordering::AcqRel) {
-        return Err("A macOS builder operation is already running.".to_string());
-    }
-
+async fn launch_mac_builder(app: AppHandle, machine_id: String) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let guard = begin_machine_operation(&app, &machine_id, "starting")?;
+    let identity_path = paths.identity();
+    let container_name = paths.container_name.clone();
+    let event_app = app.clone();
+    let event_machine_id = machine_id.clone();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
     let joined = tauri::async_runtime::spawn_blocking(move || {
-        buildbridge_docker_osx::launch(&profile, &identity_path).map_err(|error| error.to_string())
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        buildbridge_docker_osx::launch(&container_name, &profile, &identity_path, |progress| {
+            emit_machine_progress(
+                &event_app,
+                LAUNCH_PROGRESS_EVENT,
+                &event_machine_id,
+                progress,
+            );
+        })
+        .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string());
-    state.builder_running.store(false, Ordering::Release);
-    let result = joined?;
-    result?;
+    drop(guard);
+    finish_operation(&cancel_probe, joined)?;
     tray::refresh(&app);
 
-    build_mac_builder_view(&app).await
+    build_mac_builder_view(&app, &paths).await
 }
 
 #[tauri::command]
-async fn stop_mac_builder(
-    state: State<'_, AppState>,
+async fn stop_mac_builder(app: AppHandle, machine_id: String) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    machines::load_registry(&app)?.find(&machine_id)?;
+    let guard = begin_machine_operation(&app, &machine_id, "stopping")?;
+    let container_name = paths.container_name.clone();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        buildbridge_docker_osx::stop(&container_name).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string());
+    drop(guard);
+    finish_operation(&cancel_probe, joined)?;
+    tray::refresh(&app);
+
+    build_mac_builder_view(&app, &paths).await
+}
+
+#[tauri::command]
+async fn save_signing_kit(
     app: AppHandle,
-) -> Result<MacBuilderView, String> {
-    if state.builder_running.swap(true, Ordering::AcqRel) {
-        return Err("A macOS builder operation is already running.".to_string());
+    input: SigningKitInput,
+) -> Result<Vec<SigningKitSummary>, String> {
+    let requested_id = input.kit_id.clone();
+    let incoming = normalize_signing_kit(input)?;
+    let mut kits = read_signing_kits().await?;
+
+    match requested_id {
+        Some(id) => {
+            let existing = kits
+                .kits
+                .iter()
+                .find(|kit| kit.id == id)
+                .cloned()
+                .ok_or_else(|| "This signing kit is no longer stored.".to_string())?;
+            let merged = merge_signing_kit(existing, incoming);
+            if let Some(stored) = kits.kits.iter_mut().find(|kit| kit.id == id) {
+                *stored = merged;
+            }
+        }
+        None => {
+            if kits.kits.len() >= MAX_SIGNING_KITS {
+                return Err(format!(
+                    "BuildBridge stores at most {MAX_SIGNING_KITS} signing kits."
+                ));
+            }
+            let existing_ids = kits
+                .kits
+                .iter()
+                .map(|kit| kit.id.as_str())
+                .collect::<Vec<_>>();
+            let created = StoredSigningKit {
+                id: machines::machine_id_from_name(&incoming.name, &existing_ids),
+                created_at_epoch_seconds: machines::now_epoch_seconds(),
+                ..incoming
+            };
+            kits.kits.push(created);
+        }
     }
 
-    let joined = tauri::async_runtime::spawn_blocking(|| {
-        buildbridge_docker_osx::stop().map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string());
-    state.builder_running.store(false, Ordering::Release);
-    let result = joined?;
-    result?;
-    tray::refresh(&app);
+    write_signing_kits(kits).await?;
 
-    build_mac_builder_view(&app).await
+    list_signing_kits(app).await
 }
 
 #[tauri::command]
-async fn save_mac_builder_secrets(
-    input: MacBuilderSecretsInput,
-) -> Result<MacBuilderSecretSummary, String> {
-    let incoming = normalize_mac_builder_secrets(input)?;
-    let existing = read_mac_builder_secrets().await?.unwrap_or_default();
-    let secrets = merge_mac_builder_secrets(existing, incoming);
-    let summary = summarize_mac_builder_secrets(&secrets);
-    store_mac_builder_secrets(secrets).await?;
+async fn list_signing_kits(app: AppHandle) -> Result<Vec<SigningKitSummary>, String> {
+    let kits = read_signing_kits().await?.kits;
+    let registry = machines::load_registry(&app)?;
 
-    Ok(summary)
+    Ok(kits
+        .iter()
+        .map(|kit| {
+            let mut summary = summarize_signing_kit(kit);
+            summary.attached_machines = registry
+                .machines
+                .iter()
+                .filter(|machine| machine.signing_kit_id.as_deref() == Some(kit.id.as_str()))
+                .map(|machine| machine.config.name.clone())
+                .collect();
+
+            summary
+        })
+        .collect())
 }
 
 #[tauri::command]
-async fn clear_mac_builder_secrets(app: AppHandle) -> Result<MacBuilderSecretSummary, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let entry = mac_builder_credential_entry()?;
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(error.to_string()),
+async fn delete_signing_kit(
+    app: AppHandle,
+    kit_id: String,
+    input: ConfirmInput,
+) -> Result<Vec<SigningKitSummary>, String> {
+    if !input.confirmed {
+        return Err("Confirm removing the signing kit before continuing.".to_string());
+    }
+    let mut kits = read_signing_kits().await?;
+    let index = kits
+        .kits
+        .iter()
+        .position(|kit| kit.id == kit_id)
+        .ok_or_else(|| "This signing kit is no longer stored.".to_string())?;
+    let removed = kits.kits.remove(index);
+    write_signing_kits(kits).await?;
+    remove_managed_profiles_for(&app, &removed)?;
+    remove_managed_certificate_for(&app, &removed)?;
+
+    let mut registry = machines::load_registry(&app)?;
+    let mut detached = false;
+    for machine in &mut registry.machines {
+        if machine.signing_kit_id.as_deref() == Some(kit_id.as_str()) {
+            machine.signing_kit_id = None;
+            detached = true;
         }
+    }
+    if detached {
+        machines::save_registry(&app, &registry)?;
+    }
+
+    list_signing_kits(app).await
+}
+
+#[tauri::command]
+async fn attach_signing_kit(
+    app: AppHandle,
+    machine_id: String,
+    input: AttachSigningKitInput,
+) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    if let Some(id) = input.kit_id.as_deref() {
+        let stored = read_signing_kits().await?;
+        if !stored.kits.iter().any(|kit| kit.id == id) {
+            return Err("This signing kit is no longer stored.".to_string());
+        }
+    }
+    let mut registry = machines::load_registry(&app)?;
+    let index = registry.position(&machine_id)?;
+    registry.machines[index].signing_kit_id = input.kit_id;
+    machines::save_registry(&app, &registry)?;
+
+    build_mac_builder_view(&app, &paths).await
+}
+
+/// Creates an Apple Distribution identity for a kit without a Mac anywhere: the private key is
+/// generated on this host, Apple signs a CSR for it through the kit's Team key, and the result is
+/// packaged as a `.p12` straight into the kit. Nothing at Apple is revoked or replaced.
+#[tauri::command]
+async fn create_apple_distribution_certificate(
+    app: AppHandle,
+    kit_id: String,
+    input: CreateAppleCertificateInput,
+) -> Result<CreateAppleCertificateResult, String> {
+    if !input.confirmed {
+        return Err("Confirm the Apple certificate creation before continuing.".to_string());
+    }
+    let mut kit = read_signing_kits()
+        .await?
+        .kits
+        .into_iter()
+        .find(|kit| kit.id == kit_id)
+        .ok_or_else(|| "This signing kit is no longer stored.".to_string())?;
+    let key_id = kit.app_store_connect_key_id.clone().ok_or_else(|| {
+        "This kit has no App Store Connect key. Add one to the kit first; creating a certificate needs a Team key with the Admin role."
+            .to_string()
+    })?;
+    let issuer_id = kit
+        .app_store_connect_issuer_id
+        .clone()
+        .ok_or_else(|| "This kit has no App Store Connect Issuer ID.".to_string())?;
+    let private_key = kit
+        .app_store_connect_private_key
+        .clone()
+        .ok_or_else(|| "This kit has no App Store Connect .p8 key.".to_string())?;
+
+    let directory = managed_apple_certificates_dir(&app)?
+        .join(format!("distribution-{}", machines::now_epoch_seconds()));
+    let work = tauri::async_runtime::spawn_blocking({
+        let directory = directory.clone();
+        move || prepare_certificate_request(&directory)
     })
     .await
     .map_err(|error| error.to_string())??;
-    clear_managed_apple_profiles(&app)?;
 
-    Ok(MacBuilderSecretSummary::default())
+    let created = match apple_api::create_distribution_certificate(
+        &key_id,
+        &issuer_id,
+        &private_key,
+        &work.csr_pem,
+    )
+    .await
+    {
+        Ok(created) => created,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&directory);
+            return Err(error);
+        }
+    };
+
+    let packaged = tauri::async_runtime::spawn_blocking({
+        let directory = directory.clone();
+        let display_name = created.certificate.name.clone();
+        let content = created.content.clone();
+        move || package_certificate(&directory, &display_name, &content)
+    })
+    .await
+    .map_err(|error| error.to_string())
+    .and_then(|result| result)
+    .map_err(|error| {
+        let _ = fs::remove_dir_all(&directory);
+        format!(
+            "Apple issued certificate {}, but BuildBridge could not package it: {error}. Nothing at Apple was revoked; download it from the developer portal, or revoke it there and try again.",
+            created.certificate.name
+        )
+    })?;
+
+    kit.signing_certificate_path = Some(packaged.p12_path.clone());
+    kit.signing_certificate_password = Some(packaged.password);
+    save_signing_kit_record(kit.clone()).await.map_err(|error| {
+        format!(
+            "Apple issued certificate {} and it was packaged at {}, but BuildBridge could not update the kit in the OS vault: {error}. Nothing at Apple was revoked.",
+            created.certificate.name, packaged.p12_path
+        )
+    })?;
+
+    Ok(CreateAppleCertificateResult {
+        certificate: created.certificate,
+        saved_path: packaged.p12_path,
+        kit: summarize_signing_kit(&kit),
+    })
+}
+
+/// Where identities created here are kept: the `.p12` and Apple's `.cer`, owner-only.
+fn managed_apple_certificates_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|path| path.join("macos-builder").join("certificates"))
+        .map_err(|error| error.to_string())
+}
+
+struct CertificateRequestFiles {
+    csr_pem: String,
+}
+
+struct PackagedCertificate {
+    p12_path: String,
+    password: String,
+}
+
+/// Generates the private key and CSR on this host with fixed-argv OpenSSL. The key is written
+/// owner-only from OpenSSL's standard output rather than by OpenSSL itself, so it never exists
+/// with looser permissions even for an instant.
+fn prepare_certificate_request(
+    directory: &std::path::Path,
+) -> Result<CertificateRequestFiles, String> {
+    openssl(&["version"], None, None).map_err(|_| {
+        "OpenSSL is not installed on this host. Install the openssl package and try again."
+            .to_string()
+    })?;
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("Could not create the certificate directory: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("Could not protect the certificate directory: {error}"))?;
+    }
+
+    let key_pem = openssl(&certificate_key_args(), None, None)?;
+    let key_path = directory.join("key.pem");
+    write_restricted_file(&key_path, &key_pem)?;
+
+    let csr_pem = openssl(
+        &certificate_csr_args(&key_path.to_string_lossy()),
+        None,
+        None,
+    )?;
+    let csr_pem = String::from_utf8(csr_pem)
+        .map_err(|_| "OpenSSL produced an unreadable certificate request.".to_string())?;
+    if !apple_api::valid_csr_pem(&csr_pem) {
+        return Err("OpenSSL produced an unreadable certificate request.".to_string());
+    }
+
+    Ok(CertificateRequestFiles { csr_pem })
+}
+
+/// Packages Apple's certificate with the host key as a password-protected `.p12`, then removes
+/// the loose key and PEM. The password is generated here and handed to OpenSSL through the
+/// environment, never as an argument.
+fn package_certificate(
+    directory: &std::path::Path,
+    display_name: &str,
+    certificate_der: &[u8],
+) -> Result<PackagedCertificate, String> {
+    let key_path = directory.join("key.pem");
+    let cer_path = directory.join("certificate.cer");
+    let pem_path = directory.join("certificate.pem");
+    let p12_path = directory.join("distribution.p12");
+    write_restricted_file(&cer_path, certificate_der)?;
+
+    let certificate_pem = openssl(
+        &["x509", "-inform", "DER", "-in", &cer_path.to_string_lossy()],
+        None,
+        None,
+    )?;
+    write_restricted_file(&pem_path, &certificate_pem)?;
+
+    let password = String::from_utf8(openssl(&["rand", "-base64", "24"], None, None)?)
+        .map_err(|_| "OpenSSL produced an unreadable password.".to_string())?
+        .trim()
+        .to_string();
+    if password.len() < 24 {
+        return Err("OpenSSL produced an unusable password.".to_string());
+    }
+
+    let p12 = openssl(
+        &certificate_p12_args(
+            &key_path.to_string_lossy(),
+            &pem_path.to_string_lossy(),
+            display_name,
+        ),
+        None,
+        Some(("BUILDBRIDGE_P12_PASSWORD", &password)),
+    )?;
+    if p12.is_empty() {
+        return Err("OpenSSL produced an empty .p12.".to_string());
+    }
+    write_restricted_file(&p12_path, &p12)?;
+    remove_file_if_present(&key_path)?;
+    remove_file_if_present(&pem_path)?;
+
+    Ok(PackagedCertificate {
+        p12_path: p12_path.to_string_lossy().to_string(),
+        password,
+    })
+}
+
+fn certificate_key_args() -> Vec<String> {
+    [
+        "genpkey",
+        "-algorithm",
+        "RSA",
+        "-pkeyopt",
+        "rsa_keygen_bits:2048",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn certificate_csr_args(key_path: &str) -> Vec<String> {
+    [
+        "req",
+        "-new",
+        "-batch",
+        "-key",
+        key_path,
+        "-subj",
+        "/CN=BuildBridge Distribution",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn certificate_p12_args(key_path: &str, certificate_pem: &str, display_name: &str) -> Vec<String> {
+    [
+        "pkcs12",
+        "-export",
+        "-inkey",
+        key_path,
+        "-in",
+        certificate_pem,
+        "-name",
+        display_name,
+        "-passout",
+        "env:BUILDBRIDGE_P12_PASSWORD",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn openssl(
+    args: &[impl AsRef<str>],
+    stdin: Option<&[u8]>,
+    env: Option<(&str, &str)>,
+) -> Result<Vec<u8>, String> {
+    let mut command = Command::new("openssl");
+    command.args(args.iter().map(AsRef::as_ref));
+    command.stdin(if stdin.is_some() {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    });
+    if let Some((name, value)) = env {
+        command.env(name, value);
+    }
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Could not run openssl: {error}"))?;
+    if let (Some(bytes), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        use std::io::Write;
+        pipe.write_all(bytes)
+            .map_err(|error| format!("Could not feed openssl: {error}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("Could not finish openssl: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "openssl {} failed: {}",
+            args.first().map(AsRef::as_ref).unwrap_or("command"),
+            stderr.trim().lines().last().unwrap_or("no output")
+        ));
+    }
+
+    Ok(output.stdout)
+}
+
+/// One optimization as the interface shows it: the catalogue entry plus whether the guest
+/// already has it, when the guest can be asked.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GuestOptimizationView {
+    #[serde(flatten)]
+    optimization: &'static GuestOptimization,
+    /// `None` when the guest cannot be asked right now, or the check could not tell.
+    applied: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GuestOptimizationsView {
+    /// Whether the guest is reachable enough to check or apply anything.
+    available: bool,
+    reason: Option<String>,
+    items: Vec<GuestOptimizationView>,
+}
+
+/// Lists the catalogue with each item's current state on this machine's guest.
+#[tauri::command]
+async fn list_guest_optimizations(
+    app: AppHandle,
+    machine_id: String,
+) -> Result<GuestOptimizationsView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let view = build_mac_builder_view(&app, &paths).await?;
+    let guest_ready = view.runtime.state == ContainerState::Running
+        && view.guest.ssh.trust == GuestTrustState::Trusted
+        && view.guest.diagnostics.authenticated;
+    let catalogue = buildbridge_docker_osx::guest_optimizations();
+    if !guest_ready {
+        return Ok(GuestOptimizationsView {
+            available: false,
+            reason: Some(
+                "Start the machine, pin its identity and authorize the access key first."
+                    .to_string(),
+            ),
+            items: catalogue
+                .iter()
+                .map(|optimization| GuestOptimizationView {
+                    optimization,
+                    applied: None,
+                })
+                .collect(),
+        });
+    }
+
+    let access = load_mac_guest_access(&paths)?
+        .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
+    let ssh_port = view.profile.ssh_port;
+    let identity = paths.guest_identity();
+    let known_hosts = paths.known_hosts();
+    let states = tauri::async_runtime::spawn_blocking(move || {
+        buildbridge_docker_osx::check_guest_optimizations(
+            ssh_port,
+            &access.username,
+            &identity,
+            &known_hosts,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    Ok(GuestOptimizationsView {
+        available: true,
+        reason: None,
+        items: catalogue
+            .iter()
+            .map(|optimization| GuestOptimizationView {
+                optimization,
+                applied: states
+                    .iter()
+                    .find(|(id, _)| *id == optimization.id)
+                    .and_then(|(_, applied)| *applied),
+            })
+            .collect(),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplyOptimizationInput {
+    optimization_id: String,
+    confirmed: bool,
+}
+
+/// Applies one catalogue optimization to the guest. Admin items open the guest Terminal for
+/// the password; the operation is busy — and stoppable — until it returns.
+#[tauri::command]
+async fn apply_guest_optimization(
+    app: AppHandle,
+    machine_id: String,
+    input: ApplyOptimizationInput,
+) -> Result<GuestOptimizationsView, String> {
+    if !input.confirmed {
+        return Err("Confirm the optimization before applying it.".to_string());
+    }
+    let optimization = buildbridge_docker_osx::guest_optimization(&input.optimization_id)
+        .ok_or_else(|| "That optimization is not in the catalogue.".to_string())?;
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let view = build_mac_builder_view(&app, &paths).await?;
+    if view.runtime.state != ContainerState::Running {
+        return Err("Start the macOS machine first.".to_string());
+    }
+    if view.guest.ssh.trust != GuestTrustState::Trusted || !view.guest.diagnostics.authenticated {
+        return Err("Finish the pinned macOS guest connection first.".to_string());
+    }
+    let access = load_mac_guest_access(&paths)?
+        .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
+    let guard = begin_machine_operation(&app, &machine_id, "optimizing")?;
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
+    let ssh_port = view.profile.ssh_port;
+    let identity = paths.guest_identity();
+    let known_hosts = paths.known_hosts();
+    let optimization_id = optimization.id.to_string();
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        buildbridge_docker_osx::apply_guest_optimization(
+            ssh_port,
+            &access.username,
+            &identity,
+            &known_hosts,
+            &optimization_id,
+            |_elapsed| {},
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string());
+    drop(guard);
+    finish_operation(&cancel_probe, joined)?;
+
+    list_guest_optimizations(app, machine_id).await
+}
+
+#[tauri::command]
+async fn list_env_sets(app: AppHandle) -> Result<Vec<EnvSetSummary>, String> {
+    let sets = read_env_sets().await?.sets;
+    let registry = machines::load_registry(&app)?;
+
+    Ok(sets
+        .iter()
+        .map(|set| summarize_env_set(set, &registry.machines))
+        .collect())
+}
+
+#[tauri::command]
+async fn save_env_set(app: AppHandle, input: EnvSetInput) -> Result<Vec<EnvSetSummary>, String> {
+    let name = input.name.trim().to_string();
+    if name.is_empty() || name.len() > 60 {
+        return Err("Give the env set a name of up to 60 characters.".to_string());
+    }
+    let mut sets = read_env_sets().await?;
+
+    match input.set_id.clone() {
+        Some(id) => {
+            let index = sets
+                .sets
+                .iter()
+                .position(|set| set.id == id)
+                .ok_or_else(|| "This env set is no longer stored.".to_string())?;
+            let variables = merge_env_variables(Some(&sets.sets[index]), &input)?;
+            sets.sets[index].name = name;
+            sets.sets[index].variables = variables;
+        }
+        None => {
+            if sets.sets.len() >= MAX_ENV_SETS {
+                return Err(format!(
+                    "BuildBridge stores at most {MAX_ENV_SETS} env sets."
+                ));
+            }
+            let variables = merge_env_variables(None, &input)?;
+            let existing_ids = sets
+                .sets
+                .iter()
+                .map(|set| set.id.as_str())
+                .collect::<Vec<_>>();
+            sets.sets.push(StoredEnvSet {
+                id: machines::machine_id_from_name(&name, &existing_ids),
+                name,
+                variables,
+                created_at_epoch_seconds: machines::now_epoch_seconds(),
+            });
+        }
+    }
+
+    write_env_sets(sets).await?;
+
+    list_env_sets(app).await
+}
+
+#[tauri::command]
+async fn delete_env_set(
+    app: AppHandle,
+    set_id: String,
+    input: ConfirmInput,
+) -> Result<Vec<EnvSetSummary>, String> {
+    if !input.confirmed {
+        return Err("Confirm removing the env set before continuing.".to_string());
+    }
+    let mut sets = read_env_sets().await?;
+    let index = sets
+        .sets
+        .iter()
+        .position(|set| set.id == set_id)
+        .ok_or_else(|| "This env set is no longer stored.".to_string())?;
+    sets.sets.remove(index);
+    write_env_sets(sets).await?;
+
+    let mut registry = machines::load_registry(&app)?;
+    let mut detached = false;
+    for machine in &mut registry.machines {
+        if machine.env_set_id.as_deref() == Some(set_id.as_str()) {
+            machine.env_set_id = None;
+            detached = true;
+        }
+    }
+    if detached {
+        machines::save_registry(&app, &registry)?;
+    }
+
+    list_env_sets(app).await
+}
+
+#[tauri::command]
+async fn attach_env_set(
+    app: AppHandle,
+    machine_id: String,
+    input: AttachEnvSetInput,
+) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    if let Some(id) = input.set_id.as_deref() {
+        let stored = read_env_sets().await?;
+        if !stored.sets.iter().any(|set| set.id == id) {
+            return Err("This env set is no longer stored.".to_string());
+        }
+    }
+    let mut registry = machines::load_registry(&app)?;
+    let index = registry.position(&machine_id)?;
+    registry.machines[index].env_set_id = input.set_id;
+    machines::save_registry(&app, &registry)?;
+
+    build_mac_builder_view(&app, &paths).await
+}
+
+/// Every secret in one set with its value, for the editor to hold masked behind an eye icon. This
+/// is the only way a secret leaves the vault for the interface: by set, on request, and never
+/// inside a summary.
+#[tauri::command]
+async fn reveal_env_secrets(set_id: String) -> Result<Vec<EnvVariableSummary>, String> {
+    let stored = read_env_sets().await?;
+
+    stored_env_secrets(&stored, &set_id)
 }
 
 #[tauri::command]
 async fn verify_apple_developer_team(
     app: AppHandle,
+    machine_id: String,
 ) -> Result<apple_api::AppleTeamVerificationResult, String> {
-    let workspace = load_apple_workspace(&app)?.ok_or_else(|| {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let workspace = load_apple_workspace(&paths)?.ok_or_else(|| {
         "Approve an Apple project before verifying its developer team.".to_string()
     })?;
     let development_team = workspace.development_team.ok_or_else(|| {
@@ -518,9 +2090,7 @@ async fn verify_apple_developer_team(
         "BuildBridge could not detect PRODUCT_BUNDLE_IDENTIFIER in the approved project."
             .to_string()
     })?;
-    let secrets = read_mac_builder_secrets()
-        .await?
-        .ok_or_else(|| "Store an App Store Connect Team API key first.".to_string())?;
+    let secrets = resolve_signing_kit_for(&app, &machine_id).await?;
     let key_id = secrets.app_store_connect_key_id.ok_or_else(|| {
         "The stored signing kit does not include an App Store Connect Key ID.".to_string()
     })?;
@@ -544,6 +2114,7 @@ async fn verify_apple_developer_team(
 #[tauri::command]
 async fn create_apple_replacement_profile(
     app: AppHandle,
+    machine_id: String,
     input: CreateAppleProfileInput,
 ) -> Result<CreateAppleProfileResult, String> {
     if !input.confirmed {
@@ -552,21 +2123,19 @@ async fn create_apple_replacement_profile(
         );
     }
 
-    let workspace = load_apple_workspace(&app)?.ok_or_else(|| {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let workspace = load_apple_workspace(&paths)?.ok_or_else(|| {
         "Approve an Apple project before creating a provisioning profile.".to_string()
     })?;
     let bundle_identifier = workspace.bundle_identifier.ok_or_else(|| {
         "BuildBridge could not detect PRODUCT_BUNDLE_IDENTIFIER in the approved project."
             .to_string()
     })?;
-    let mut secrets = read_mac_builder_secrets()
-        .await?
-        .ok_or_else(|| "Store an App Store Connect Team API key first.".to_string())?;
-    if secrets.provisioning_profile_paths.len() >= 20 {
-        return Err(
-            "The signing kit already retains 20 profiles. Remove obsolete local profile paths before creating another one."
-                .to_string(),
-        );
+    let mut secrets = resolve_signing_kit_for(&app, &machine_id).await?;
+    if secrets.provisioning_profile_paths.len() >= MAX_PROVISIONING_PROFILES {
+        return Err(format!(
+            "The signing kit already retains {MAX_PROVISIONING_PROFILES} profiles. Remove obsolete local profile paths before creating another one."
+        ));
     }
     let key_id = secrets.app_store_connect_key_id.as_deref().ok_or_else(|| {
         "The stored signing kit does not include an App Store Connect Key ID.".to_string()
@@ -618,7 +2187,7 @@ async fn create_apple_replacement_profile(
             .provisioning_profile_paths
             .push(saved_path_string.clone());
     }
-    store_mac_builder_secrets(secrets.clone())
+    save_signing_kit_record(secrets.clone())
         .await
         .map_err(|error| {
             format!(
@@ -626,19 +2195,75 @@ async fn create_apple_replacement_profile(
                 created.profile.name, saved_path_string
             )
         })?;
-    let summary = summarize_mac_builder_secrets(&secrets);
+    let summary = summarize_signing_kit(&secrets);
 
     Ok(CreateAppleProfileResult {
         profile: created.profile,
         certificate: created.certificate,
         saved_path: saved_path_string,
-        secrets: summary,
+        kit: summary,
+    })
+}
+
+/// Downloads an existing Apple profile into this host's managed store and adds it to the kit.
+///
+/// Apple keeps the profile; BuildBridge only holds a copy. Losing that copy — a cleared vault, a
+/// new host — should not mean hunting for the file, so an active profile can be taken back with
+/// one action instead of being re-downloaded by hand.
+#[tauri::command]
+async fn download_apple_profile(
+    app: AppHandle,
+    machine_id: String,
+    profile_id: String,
+) -> Result<DownloadAppleProfileResult, String> {
+    let mut secrets = resolve_signing_kit_for(&app, &machine_id).await?;
+    if secrets.provisioning_profile_paths.len() >= MAX_PROVISIONING_PROFILES {
+        return Err(format!(
+            "This kit already holds {MAX_PROVISIONING_PROFILES} profiles. Remove obsolete paths before adding another."
+        ));
+    }
+    let key_id = secrets.app_store_connect_key_id.as_deref().ok_or_else(|| {
+        "This kit has no App Store Connect Key ID, so Apple cannot be asked for the profile."
+            .to_string()
+    })?;
+    let issuer_id = secrets
+        .app_store_connect_issuer_id
+        .as_deref()
+        .ok_or_else(|| "This kit has no App Store Connect Issuer ID.".to_string())?;
+    let private_key = secrets
+        .app_store_connect_private_key
+        .as_deref()
+        .ok_or_else(|| "This kit has no App Store Connect .p8 key.".to_string())?;
+
+    let (profile, content) =
+        apple_api::download_profile(key_id, issuer_id, private_key, profile_id.trim()).await?;
+    let saved_path = save_managed_apple_profile(&app, &profile, &content)?;
+    let saved_path_string = saved_path
+        .to_str()
+        .ok_or_else(|| "The managed profile path is not valid UTF-8.".to_string())?
+        .to_string();
+    if !secrets
+        .provisioning_profile_paths
+        .iter()
+        .any(|path| path == &saved_path_string)
+    {
+        secrets
+            .provisioning_profile_paths
+            .push(saved_path_string.clone());
+    }
+    save_signing_kit_record(secrets.clone()).await?;
+
+    Ok(DownloadAppleProfileResult {
+        profile,
+        saved_path: saved_path_string,
+        kit: summarize_signing_kit(&secrets),
     })
 }
 
 #[tauri::command]
 async fn configure_mac_guest_access(
     app: AppHandle,
+    machine_id: String,
     input: MacGuestAccessInput,
 ) -> Result<MacBuilderView, String> {
     let username = input.username.trim().to_string();
@@ -649,23 +2274,93 @@ async fn configure_mac_guest_access(
         );
     }
 
-    let identity_path = mac_guest_identity_path(&app)?;
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    machines::load_registry(&app)?.find(&machine_id)?;
+    let identity_path = paths.guest_identity();
     tauri::async_runtime::spawn_blocking(move || ensure_mac_guest_keypair(&identity_path))
         .await
         .map_err(|error| error.to_string())??;
-    save_mac_guest_access(&app, &StoredMacGuestAccess { username })?;
+    save_mac_guest_access(&paths, &StoredMacGuestAccess { username })?;
 
-    build_mac_builder_view(&app).await
+    build_mac_builder_view(&app, &paths).await
+}
+
+/// Installs the BuildBridge key into the guest user's `authorized_keys` through one
+/// password-authenticated SSH session on the pinned host key — the `ssh-copy-id` route. The
+/// password exists in this request and in the environment of that single `ssh` process; it is
+/// not stored, logged, or reused. Everything after this step signs in with the key. The
+/// username and key are kept even when the password is rejected, so the Terminal route stays
+/// available.
+#[tauri::command]
+async fn authorize_mac_guest_key(
+    app: AppHandle,
+    machine_id: String,
+    input: AuthorizeMacGuestKeyInput,
+) -> Result<MacBuilderView, String> {
+    let username = input.username.trim().to_string();
+    if !buildbridge_docker_osx::valid_guest_username(&username) {
+        return Err(
+            "Use the macOS short username: 1–32 letters, numbers, periods, underscores, or hyphens."
+                .to_string(),
+        );
+    }
+    if input.password.is_empty() {
+        return Err("Enter the local macOS login password to install the key.".to_string());
+    }
+
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let known_hosts_path = paths.known_hosts();
+    if !known_hosts_path.is_file() {
+        return Err(
+            "Pin the guest identity first, so the password only ever goes to the machine you verified."
+                .to_string(),
+        );
+    }
+    let identity_path = paths.guest_identity();
+    let public_key =
+        tauri::async_runtime::spawn_blocking(move || ensure_mac_guest_keypair(&identity_path))
+            .await
+            .map_err(|error| error.to_string())??;
+    save_mac_guest_access(
+        &paths,
+        &StoredMacGuestAccess {
+            username: username.clone(),
+        },
+    )?;
+
+    let password = input.password;
+    tauri::async_runtime::spawn_blocking(move || {
+        buildbridge_docker_osx::authorize_guest_key(
+            profile.ssh_port,
+            &username,
+            &public_key,
+            &password,
+            &known_hosts_path,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    build_mac_builder_view(&app, &paths).await
 }
 
 #[tauri::command]
 async fn trust_mac_builder_guest(
     app: AppHandle,
+    machine_id: String,
     input: TrustMacGuestInput,
 ) -> Result<MacBuilderView, String> {
-    let profile = load_mac_builder_config(&app)?
-        .ok_or_else(|| "Save the macOS builder profile first.".to_string())?;
-    let known_hosts_path = mac_guest_known_hosts_path(&app)?;
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let known_hosts_path = paths.known_hosts();
 
     if known_hosts_path.exists() {
         return Err(
@@ -691,25 +2386,24 @@ async fn trust_mac_builder_guest(
     .await
     .map_err(|error| error.to_string())??;
 
-    build_mac_builder_view(&app).await
+    build_mac_builder_view(&app, &paths).await
 }
 
 #[tauri::command]
-async fn forget_mac_builder_guest_trust(app: AppHandle) -> Result<MacBuilderView, String> {
-    let path = mac_guest_known_hosts_path(&app)?;
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.to_string()),
-    }
+async fn forget_mac_builder_guest_trust(
+    app: AppHandle,
+    machine_id: String,
+) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    remove_file_if_present(&paths.known_hosts())?;
 
-    build_mac_builder_view(&app).await
+    build_mac_builder_view(&app, &paths).await
 }
 
 #[tauri::command]
 async fn import_mac_xcode_package(
-    state: State<'_, AppState>,
     app: AppHandle,
+    machine_id: String,
     input: ImportMacXcodeInput,
 ) -> Result<ImportMacXcodeResult, String> {
     let package_path = PathBuf::from(input.path.trim());
@@ -717,13 +2411,16 @@ async fn import_mac_xcode_package(
         return Err("Drop or enter the absolute path to an Xcode .xip package.".to_string());
     }
 
-    let profile = load_mac_builder_config(&app)?
-        .ok_or_else(|| "Save and launch the macOS builder first.".to_string())?;
-    let access = load_mac_guest_access(&app)?
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let access = load_mac_guest_access(&paths)?
         .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
-    let current = build_mac_builder_view(&app).await?;
+    let current = build_mac_builder_view(&app, &paths).await?;
     if current.runtime.state != ContainerState::Running {
-        return Err("Launch the macOS builder before importing Xcode.".to_string());
+        return Err("Start the macOS machine before importing Xcode.".to_string());
     }
     if current.guest.ssh.trust != GuestTrustState::Trusted
         || !current.guest.diagnostics.authenticated
@@ -737,14 +2434,15 @@ async fn import_mac_xcode_package(
         return Err("The guest already has an active Xcode toolchain.".to_string());
     }
 
-    let identity_path = mac_guest_identity_path(&app)?;
-    let known_hosts_path = mac_guest_known_hosts_path(&app)?;
-    if state.builder_running.swap(true, Ordering::AcqRel) {
-        return Err("A macOS builder operation is already running.".to_string());
-    }
-
+    let identity_path = paths.guest_identity();
+    let known_hosts_path = paths.known_hosts();
+    let guard = begin_machine_operation(&app, &machine_id, "importing_xcode")?;
     let event_app = app.clone();
+    let event_machine_id = machine_id.clone();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
     let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
         buildbridge_docker_osx::import_xcode_package(
             &package_path,
             profile.ssh_port,
@@ -752,16 +2450,21 @@ async fn import_mac_xcode_package(
             &identity_path,
             &known_hosts_path,
             |progress: XcodeImportProgress| {
-                let _ = event_app.emit("mac-builder-xcode-import-progress", progress);
+                emit_machine_progress(
+                    &event_app,
+                    XCODE_PROGRESS_EVENT,
+                    &event_machine_id,
+                    progress,
+                );
             },
         )
         .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string());
-    state.builder_running.store(false, Ordering::Release);
-    let imported = joined??;
-    let view = build_mac_builder_view(&app).await?;
+    drop(guard);
+    let imported = finish_operation(&cancel_probe, joined)?;
+    let view = build_mac_builder_view(&app, &paths).await?;
 
     Ok(ImportMacXcodeResult {
         view,
@@ -771,17 +2474,17 @@ async fn import_mac_xcode_package(
 }
 
 #[tauri::command]
-async fn activate_mac_xcode(
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> Result<MacBuilderView, String> {
-    let profile = load_mac_builder_config(&app)?
-        .ok_or_else(|| "Save and launch the macOS builder first.".to_string())?;
-    let access = load_mac_guest_access(&app)?
+async fn activate_mac_xcode(app: AppHandle, machine_id: String) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let access = load_mac_guest_access(&paths)?
         .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
-    let current = build_mac_builder_view(&app).await?;
+    let current = build_mac_builder_view(&app, &paths).await?;
     if current.runtime.state != ContainerState::Running {
-        return Err("Launch the macOS builder before activating Xcode.".to_string());
+        return Err("Start the macOS machine before activating Xcode.".to_string());
     }
     if current.guest.ssh.trust != GuestTrustState::Trusted
         || !current.guest.diagnostics.authenticated
@@ -798,43 +2501,52 @@ async fn activate_mac_xcode(
         return Err("Import and expand Xcode before activating it.".to_string());
     }
 
-    let identity_path = mac_guest_identity_path(&app)?;
-    let known_hosts_path = mac_guest_known_hosts_path(&app)?;
-    if state.builder_running.swap(true, Ordering::AcqRel) {
-        return Err("A macOS builder operation is already running.".to_string());
-    }
-
+    let identity_path = paths.guest_identity();
+    let known_hosts_path = paths.known_hosts();
+    let guard = begin_machine_operation(&app, &machine_id, "activating_xcode")?;
     let event_app = app.clone();
+    let event_machine_id = machine_id.clone();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
     let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
         buildbridge_docker_osx::activate_xcode(
             profile.ssh_port,
             &access.username,
             &identity_path,
             &known_hosts_path,
             |progress: XcodeImportProgress| {
-                let _ = event_app.emit("mac-builder-xcode-import-progress", progress);
+                emit_machine_progress(
+                    &event_app,
+                    XCODE_PROGRESS_EVENT,
+                    &event_machine_id,
+                    progress,
+                );
             },
         )
         .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string());
-    state.builder_running.store(false, Ordering::Release);
-    joined??;
+    drop(guard);
+    finish_operation(&cancel_probe, joined)?;
 
-    build_mac_builder_view(&app).await
+    build_mac_builder_view(&app, &paths).await
 }
 
 #[tauri::command]
 async fn provision_mac_signing(
-    state: State<'_, AppState>,
     app: AppHandle,
+    machine_id: String,
 ) -> Result<MacBuilderView, String> {
-    let profile = load_mac_builder_config(&app)?
-        .ok_or_else(|| "Save and launch the macOS builder first.".to_string())?;
-    let access = load_mac_guest_access(&app)?
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let access = load_mac_guest_access(&paths)?
         .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
-    let workspace = load_apple_workspace(&app)?
+    let workspace = load_apple_workspace(&paths)?
         .ok_or_else(|| "Approve and verify an Apple project first.".to_string())?;
     if !workspace.last_build_succeeded {
         return Err(
@@ -849,7 +2561,7 @@ async fn provision_mac_signing(
         "BuildBridge could not detect one release bundle identifier. Re-approve the project after setting PRODUCT_BUNDLE_IDENTIFIER in Xcode."
             .to_string()
     })?;
-    let current = build_mac_builder_view(&app).await?;
+    let current = build_mac_builder_view(&app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let container_id = current
         .runtime
@@ -868,9 +2580,7 @@ async fn provision_mac_signing(
         })
         .unwrap_or_default();
 
-    let secrets = read_mac_builder_secrets().await?.ok_or_else(|| {
-        "Store a signing certificate and profiles in the OS vault first.".to_string()
-    })?;
+    let secrets = resolve_signing_kit_for(&app, &machine_id).await?;
     let certificate_path = PathBuf::from(
         secrets
             .signing_certificate_path
@@ -890,21 +2600,23 @@ async fn provision_mac_signing(
     let keychain_password = secrets.guest_keychain_password.ok_or_else(|| {
         "Store a dedicated guest keychain password in the operating-system vault first.".to_string()
     })?;
-    let identity_path = mac_guest_identity_path(&app)?;
-    let known_hosts_path = mac_guest_known_hosts_path(&app)?;
+    let identity_path = paths.guest_identity();
+    let known_hosts_path = paths.known_hosts();
 
-    if state.builder_running.swap(true, Ordering::AcqRel) {
-        return Err("A macOS builder operation is already running.".to_string());
-    }
+    let guard = begin_machine_operation(&app, &machine_id, "provisioning_signing")?;
     if current.signing.is_some()
-        && let Err(error) = remove_signing_provisioning_record(&app)
+        && let Err(error) = remove_signing_provisioning_record(&paths)
     {
-        state.builder_running.store(false, Ordering::Release);
+        drop(guard);
         return Err(error);
     }
 
     let event_app = app.clone();
+    let event_machine_id = machine_id.clone();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
     let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
         if !previous_profile_uuids.is_empty() {
             buildbridge_docker_osx::clear_signing(
                 &previous_profile_uuids,
@@ -927,36 +2639,44 @@ async fn provision_mac_signing(
             &identity_path,
             &known_hosts_path,
             |progress: SigningProvisioningProgress| {
-                let _ = event_app.emit("mac-builder-signing-progress", progress);
+                emit_machine_progress(
+                    &event_app,
+                    SIGNING_PROGRESS_EVENT,
+                    &event_machine_id,
+                    progress,
+                );
             },
         )
         .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string());
-    state.builder_running.store(false, Ordering::Release);
-    let result = joined??;
+    drop(guard);
+    let result = finish_operation(&cancel_probe, joined)?;
     save_signing_provisioning(
-        &app,
+        &paths,
         &StoredSigningProvisioning {
             container_id,
             result,
         },
     )?;
 
-    build_mac_builder_view(&app).await
+    build_mac_builder_view(&app, &paths).await
 }
 
 #[tauri::command]
 async fn clear_mac_guest_signing(
-    state: State<'_, AppState>,
     app: AppHandle,
+    machine_id: String,
 ) -> Result<MacBuilderView, String> {
-    let profile = load_mac_builder_config(&app)?
-        .ok_or_else(|| "Save and launch the macOS builder first.".to_string())?;
-    let access = load_mac_guest_access(&app)?
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let access = load_mac_guest_access(&paths)?
         .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
-    let current = build_mac_builder_view(&app).await?;
+    let current = build_mac_builder_view(&app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let profile_uuids = current
         .signing
@@ -966,13 +2686,14 @@ async fn clear_mac_guest_signing(
         .iter()
         .map(|profile| profile.uuid.clone())
         .collect::<Vec<_>>();
-    let identity_path = mac_guest_identity_path(&app)?;
-    let known_hosts_path = mac_guest_known_hosts_path(&app)?;
+    let identity_path = paths.guest_identity();
+    let known_hosts_path = paths.known_hosts();
 
-    if state.builder_running.swap(true, Ordering::AcqRel) {
-        return Err("A macOS builder operation is already running.".to_string());
-    }
+    let guard = begin_machine_operation(&app, &machine_id, "clearing_signing")?;
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
     let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
         buildbridge_docker_osx::clear_signing(
             &profile_uuids,
             profile.ssh_port,
@@ -984,20 +2705,23 @@ async fn clear_mac_guest_signing(
     })
     .await
     .map_err(|error| error.to_string());
-    state.builder_running.store(false, Ordering::Release);
-    joined??;
-    remove_signing_provisioning_record(&app)?;
+    drop(guard);
+    finish_operation(&cancel_probe, joined)?;
+    remove_signing_provisioning_record(&paths)?;
 
-    build_mac_builder_view(&app).await
+    build_mac_builder_view(&app, &paths).await
 }
 
 #[tauri::command]
 async fn approve_apple_workspace(
     app: AppHandle,
+    machine_id: String,
     input: ApproveAppleWorkspaceInput,
 ) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    machines::load_registry(&app)?.find(&machine_id)?;
     let approved = inspect_apple_workspace(input.path.trim())?;
-    let workspace = match load_apple_workspace(&app)? {
+    let workspace = match load_apple_workspace(&paths)? {
         Some(existing) if existing.local_path == approved.local_path => StoredAppleWorkspace {
             name: approved.name,
             ios_workspace: approved.ios_workspace,
@@ -1008,61 +2732,87 @@ async fn approve_apple_workspace(
         },
         _ => approved,
     };
-    save_apple_workspace(&app, &workspace)?;
+    save_apple_workspace(&paths, &workspace)?;
 
-    build_mac_builder_view(&app).await
+    build_mac_builder_view(&app, &paths).await
 }
 
 #[tauri::command]
-async fn clear_apple_workspace(app: AppHandle) -> Result<MacBuilderView, String> {
-    let path = apple_workspace_path(&app)?;
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.to_string()),
-    }
+async fn clear_apple_workspace(
+    app: AppHandle,
+    machine_id: String,
+) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    remove_file_if_present(&paths.apple_workspace())?;
 
-    build_mac_builder_view(&app).await
+    build_mac_builder_view(&app, &paths).await
 }
 
 #[tauri::command]
 async fn sync_apple_workspace(
-    state: State<'_, AppState>,
     app: AppHandle,
+    machine_id: String,
 ) -> Result<SyncAppleWorkspaceResult, String> {
-    let profile = load_mac_builder_config(&app)?
-        .ok_or_else(|| "Save and launch the macOS builder first.".to_string())?;
-    let access = load_mac_guest_access(&app)?
+    sync_apple_workspace_from(&app, &machine_id, None).await
+}
+
+/// Synchronizes a source tree into the guest: the approved folder as it is, or a checked-out
+/// revision of the same project when a remote build names a ref.
+async fn sync_apple_workspace_from(
+    app: &AppHandle,
+    machine_id: &str,
+    source: Option<(PathBuf, WorkspaceSource)>,
+) -> Result<SyncAppleWorkspaceResult, String> {
+    let paths = MachinePaths::resolve(app, machine_id)?;
+    let profile = machines::load_registry(app)?
+        .find(machine_id)?
+        .config
+        .clone();
+    let access = load_mac_guest_access(&paths)?
         .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
-    let mut workspace = load_apple_workspace(&app)?
+    let mut workspace = load_apple_workspace(&paths)?
         .ok_or_else(|| "Approve a local Apple project first.".to_string())?;
-    let current = build_mac_builder_view(&app).await?;
+    let current = build_mac_builder_view(app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
-    let identity_path = mac_guest_identity_path(&app)?;
-    let known_hosts_path = mac_guest_known_hosts_path(&app)?;
-    let workspace_path = PathBuf::from(&workspace.local_path);
-    if state.builder_running.swap(true, Ordering::AcqRel) {
-        return Err("A macOS builder operation is already running.".to_string());
-    }
+    let identity_path = paths.guest_identity();
+    let known_hosts_path = paths.known_hosts();
+    let (workspace_path, source) = source.unwrap_or_else(|| {
+        (
+            PathBuf::from(&workspace.local_path),
+            WorkspaceSource::folder(),
+        )
+    });
+    let env_files = guest_env_files_for(app, machine_id).await?;
+    let guard = begin_machine_operation(app, machine_id, "synchronizing")?;
 
     let event_app = app.clone();
+    let event_machine_id = machine_id.to_string();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
     let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
         buildbridge_docker_osx::sync_apple_workspace(
             &workspace_path,
+            env_files.as_ref(),
             profile.ssh_port,
             &access.username,
             &identity_path,
             &known_hosts_path,
             |progress: AppleProjectProgress| {
-                let _ = event_app.emit("mac-builder-apple-project-progress", progress);
+                emit_machine_progress(
+                    &event_app,
+                    PROJECT_PROGRESS_EVENT,
+                    &event_machine_id,
+                    progress,
+                );
             },
         )
         .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string());
-    state.builder_running.store(false, Ordering::Release);
-    let sync = joined??;
+    drop(guard);
+    let sync = finish_operation(&cancel_probe, joined)?;
 
     workspace.last_snapshot_sha256 = Some(sync.snapshot_sha256.clone());
     workspace.last_sync_file_count = Some(sync.source_file_count);
@@ -1070,79 +2820,97 @@ async fn sync_apple_workspace(
     workspace.last_build_succeeded = false;
     workspace.last_xcode_version = None;
     workspace.last_native_lock_updated = false;
-    save_apple_workspace(&app, &workspace)?;
-    let view = build_mac_builder_view(&app).await?;
+    workspace.last_source = Some(source);
+    save_apple_workspace(&paths, &workspace)?;
+    let view = build_mac_builder_view(app, &paths).await?;
 
     Ok(SyncAppleWorkspaceResult { view, sync })
 }
 
 #[tauri::command]
 async fn run_apple_smoke_build(
-    state: State<'_, AppState>,
     app: AppHandle,
+    machine_id: String,
 ) -> Result<RunAppleSmokeBuildResult, String> {
-    let profile = load_mac_builder_config(&app)?
-        .ok_or_else(|| "Save and launch the macOS builder first.".to_string())?;
-    let access = load_mac_guest_access(&app)?
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let access = load_mac_guest_access(&paths)?
         .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
-    let mut workspace = load_apple_workspace(&app)?
+    let mut workspace = load_apple_workspace(&paths)?
         .ok_or_else(|| "Approve and synchronize a local Apple project first.".to_string())?;
     if workspace.last_snapshot_sha256.is_none() {
         return Err("Synchronize the approved project before running a test build.".to_string());
     }
-    let current = build_mac_builder_view(&app).await?;
+    let current = build_mac_builder_view(&app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
-    let identity_path = mac_guest_identity_path(&app)?;
-    let known_hosts_path = mac_guest_known_hosts_path(&app)?;
-    if state.builder_running.swap(true, Ordering::AcqRel) {
-        return Err("A macOS builder operation is already running.".to_string());
-    }
+    let identity_path = paths.guest_identity();
+    let known_hosts_path = paths.known_hosts();
+    let guard = begin_machine_operation(&app, &machine_id, "test_building")?;
     workspace.last_build_succeeded = false;
     workspace.last_xcode_version = None;
     workspace.last_native_lock_updated = false;
-    if let Err(error) = save_apple_workspace(&app, &workspace) {
-        state.builder_running.store(false, Ordering::Release);
+    if let Err(error) = save_apple_workspace(&paths, &workspace) {
+        drop(guard);
         return Err(error);
     }
 
     let event_app = app.clone();
+    let event_machine_id = machine_id.clone();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
     let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
         buildbridge_docker_osx::run_apple_smoke_build(
             profile.ssh_port,
             &access.username,
             &identity_path,
             &known_hosts_path,
             |progress: AppleProjectProgress| {
-                let _ = event_app.emit("mac-builder-apple-project-progress", progress);
+                emit_machine_progress(
+                    &event_app,
+                    PROJECT_PROGRESS_EVENT,
+                    &event_machine_id,
+                    progress,
+                );
             },
         )
         .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string());
-    state.builder_running.store(false, Ordering::Release);
-    let build = joined??;
+    drop(guard);
+    let build = finish_operation(&cancel_probe, joined)?;
 
     workspace.last_build_succeeded = true;
     workspace.last_xcode_version = Some(build.xcode_version.clone());
     workspace.last_native_lock_updated = build.native_lockfile_updated;
-    save_apple_workspace(&app, &workspace)?;
-    let view = build_mac_builder_view(&app).await?;
+    save_apple_workspace(&paths, &workspace)?;
+    let view = build_mac_builder_view(&app, &paths).await?;
 
     Ok(RunAppleSmokeBuildResult { view, build })
 }
 
 #[tauri::command]
 async fn run_apple_signed_archive(
-    state: State<'_, AppState>,
     app: AppHandle,
+    machine_id: String,
+    env_set_id: Option<String>,
 ) -> Result<RunAppleArchiveResult, String> {
-    remove_apple_archive_error(&app)?;
-    let profile = load_mac_builder_config(&app)?
-        .ok_or_else(|| "Save and launch the macOS builder first.".to_string())?;
-    let access = load_mac_guest_access(&app)?
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    remove_apple_archive_error(&paths)?;
+    // The env is a per-build choice: it rebuilds the web assets inside the guest before the
+    // archive, so the synced source and the test build are not repeated.
+    let chosen_env = guest_env_files_for_set(env_set_id.as_deref()).await?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let access = load_mac_guest_access(&paths)?
         .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
-    let workspace = load_apple_workspace(&app)?
+    let workspace = load_apple_workspace(&paths)?
         .ok_or_else(|| "Approve and synchronize a local Apple project first.".to_string())?;
     if !workspace.last_build_succeeded || workspace.last_snapshot_sha256.is_none() {
         return Err("Complete the unsigned project test build first.".to_string());
@@ -1153,7 +2921,7 @@ async fn run_apple_signed_archive(
                 .to_string(),
         );
     }
-    let current = build_mac_builder_view(&app).await?;
+    let current = build_mac_builder_view(&app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let signing = current
         .signing
@@ -1166,9 +2934,7 @@ async fn run_apple_signed_archive(
             "The provisioned signing identity no longer matches the approved project.".to_string(),
         );
     }
-    let secrets = read_mac_builder_secrets()
-        .await?
-        .ok_or_else(|| "Store the signing kit in the OS vault first.".to_string())?;
+    let secrets = resolve_signing_kit_for(&app, &machine_id).await?;
     let keychain_password = secrets.guest_keychain_password.ok_or_else(|| {
         "The signing keychain credential is missing from the OS vault.".to_string()
     })?;
@@ -1181,19 +2947,27 @@ async fn run_apple_signed_archive(
         .last_snapshot_sha256
         .clone()
         .expect("checked above");
-    let output_directory = prepare_apple_archive_output_dir(&app)?;
-    let identity_path = mac_guest_identity_path(&app)?;
-    let known_hosts_path = mac_guest_known_hosts_path(&app)?;
+    let output_directory = prepare_apple_archive_output_dir(&paths)?;
+    let identity_path = paths.guest_identity();
+    let known_hosts_path = paths.known_hosts();
     let signing_certificate_sha256 = signing.certificate_sha256.clone();
-    if state.builder_running.swap(true, Ordering::AcqRel) {
-        let _ = fs::remove_dir(&output_directory);
-        return Err("A macOS builder operation is already running.".to_string());
-    }
+    let guard = match begin_machine_operation(&app, &machine_id, "archiving") {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = fs::remove_dir(&output_directory);
+            return Err(error);
+        }
+    };
 
     let event_app = app.clone();
+    let event_machine_id = machine_id.clone();
     let operation_output_directory = output_directory.clone();
     let scheme = workspace.scheme.clone();
+    let env_set_name = chosen_env.as_ref().map(|(name, _)| name.clone());
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
     let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
         buildbridge_docker_osx::run_signed_apple_archive(
             profile.ssh_port,
             &access.username,
@@ -1202,55 +2976,58 @@ async fn run_apple_signed_archive(
             &signing,
             &scheme,
             &keychain_password,
+            chosen_env.as_ref().map(|(_, files)| files),
             &operation_output_directory,
             |progress: AppleArchiveProgress| {
-                let _ = event_app.emit("mac-builder-apple-archive-progress", progress);
+                emit_machine_progress(
+                    &event_app,
+                    ARCHIVE_PROGRESS_EVENT,
+                    &event_machine_id,
+                    progress,
+                );
             },
         )
         .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string());
-    state.builder_running.store(false, Ordering::Release);
-    let archive = match joined {
-        Ok(result) => match result {
-            Ok(archive) => archive,
-            Err(error) => {
-                let _ = fs::remove_dir_all(&output_directory);
-                let _ = save_apple_archive_error(&app, &error);
-                return Err(error);
-            }
-        },
+    drop(guard);
+    let archive = match finish_operation(&cancel_probe, joined) {
+        Ok(archive) => archive,
         Err(error) => {
             let _ = fs::remove_dir_all(&output_directory);
-            let _ = save_apple_archive_error(&app, &error);
+            if error != CANCELLED_MESSAGE {
+                let _ = save_apple_archive_error(&paths, &error);
+            }
             return Err(error);
         }
     };
     if let Err(error) = save_apple_archive(
-        &app,
+        &paths,
         &StoredAppleArchive {
             container_id,
             snapshot_sha256,
             signing_certificate_sha256,
             result: archive.clone(),
+            env_set_name,
         },
     ) {
         let _ = fs::remove_dir_all(&output_directory);
-        let _ = save_apple_archive_error(&app, &error);
+        let _ = save_apple_archive_error(&paths, &error);
         return Err(error);
     }
-    remove_apple_archive_error(&app)?;
-    let view = build_mac_builder_view(&app).await?;
+    remove_apple_archive_error(&paths)?;
+    let view = build_mac_builder_view(&app, &paths).await?;
 
     Ok(RunAppleArchiveResult { view, archive })
 }
 
 #[tauri::command]
-async fn reveal_apple_archive(app: AppHandle) -> Result<(), String> {
-    let stored = load_apple_archive(&app)?
+async fn reveal_apple_archive(app: AppHandle, machine_id: String) -> Result<(), String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let stored = load_apple_archive(&paths)?
         .ok_or_else(|| "No retained signed archive is available.".to_string())?;
-    let directory = validated_apple_archive_directory(&app, &stored.result)?;
+    let directory = validated_apple_archive_directory(&paths, &stored.result)?;
     let mut command = if cfg!(target_os = "macos") {
         Command::new("open")
     } else if cfg!(target_os = "windows") {
@@ -1267,21 +3044,29 @@ async fn reveal_apple_archive(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn clear_apple_archive(app: AppHandle) -> Result<MacBuilderView, String> {
-    if let Some(stored) = load_apple_archive(&app)? {
-        let directory = validated_apple_archive_directory(&app, &stored.result)?;
+async fn clear_apple_archive(app: AppHandle, machine_id: String) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    if let Some(stored) = load_apple_archive(&paths)? {
+        let directory = validated_apple_archive_directory(&paths, &stored.result)?;
         fs::remove_dir_all(directory)
             .map_err(|error| format!("Could not remove the signed artifacts: {error}"))?;
     }
-    remove_apple_archive_record(&app)?;
-    remove_apple_archive_error(&app)?;
+    remove_apple_archive_record(&paths)?;
+    remove_apple_archive_error(&paths)?;
 
-    build_mac_builder_view(&app).await
+    build_mac_builder_view(&app, &paths).await
+}
+
+fn is_live(state: ContainerState) -> bool {
+    matches!(
+        state,
+        ContainerState::Running | ContainerState::Paused | ContainerState::Restarting
+    )
 }
 
 fn ensure_apple_project_guest_ready(view: &MacBuilderView) -> Result<(), String> {
     if view.runtime.state != ContainerState::Running {
-        return Err("Launch the macOS builder first.".to_string());
+        return Err("Start the macOS machine first.".to_string());
     }
     if view.guest.ssh.trust != GuestTrustState::Trusted || !view.guest.diagnostics.authenticated {
         return Err("Finish the pinned macOS guest connection first.".to_string());
@@ -1293,97 +3078,181 @@ fn ensure_apple_project_guest_ready(view: &MacBuilderView) -> Result<(), String>
     Ok(())
 }
 
-async fn build_mac_builder_view(app: &AppHandle) -> Result<MacBuilderView, String> {
-    let profile = load_mac_builder_config(app)?;
-    let guest_access = load_mac_guest_access(app)?;
-    let guest_identity_path = mac_guest_identity_path(app)?;
-    let guest_public_key_path = mac_guest_public_key_path(app)?;
-    let guest_known_hosts_path = mac_guest_known_hosts_path(app)?;
+async fn build_machine_list_view(app: &AppHandle) -> Result<MachineListView, String> {
+    let registry = machines::load_registry(app)?;
+    let mut entries = Vec::with_capacity(registry.machines.len());
+    for machine in &registry.machines {
+        let paths = MachinePaths::resolve(app, &machine.id)?;
+        let workspace_name = load_apple_workspace(&paths)?.map(|workspace| workspace.name);
+        let signing = load_signing_provisioning(&paths)?;
+        entries.push((machine.clone(), paths, workspace_name, signing));
+    }
+    let busy = app
+        .state::<AppState>()
+        .busy_machines
+        .lock()
+        .map_err(|_| "The machine operation registry is poisoned.".to_string())?
+        .clone();
+    let (host, machines) = tauri::async_runtime::spawn_blocking(move || {
+        let host = buildbridge_docker_osx::probe_host();
+        let mut summaries = Vec::with_capacity(entries.len());
+        for (machine, paths, workspace_name, signing) in entries {
+            let runtime = buildbridge_docker_osx::status(&paths.container_name)
+                .map_err(|error| error.to_string())?;
+            // Signing belongs to the container it was imported into; a rebuilt container drops it.
+            let signing = signing
+                .filter(|stored| runtime.container_id.as_deref() == Some(&stored.container_id));
+            summaries.push(MachineSummary {
+                id: machine.id.clone(),
+                config: machine.config,
+                created_at_epoch_seconds: machine.created_at_epoch_seconds,
+                state: runtime.state,
+                container_id: runtime.container_id,
+                busy_operation: busy.get(&machine.id).map(|label| (*label).to_string()),
+                guest_configured: paths.guest_access().is_file(),
+                trust_pinned: paths.known_hosts().is_file(),
+                workspace_name,
+                signing_kit_name: None,
+                signing_provisioned: signing.is_some(),
+                signing_identity: signing.map(|stored| stored.result.identity_name),
+                archive_retained: paths.apple_archive_record().is_file(),
+                env_set_name: None,
+            });
+        }
+
+        Ok::<_, String>((host, summaries))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    // Kit and env-set names come from the vault, which the blocking probe above must not touch.
+    let kits = read_signing_kits().await?.kits;
+    let env_sets = read_env_sets()
+        .await
+        .map(|stored| stored.sets)
+        .unwrap_or_default();
+    let attachments = machines::load_registry(app)?;
+    let mut machines = machines;
+    for summary in &mut machines {
+        let attached = attachments
+            .find(&summary.id)
+            .ok()
+            .and_then(|machine| machine.signing_kit_id.clone());
+        let resolved = match attached {
+            Some(id) => kits.iter().find(|kit| kit.id == id),
+            None if kits.len() == 1 => kits.first(),
+            None => None,
+        };
+        summary.signing_kit_name = resolved.map(|kit| kit.name.clone());
+        summary.env_set_name = attachments
+            .find(&summary.id)
+            .ok()
+            .and_then(|machine| machine.env_set_id.as_deref())
+            .and_then(|id| env_sets.iter().find(|set| set.id == id))
+            .map(|set| set.name.clone());
+    }
+
+    Ok(MachineListView { host, machines })
+}
+
+async fn build_mac_builder_view(
+    app: &AppHandle,
+    paths: &MachinePaths,
+) -> Result<MacBuilderView, String> {
+    let profile = machines::load_registry(app)?
+        .find(&paths.id)?
+        .config
+        .clone();
+    let guest_access = load_mac_guest_access(paths)?;
+    let busy_operation = busy_operation(app, &paths.id)?;
+    let probe_paths = paths.clone();
     let probe_profile = profile.clone();
     let (runtime, logs, guest) = tauri::async_runtime::spawn_blocking(move || {
-        let runtime = buildbridge_docker_osx::status().map_err(|error| error.to_string())?;
-        let logs = buildbridge_docker_osx::recent_logs().map_err(|error| error.to_string())?;
+        let runtime = buildbridge_docker_osx::status(&probe_paths.container_name)
+            .map_err(|error| error.to_string())?;
+        let logs = buildbridge_docker_osx::recent_logs(&probe_paths.container_name)
+            .map_err(|error| error.to_string())?;
         let guest = build_mac_guest_view(
-            probe_profile.as_ref(),
+            &probe_profile,
             &runtime,
             guest_access.as_ref(),
-            &guest_identity_path,
-            &guest_public_key_path,
-            &guest_known_hosts_path,
+            &probe_paths,
         )?;
 
         Ok::<_, String>((runtime, logs, guest))
     })
     .await
     .map_err(|error| error.to_string())??;
-    let secrets = read_mac_builder_secrets()
-        .await?
-        .as_ref()
-        .map(summarize_mac_builder_secrets)
-        .unwrap_or_default();
-    let apple_workspace = load_apple_workspace(app)?;
-    let signing = load_signing_provisioning(app)?
+    let attached = attached_kit_id(app, &paths.id)?;
+    let (kits, vault_issue) = match read_signing_kits().await {
+        Ok(stored) => (stored.kits, None),
+        Err(issue) => (Vec::new(), Some(issue)),
+    };
+    let resolved = resolve_signing_kit(&kits, attached.as_deref());
+    let signing_kit = resolved.map(summarize_signing_kit);
+    let env_set = match attached_env_set_id(app, &paths.id)? {
+        Some(id) => read_env_sets()
+            .await
+            .ok()
+            .and_then(|stored| stored.sets.into_iter().find(|set| set.id == id))
+            .map(|set| summarize_env_set(&set, &[])),
+        None => None,
+    };
+    let apple_workspace = load_apple_workspace(paths)?;
+    let signing = load_signing_provisioning(paths)?
         .filter(|stored| runtime.container_id.as_deref() == Some(&stored.container_id))
         .map(|stored| stored.result);
-    let archive = load_apple_archive(app)?
+    let (archive, archive_env_set) = load_apple_archive(paths)?
         .filter(|stored| {
             std::path::Path::new(&stored.result.ipa.path).is_file()
                 && std::path::Path::new(&stored.result.archive.path).is_file()
         })
-        .map(|stored| stored.result);
-    let archive_error = read_optional_text(&apple_archive_error_path(app)?)?;
+        .map(|stored| (Some(stored.result), stored.env_set_name))
+        .unwrap_or((None, None));
+    let archive_error = read_optional_text(&paths.apple_archive_error())?;
 
     Ok(MacBuilderView {
+        machine_id: paths.id.clone(),
         profile,
+        busy_operation,
         runtime,
-        secrets,
+        signing_kit,
+        env_set,
+        signing_health: signing_health(vault_issue.as_deref(), resolved, signing.is_some()),
+        vault_issue,
         guest,
         apple_workspace,
         signing,
         archive,
+        archive_env_set,
         archive_error,
         logs,
     })
 }
 
 fn build_mac_guest_view(
-    profile: Option<&MacBuilderConfig>,
+    profile: &MacBuilderConfig,
     runtime: &RuntimeStatus,
     access: Option<&StoredMacGuestAccess>,
-    identity_path: &std::path::Path,
-    public_key_path: &std::path::Path,
-    known_hosts_path: &std::path::Path,
+    paths: &MachinePaths,
 ) -> Result<MacGuestAccessView, String> {
     let username = access.map(|value| value.username.clone());
-    let public_key = read_optional_text(public_key_path)?;
-
-    let Some(profile) = profile else {
-        return Ok(MacGuestAccessView {
-            username,
-            public_key,
-            ssh: GuestSshStatus {
-                issue: Some(
-                    "Save and launch a macOS builder before configuring guest access.".to_string(),
-                ),
-                ..GuestSshStatus::default()
-            },
-            diagnostics: GuestDiagnostics::default(),
-        });
-    };
+    let public_key = read_optional_text(&paths.guest_public_key())?;
 
     if runtime.state != ContainerState::Running {
         return Ok(MacGuestAccessView {
             username,
             public_key,
             ssh: GuestSshStatus {
-                issue: Some("Launch the macOS builder to probe guest SSH.".to_string()),
+                issue: Some("Start the macOS machine to probe guest SSH.".to_string()),
                 ..GuestSshStatus::default()
             },
             diagnostics: GuestDiagnostics::default(),
         });
     }
 
-    let pinned_host_key = read_optional_text(known_hosts_path)?;
+    let known_hosts_path = paths.known_hosts();
+    let pinned_host_key = read_optional_text(&known_hosts_path)?;
     let ssh =
         buildbridge_docker_osx::guest_ssh_status(profile.ssh_port, pinned_host_key.as_deref());
     let diagnostics = if ssh.trust == GuestTrustState::Trusted {
@@ -1391,8 +3260,8 @@ fn build_mac_guest_view(
             Some(access) => buildbridge_docker_osx::guest_diagnostics(
                 profile.ssh_port,
                 &access.username,
-                identity_path,
-                known_hosts_path,
+                &paths.guest_identity(),
+                &known_hosts_path,
             ),
             None => GuestDiagnostics {
                 issue: Some("Enter the macOS short username to configure key access.".to_string()),
@@ -1412,29 +3281,32 @@ fn build_mac_guest_view(
 }
 
 async fn ensure_mac_builder_profile_can_change(
-    app: &AppHandle,
+    paths: &MachinePaths,
+    stored: &MacBuilderConfig,
     profile: &MacBuilderConfig,
 ) -> Result<(), String> {
-    let Some(stored) = load_mac_builder_config(app)? else {
-        return Ok(());
-    };
-
-    if stored == *profile {
+    let unchanged_hardware = stored.macos_release == profile.macos_release
+        && stored.memory_gib == profile.memory_gib
+        && stored.cpu_cores == profile.cpu_cores
+        && stored.ssh_port == profile.ssh_port;
+    if unchanged_hardware {
         return Ok(());
     }
 
-    let runtime = tauri::async_runtime::spawn_blocking(buildbridge_docker_osx::status)
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())?;
+    let container_name = paths.container_name.clone();
+    let runtime = tauri::async_runtime::spawn_blocking(move || {
+        buildbridge_docker_osx::status(&container_name)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
 
     if !matches!(
         runtime.state,
-        buildbridge_docker_osx::ContainerState::Missing
-            | buildbridge_docker_osx::ContainerState::Unavailable
+        ContainerState::Missing | ContainerState::Unavailable
     ) {
         return Err(
-            "Stop and deliberately rebuild the existing macOS container before changing its machine profile."
+            "Stop the machine and discard its container before changing its hardware profile. The name can be changed at any time."
                 .to_string(),
         );
     }
@@ -1442,9 +3314,11 @@ async fn ensure_mac_builder_profile_can_change(
     Ok(())
 }
 
-fn normalize_mac_builder_secrets(
-    input: MacBuilderSecretsInput,
-) -> Result<StoredMacBuilderSecrets, String> {
+fn normalize_signing_kit(input: SigningKitInput) -> Result<StoredSigningKit, String> {
+    let name = input.name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 60 {
+        return Err("Give the signing kit a name of 1 to 60 characters.".to_string());
+    }
     let app_store_connect_private_key_path =
         optional_trim(input.app_store_connect_private_key_path);
     let inferred_key_id = app_store_connect_private_key_path
@@ -1462,7 +3336,10 @@ fn normalize_mac_builder_secrets(
         .as_deref()
         .map(read_app_store_connect_private_key)
         .transpose()?;
-    let secrets = StoredMacBuilderSecrets {
+    let secrets = StoredSigningKit {
+        id: input.kit_id.unwrap_or_default(),
+        name,
+        created_at_epoch_seconds: 0,
         app_store_connect_key_id: supplied_key_id.or(inferred_key_id),
         app_store_connect_issuer_id: optional_trim(input.app_store_connect_issuer_id),
         app_store_connect_private_key,
@@ -1498,8 +3375,10 @@ fn normalize_mac_builder_secrets(
         return Err("The App Store Connect private key is not a valid PEM key.".to_string());
     }
 
-    if secrets.provisioning_profile_paths.len() > 20 {
-        return Err("At most 20 provisioning profiles can be stored.".to_string());
+    if secrets.provisioning_profile_paths.len() > MAX_PROVISIONING_PROFILES {
+        return Err(format!(
+            "At most {MAX_PROVISIONING_PROFILES} provisioning profiles can be stored."
+        ));
     }
 
     if let Some(path) = &secrets.signing_certificate_path {
@@ -1527,10 +3406,12 @@ fn normalize_mac_builder_secrets(
     Ok(secrets)
 }
 
-fn merge_mac_builder_secrets(
-    existing: StoredMacBuilderSecrets,
-    mut incoming: StoredMacBuilderSecrets,
-) -> StoredMacBuilderSecrets {
+fn merge_signing_kit(
+    existing: StoredSigningKit,
+    mut incoming: StoredSigningKit,
+) -> StoredSigningKit {
+    incoming.id = existing.id.clone();
+    incoming.created_at_epoch_seconds = existing.created_at_epoch_seconds;
     if incoming.app_store_connect_key_id.is_none() {
         incoming.app_store_connect_key_id = existing.app_store_connect_key_id;
         incoming.app_store_connect_issuer_id = existing.app_store_connect_issuer_id;
@@ -1624,8 +3505,13 @@ fn read_app_store_connect_private_key(path: &str) -> Result<String, String> {
     Ok(private_key)
 }
 
-fn summarize_mac_builder_secrets(secrets: &StoredMacBuilderSecrets) -> MacBuilderSecretSummary {
-    MacBuilderSecretSummary {
+fn summarize_signing_kit(secrets: &StoredSigningKit) -> SigningKitSummary {
+    SigningKitSummary {
+        id: secrets.id.clone(),
+        name: secrets.name.clone(),
+        created_at_epoch_seconds: secrets.created_at_epoch_seconds,
+        attached_machines: Vec::new(),
+        signing_certificate_password_stored: secrets.signing_certificate_password.is_some(),
         app_store_connect_configured: secrets.app_store_connect_key_id.is_some()
             && secrets.app_store_connect_issuer_id.is_some()
             && secrets.app_store_connect_private_key.is_some(),
@@ -1637,7 +3523,17 @@ fn summarize_mac_builder_secrets(secrets: &StoredMacBuilderSecrets) -> MacBuilde
                 .and_then(|name| name.to_str())
                 .map(str::to_owned)
         }),
-        provisioning_profile_count: secrets.provisioning_profile_paths.len(),
+        provisioning_profile_names: secrets
+            .provisioning_profile_paths
+            .iter()
+            .map(|path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(path)
+                    .to_string()
+            })
+            .collect(),
         guest_keychain_configured: secrets.guest_keychain_password.is_some(),
     }
 }
@@ -1654,11 +3550,150 @@ fn runner_capabilities() -> Vec<String> {
     capabilities
 }
 
-fn heartbeat_request() -> HeartbeatRequest {
+async fn heartbeat_request(app: &AppHandle) -> HeartbeatRequest {
     HeartbeatRequest {
         version: env!("CARGO_PKG_VERSION").to_string(),
         capabilities: runner_capabilities(),
+        machines: machine_reports(app).await,
     }
+}
+
+/// The machines as a control plane needs to see them: named, and either ready for a signed
+/// archive or not. A failure to inspect them leaves the list empty rather than failing the
+/// heartbeat, so a Docker hiccup never reads as a runner going offline.
+async fn machine_reports(app: &AppHandle) -> Vec<MachineReport> {
+    let Ok(view) = build_machine_list_view(app).await else {
+        return Vec::new();
+    };
+    let env_set_names: Vec<String> = read_env_sets()
+        .await
+        .map(|stored| stored.sets.into_iter().map(|set| set.name).collect())
+        .unwrap_or_default();
+
+    view.machines
+        .into_iter()
+        .map(|summary| {
+            let workspace = MachinePaths::resolve(app, &summary.id)
+                .ok()
+                .and_then(|paths| load_apple_workspace(&paths).ok().flatten());
+            let ready = summary.state == ContainerState::Running
+                && summary.trust_pinned
+                && summary.signing_provisioned
+                && workspace.is_some();
+
+            MachineReport {
+                id: summary.id,
+                name: summary.config.name,
+                ready,
+                project: workspace.as_ref().map(|workspace| workspace.name.clone()),
+                bundle_identifier: workspace
+                    .as_ref()
+                    .and_then(|workspace| workspace.bundle_identifier.clone()),
+                repository: workspace
+                    .as_ref()
+                    .and_then(|workspace| project_remote_url(&workspace.local_path))
+                    .map(|remote| redact_remote(&remote)),
+                env_set: summary.env_set_name,
+                env_sets: env_set_names.clone(),
+            }
+        })
+        .collect()
+}
+
+/// The approved project's `origin` remote, if the folder is a git checkout. This is the only
+/// repository a remote build may fetch from; the control plane never supplies one.
+fn project_remote_url(local_path: &str) -> Option<String> {
+    if !std::path::Path::new(local_path).join(".git").exists() {
+        return None;
+    }
+    let output = Command::new("git")
+        .args(["-C", local_path, "remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let remote = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    (!remote.is_empty()).then_some(remote)
+}
+
+/// A remote URL without any credentials that may be embedded in it.
+fn redact_remote(remote: &str) -> String {
+    match (remote.find("://"), remote.find('@')) {
+        (Some(scheme_end), Some(at)) if at > scheme_end => {
+            format!("{}{}", &remote[..scheme_end + 3], &remote[at + 1..])
+        }
+        _ => remote.to_string(),
+    }
+}
+
+/// Checks out one revision of the approved project into the machine's checkout directory and
+/// returns the commit it resolved to. Fixed argv, no shell; the ref was validated by both the
+/// control plane and the contract crate, and is validated once more here.
+fn checkout_project_ref(
+    remote: &str,
+    git_ref: &str,
+    checkout: &std::path::Path,
+) -> Result<String, String> {
+    if !valid_git_ref(git_ref) {
+        return Err("That ref is not a branch, tag, or commit as git names them.".to_string());
+    }
+    if !checkout.join(".git").is_dir() {
+        if checkout.exists() {
+            fs::remove_dir_all(checkout)
+                .map_err(|error| format!("Could not reset the checkout directory: {error}"))?;
+        }
+        if let Some(parent) = checkout.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create the checkout directory: {error}"))?;
+        }
+        git(&[
+            "clone",
+            "--quiet",
+            "--no-checkout",
+            "--",
+            remote,
+            &checkout.to_string_lossy(),
+        ])?;
+    }
+    let dir = checkout.to_string_lossy().to_string();
+    git(&["-C", &dir, "remote", "set-url", "origin", remote])?;
+    git(&["-C", &dir, "fetch", "--quiet", "--force", "origin", git_ref])?;
+    git(&[
+        "-C",
+        &dir,
+        "checkout",
+        "--quiet",
+        "--force",
+        "--detach",
+        "FETCH_HEAD",
+    ])?;
+    git(&["-C", &dir, "clean", "--quiet", "-fdx"])?;
+    let commit = git(&["-C", &dir, "rev-parse", "HEAD"])?.trim().to_string();
+
+    Ok(commit)
+}
+
+fn git(args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|error| format!("git is not available on this host: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "git {} failed: {}",
+            args.iter()
+                .find(|arg| !arg.starts_with('-') && **arg != "-C")
+                .copied()
+                .unwrap_or("command"),
+            stderr.trim()
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 async fn paired_client(app: &AppHandle) -> Result<(StoredConfig, ApiClient), String> {
@@ -1701,82 +3736,8 @@ fn save_config(app: &AppHandle, config: &StoredConfig) -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
-fn mac_builder_config_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|path| path.join("mac-builder.json"))
-        .map_err(|error| error.to_string())
-}
-
-fn mac_builder_identity_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|path| path.join("macos-builder").join("identity.env"))
-        .map_err(|error| error.to_string())
-}
-
-fn mac_guest_access_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|path| path.join("macos-builder").join("guest.json"))
-        .map_err(|error| error.to_string())
-}
-
-fn mac_guest_identity_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|path| path.join("macos-builder").join("guest_ed25519"))
-        .map_err(|error| error.to_string())
-}
-
-fn mac_guest_public_key_path(app: &AppHandle) -> Result<PathBuf, String> {
-    mac_guest_identity_path(app).map(|path| path.with_file_name("guest_ed25519.pub"))
-}
-
-fn mac_guest_known_hosts_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|path| path.join("macos-builder").join("known_hosts"))
-        .map_err(|error| error.to_string())
-}
-
-fn apple_workspace_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|path| path.join("macos-builder").join("apple-workspace.json"))
-        .map_err(|error| error.to_string())
-}
-
-fn signing_provisioning_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|path| path.join("macos-builder").join("signing.json"))
-        .map_err(|error| error.to_string())
-}
-
-fn apple_archive_record_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|path| path.join("macos-builder").join("archive.json"))
-        .map_err(|error| error.to_string())
-}
-
-fn apple_archive_error_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|path| path.join("macos-builder").join("archive-error.txt"))
-        .map_err(|error| error.to_string())
-}
-
-fn managed_apple_artifacts_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_local_data_dir()
-        .map(|path| path.join("macos-builder").join("artifacts"))
-        .map_err(|error| error.to_string())
-}
-
-fn prepare_apple_archive_output_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let root = managed_apple_artifacts_dir(app)?;
+fn prepare_apple_archive_output_dir(paths: &MachinePaths) -> Result<PathBuf, String> {
+    let root = paths.artifacts_dir();
     fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     set_restricted_directory_permissions(&root)?;
     let operation_id = SystemTime::now()
@@ -1790,11 +3751,82 @@ fn prepare_apple_archive_output_dir(app: &AppHandle) -> Result<PathBuf, String> 
     Ok(directory)
 }
 
+fn remove_file_if_present(path: &std::path::Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 fn managed_apple_profiles_dir(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
         .map(|path| path.join("macos-builder").join("profiles"))
         .map_err(|error| error.to_string())
+}
+
+/// A provisioning profile this host already downloaded, kept so a kit can be rebuilt without
+/// going back to Apple. Only the file name and path are exposed; the contents stay on disk.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedAppleProfile {
+    file_name: String,
+    path: String,
+    saved_at_epoch_seconds: u64,
+}
+
+/// Managed copies are always written with this extension, so anything else in the directory is
+/// not ours to offer.
+fn is_managed_profile_file(file_name: &str) -> bool {
+    !file_name.starts_with('.')
+        && std::path::Path::new(file_name)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("mobileprovision"))
+}
+
+/// Lists the profiles already on this host. A vault that loses its paths does not lose these
+/// files, so they can be attached to a kit again in one step.
+#[tauri::command]
+fn list_managed_apple_profiles(app: AppHandle) -> Result<Vec<ManagedAppleProfile>, String> {
+    let directory = managed_apple_profiles_dir(&app)?;
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("Could not read {}: {error}", directory.display())),
+    };
+
+    let mut profiles: Vec<ManagedAppleProfile> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if !is_managed_profile_file(&file_name) {
+                return None;
+            }
+            let saved_at_epoch_seconds = entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |elapsed| elapsed.as_secs());
+
+            Some(ManagedAppleProfile {
+                file_name,
+                path: entry.path().to_string_lossy().to_string(),
+                saved_at_epoch_seconds,
+            })
+        })
+        .collect();
+
+    profiles.sort_by(|left, right| {
+        right
+            .saved_at_epoch_seconds
+            .cmp(&left.saved_at_epoch_seconds)
+            .then_with(|| left.file_name.cmp(&right.file_name))
+    });
+    profiles.truncate(MAX_PROVISIONING_PROFILES);
+
+    Ok(profiles)
 }
 
 fn save_managed_apple_profile(
@@ -1819,17 +3851,6 @@ fn save_managed_apple_profile(
     Ok(path)
 }
 
-fn clear_managed_apple_profiles(app: &AppHandle) -> Result<(), String> {
-    let directory = managed_apple_profiles_dir(app)?;
-    match fs::remove_dir_all(directory) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!(
-            "The vault was cleared, but BuildBridge could not remove its managed profile files: {error}"
-        )),
-    }
-}
-
 fn safe_apple_resource_component(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -1838,8 +3859,10 @@ fn safe_apple_resource_component(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || character == '-')
 }
 
-fn load_signing_provisioning(app: &AppHandle) -> Result<Option<StoredSigningProvisioning>, String> {
-    let path = signing_provisioning_path(app)?;
+fn load_signing_provisioning(
+    paths: &MachinePaths,
+) -> Result<Option<StoredSigningProvisioning>, String> {
+    let path = paths.signing_provisioning();
 
     match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
@@ -1850,8 +3873,8 @@ fn load_signing_provisioning(app: &AppHandle) -> Result<Option<StoredSigningProv
     }
 }
 
-fn load_apple_archive(app: &AppHandle) -> Result<Option<StoredAppleArchive>, String> {
-    let path = apple_archive_record_path(app)?;
+fn load_apple_archive(paths: &MachinePaths) -> Result<Option<StoredAppleArchive>, String> {
+    let path = paths.apple_archive_record();
 
     match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
@@ -1862,45 +3885,35 @@ fn load_apple_archive(app: &AppHandle) -> Result<Option<StoredAppleArchive>, Str
     }
 }
 
-fn save_apple_archive(app: &AppHandle, archive: &StoredAppleArchive) -> Result<(), String> {
-    let path = apple_archive_record_path(app)?;
+fn save_apple_archive(paths: &MachinePaths, archive: &StoredAppleArchive) -> Result<(), String> {
+    let path = paths.apple_archive_record();
     let encoded = serde_json::to_vec_pretty(archive).map_err(|error| error.to_string())?;
 
     write_restricted_file(&path, &encoded)
 }
 
-fn remove_apple_archive_record(app: &AppHandle) -> Result<(), String> {
-    let path = apple_archive_record_path(app)?;
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.to_string()),
-    }
+fn remove_apple_archive_record(paths: &MachinePaths) -> Result<(), String> {
+    remove_file_if_present(&paths.apple_archive_record())
 }
 
-fn save_apple_archive_error(app: &AppHandle, error: &str) -> Result<(), String> {
+fn save_apple_archive_error(paths: &MachinePaths, error: &str) -> Result<(), String> {
     let error = error
         .chars()
         .filter(|character| !character.is_control() || *character == '\n')
         .take(8_000)
         .collect::<String>();
-    write_restricted_file(&apple_archive_error_path(app)?, error.as_bytes())
+    write_restricted_file(&paths.apple_archive_error(), error.as_bytes())
 }
 
-fn remove_apple_archive_error(app: &AppHandle) -> Result<(), String> {
-    let path = apple_archive_error_path(app)?;
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.to_string()),
-    }
+fn remove_apple_archive_error(paths: &MachinePaths) -> Result<(), String> {
+    remove_file_if_present(&paths.apple_archive_error())
 }
 
 fn validated_apple_archive_directory(
-    app: &AppHandle,
+    paths: &MachinePaths,
     result: &AppleArchiveResult,
 ) -> Result<PathBuf, String> {
-    let root = managed_apple_artifacts_dir(app)?;
+    let root = paths.artifacts_dir();
     let root = fs::canonicalize(root)
         .map_err(|error| format!("The managed artifact directory is unavailable: {error}"))?;
     let ipa = fs::canonicalize(&result.ipa.path)
@@ -1923,26 +3936,21 @@ fn validated_apple_archive_directory(
 }
 
 fn save_signing_provisioning(
-    app: &AppHandle,
+    paths: &MachinePaths,
     signing: &StoredSigningProvisioning,
 ) -> Result<(), String> {
-    let path = signing_provisioning_path(app)?;
+    let path = paths.signing_provisioning();
     let encoded = serde_json::to_vec_pretty(signing).map_err(|error| error.to_string())?;
 
     write_restricted_file(&path, &encoded)
 }
 
-fn remove_signing_provisioning_record(app: &AppHandle) -> Result<(), String> {
-    let path = signing_provisioning_path(app)?;
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.to_string()),
-    }
+fn remove_signing_provisioning_record(paths: &MachinePaths) -> Result<(), String> {
+    remove_file_if_present(&paths.signing_provisioning())
 }
 
-fn load_apple_workspace(app: &AppHandle) -> Result<Option<StoredAppleWorkspace>, String> {
-    let path = apple_workspace_path(app)?;
+fn load_apple_workspace(paths: &MachinePaths) -> Result<Option<StoredAppleWorkspace>, String> {
+    let path = paths.apple_workspace();
 
     match fs::read(path) {
         Ok(bytes) => {
@@ -1966,8 +3974,11 @@ fn load_apple_workspace(app: &AppHandle) -> Result<Option<StoredAppleWorkspace>,
     }
 }
 
-fn save_apple_workspace(app: &AppHandle, workspace: &StoredAppleWorkspace) -> Result<(), String> {
-    let path = apple_workspace_path(app)?;
+fn save_apple_workspace(
+    paths: &MachinePaths,
+    workspace: &StoredAppleWorkspace,
+) -> Result<(), String> {
+    let path = paths.apple_workspace();
     let encoded = serde_json::to_vec_pretty(workspace).map_err(|error| error.to_string())?;
 
     write_restricted_file(&path, &encoded)
@@ -2042,6 +4053,7 @@ fn inspect_apple_workspace(path: &str) -> Result<StoredAppleWorkspace, String> {
         last_build_succeeded: false,
         last_xcode_version: None,
         last_native_lock_updated: false,
+        last_source: None,
     })
 }
 
@@ -2089,33 +4101,8 @@ fn release_bundle_identifier(project: &str) -> Option<String> {
     (release_values.len() == 1).then(|| release_values[0].clone())
 }
 
-fn load_mac_builder_config(app: &AppHandle) -> Result<Option<MacBuilderConfig>, String> {
-    let path = mac_builder_config_path(app)?;
-
-    match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| format!("The macOS builder configuration is invalid: {error}")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-fn save_mac_builder_config(app: &AppHandle, config: &MacBuilderConfig) -> Result<(), String> {
-    let path = mac_builder_config_path(app)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "The macOS builder configuration directory is unavailable.".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    fs::write(
-        path,
-        serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())
-}
-
-fn load_mac_guest_access(app: &AppHandle) -> Result<Option<StoredMacGuestAccess>, String> {
-    let path = mac_guest_access_path(app)?;
+fn load_mac_guest_access(paths: &MachinePaths) -> Result<Option<StoredMacGuestAccess>, String> {
+    let path = paths.guest_access();
 
     match fs::read(path) {
         Ok(bytes) => {
@@ -2132,8 +4119,11 @@ fn load_mac_guest_access(app: &AppHandle) -> Result<Option<StoredMacGuestAccess>
     }
 }
 
-fn save_mac_guest_access(app: &AppHandle, access: &StoredMacGuestAccess) -> Result<(), String> {
-    let path = mac_guest_access_path(app)?;
+fn save_mac_guest_access(
+    paths: &MachinePaths,
+    access: &StoredMacGuestAccess,
+) -> Result<(), String> {
+    let path = paths.guest_access();
     let encoded = serde_json::to_vec_pretty(access).map_err(|error| error.to_string())?;
 
     write_restricted_file(&path, &encoded)
@@ -2277,24 +4267,101 @@ fn credential_entry(runner_id: &str) -> Result<Entry, String> {
     Entry::new(CREDENTIAL_SERVICE, runner_id).map_err(|error| error.to_string())
 }
 
-async fn read_mac_builder_secrets() -> Result<Option<StoredMacBuilderSecrets>, String> {
+/// Reads every stored kit.
+///
+/// The first release kept one unnamed record in this entry. That shape is recognised by the
+/// absence of a `kits` array and migrated in memory to a single kit named "Signing kit", so an
+/// existing vault keeps working without a separate migration step.
+/// Decodes a vault entry, migrating the pre-registry single record.
+///
+/// Kept separate from the keyring so migration, corruption and defaulting are all testable.
+fn parse_signing_vault(encoded: &str) -> Result<StoredSigningKits, String> {
+    let value: serde_json::Value = serde_json::from_str(encoded)
+        .map_err(|error| format!("The signing vault entry is invalid: {error}"))?;
+
+    if value.get("kits").is_some() {
+        let mut kits: StoredSigningKits = serde_json::from_value(value)
+            .map_err(|error| format!("The signing vault entry is invalid: {error}"))?;
+        for kit in &mut kits.kits {
+            if kit.id.is_empty() {
+                kit.id = DEFAULT_SIGNING_KIT_ID.to_string();
+            }
+            if kit.name.is_empty() {
+                kit.name = "Signing kit".to_string();
+            }
+        }
+        return Ok(kits);
+    }
+
+    let legacy: StoredSigningKit = serde_json::from_value(value)
+        .map_err(|error| format!("The signing vault entry is invalid: {error}"))?;
+
+    Ok(StoredSigningKits {
+        kits: vec![StoredSigningKit {
+            id: DEFAULT_SIGNING_KIT_ID.to_string(),
+            name: "Signing kit".to_string(),
+            ..legacy
+        }],
+    })
+}
+
+/// The kit a machine uses: its explicit attachment, and nothing else. Signing material is
+/// never picked on a machine's behalf — not even when the host holds exactly one kit — because
+/// which identity signs a build is a decision, and the interface should show it being made.
+fn resolve_signing_kit<'a>(
+    kits: &'a [StoredSigningKit],
+    attached: Option<&str>,
+) -> Option<&'a StoredSigningKit> {
+    let id = attached?;
+
+    kits.iter().find(|kit| kit.id == id)
+}
+
+/// Whether a kit holds everything provisioning needs.
+fn kit_is_complete(kit: &StoredSigningKit) -> bool {
+    kit.signing_certificate_path.is_some()
+        && kit.signing_certificate_password.is_some()
+        && !kit.provisioning_profile_paths.is_empty()
+        && kit.guest_keychain_password.is_some()
+}
+
+/// Classifies what a machine can do about signing right now.
+///
+/// `KitMissing` is the state left by an operating-system keyring being cleared: the guest still
+/// holds a provisioned keychain, but the material that created it is gone, so the interface must
+/// ask for the kit again instead of claiming signing is configured.
+fn signing_health(
+    vault_issue: Option<&str>,
+    kit: Option<&StoredSigningKit>,
+    provisioned: bool,
+) -> SigningHealth {
+    match (vault_issue, kit) {
+        (Some(_), _) => SigningHealth::VaultUnavailable,
+        (None, None) if provisioned => SigningHealth::KitMissing,
+        (None, None) => SigningHealth::Unconfigured,
+        (None, Some(kit)) if kit_is_complete(kit) => SigningHealth::Ready,
+        (None, Some(_)) => SigningHealth::Incomplete,
+    }
+}
+
+async fn read_signing_kits() -> Result<StoredSigningKits, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let entry = mac_builder_credential_entry()?;
 
         match entry.get_password() {
-            Ok(encoded) => serde_json::from_str(&encoded)
-                .map(Some)
-                .map_err(|error| format!("The macOS signing vault entry is invalid: {error}")),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(error.to_string()),
+            Ok(encoded) => parse_signing_vault(&encoded),
+            Err(keyring::Error::NoEntry) => Ok(StoredSigningKits::default()),
+            Err(error) => Err(format!(
+                "The operating-system credential vault could not be read: {error}"
+            )),
         }
     })
     .await
     .map_err(|error| error.to_string())?
 }
 
-async fn store_mac_builder_secrets(secrets: StoredMacBuilderSecrets) -> Result<(), String> {
-    let encoded = serde_json::to_string(&secrets).map_err(|error| error.to_string())?;
+async fn write_signing_kits(kits: StoredSigningKits) -> Result<(), String> {
+    let encoded = serde_json::to_string(&kits).map_err(|error| error.to_string())?;
 
     tauri::async_runtime::spawn_blocking(move || {
         mac_builder_credential_entry()?
@@ -2303,6 +4370,337 @@ async fn store_mac_builder_secrets(secrets: StoredMacBuilderSecrets) -> Result<(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+/// The kit a machine will provision: its explicit attachment, or the only kit on the host.
+async fn resolve_signing_kit_for(
+    app: &AppHandle,
+    machine_id: &str,
+) -> Result<StoredSigningKit, String> {
+    optional_signing_kit_for(app, machine_id)
+        .await?
+        .ok_or_else(|| {
+            "Attach a signing kit to this machine first. Signing kits are stored once on this host and attached per machine."
+                .to_string()
+        })
+}
+
+/// The kit attached to a machine, if it is attached to one that is still stored.
+async fn optional_signing_kit_for(
+    app: &AppHandle,
+    machine_id: &str,
+) -> Result<Option<StoredSigningKit>, String> {
+    let attached = attached_kit_id(app, machine_id)?;
+    let kits = read_signing_kits().await?.kits;
+
+    Ok(resolve_signing_kit(&kits, attached.as_deref()).cloned())
+}
+
+fn attached_kit_id(app: &AppHandle, machine_id: &str) -> Result<Option<String>, String> {
+    Ok(machines::load_registry(app)?
+        .find(machine_id)
+        .ok()
+        .and_then(|machine| machine.signing_kit_id.clone()))
+}
+
+async fn save_signing_kit_record(kit: StoredSigningKit) -> Result<(), String> {
+    let mut kits = read_signing_kits().await?;
+    match kits.kits.iter_mut().find(|stored| stored.id == kit.id) {
+        Some(stored) => *stored = kit,
+        None => kits.kits.push(kit),
+    }
+
+    write_signing_kits(kits).await
+}
+
+fn env_set_credential_entry() -> Result<Entry, String> {
+    Entry::new(ENV_SET_CREDENTIAL_SERVICE, MAC_BUILDER_CREDENTIAL_ACCOUNT)
+        .map_err(|error| error.to_string())
+}
+
+async fn read_env_sets() -> Result<StoredEnvSets, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let entry = env_set_credential_entry()?;
+
+        match entry.get_password() {
+            Ok(encoded) => serde_json::from_str::<StoredEnvSets>(&encoded)
+                .map_err(|error| format!("The env set vault entry is invalid: {error}")),
+            Err(keyring::Error::NoEntry) => Ok(StoredEnvSets::default()),
+            Err(error) => Err(format!(
+                "The operating-system credential vault could not be read: {error}"
+            )),
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+async fn write_env_sets(sets: StoredEnvSets) -> Result<(), String> {
+    let encoded = serde_json::to_string(&sets).map_err(|error| error.to_string())?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        env_set_credential_entry()?
+            .set_password(&encoded)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn attached_env_set_id(app: &AppHandle, machine_id: &str) -> Result<Option<String>, String> {
+    Ok(machines::load_registry(app)?
+        .find(machine_id)
+        .ok()
+        .and_then(|machine| machine.env_set_id.clone()))
+}
+
+/// The attached set rendered for the guest, or `None` when the machine has none. A missing set
+/// is an error rather than a silent build without variables, because that is how a production
+/// build ends up pointed at the wrong backend.
+async fn guest_env_files_for(
+    app: &AppHandle,
+    machine_id: &str,
+) -> Result<Option<GuestEnvFiles>, String> {
+    Ok(
+        guest_env_files_for_set(attached_env_set_id(app, machine_id)?.as_deref())
+            .await?
+            .map(|(_, files)| files),
+    )
+}
+
+/// One stored set rendered for the guest, with its name; `None` for no set at all.
+async fn guest_env_files_for_set(
+    set_id: Option<&str>,
+) -> Result<Option<(String, GuestEnvFiles)>, String> {
+    let Some(id) = set_id else {
+        return Ok(None);
+    };
+    let stored = read_env_sets().await?;
+    let set = stored
+        .sets
+        .into_iter()
+        .find(|set| set.id == id)
+        .ok_or_else(|| {
+            "That env set is no longer stored. Choose another or build without one.".to_string()
+        })?;
+
+    Ok(Some((
+        set.name.clone(),
+        GuestEnvFiles {
+            dotenv: render_dotenv(&set.variables),
+            shell: render_shell_env(&set.variables),
+        },
+    )))
+}
+
+/// Plain values are already in every summary, so only the secrets come back this way.
+fn stored_env_secrets(
+    stored: &StoredEnvSets,
+    set_id: &str,
+) -> Result<Vec<EnvVariableSummary>, String> {
+    let set = stored
+        .sets
+        .iter()
+        .find(|set| set.id == set_id)
+        .ok_or_else(|| "This env set is no longer stored.".to_string())?;
+
+    Ok(set
+        .variables
+        .iter()
+        .filter(|variable| variable.secret)
+        .map(|variable| EnvVariableSummary {
+            key: variable.key.clone(),
+            value: variable.value.clone(),
+        })
+        .collect())
+}
+
+fn summarize_env_set(set: &StoredEnvSet, machines: &[machines::StoredMachine]) -> EnvSetSummary {
+    EnvSetSummary {
+        id: set.id.clone(),
+        name: set.name.clone(),
+        variables: set
+            .variables
+            .iter()
+            .filter(|variable| !variable.secret)
+            .map(|variable| EnvVariableSummary {
+                key: variable.key.clone(),
+                value: variable.value.clone(),
+            })
+            .collect(),
+        secret_keys: set
+            .variables
+            .iter()
+            .filter(|variable| variable.secret)
+            .map(|variable| variable.key.clone())
+            .collect(),
+        created_at_epoch_seconds: set.created_at_epoch_seconds,
+        attached_machines: machines
+            .iter()
+            .filter(|machine| machine.env_set_id.as_deref() == Some(set.id.as_str()))
+            .map(|machine| machine.config.name.clone())
+            .collect(),
+    }
+}
+
+/// A variable name as every dotenv loader and POSIX shell agree on it.
+fn valid_env_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 120
+        && key
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && key
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+/// Why a value cannot be stored, if it cannot. Both renderings below have to read it back the
+/// same way, which rules out line breaks and a value that mixes both kinds of quote.
+fn env_value_issue(value: &str) -> Option<&'static str> {
+    if value.len() > MAX_ENV_VALUE_LENGTH {
+        return Some("is longer than 4096 characters");
+    }
+    if value
+        .chars()
+        .any(|c| c == '\n' || c == '\r' || (c.is_control() && c != '\t'))
+    {
+        return Some("cannot contain line breaks or control characters");
+    }
+    if value.contains('"') && value.contains('\'') {
+        return Some("cannot contain both single and double quotes");
+    }
+
+    None
+}
+
+/// Applies an edit to a set: every listed key with a typed value takes it, a listed key with no
+/// value keeps what is stored, and an unlisted stored key is removed. A stored secret is never
+/// carried over as a plain variable, since that would show a value stored on the promise that it
+/// never would be.
+fn merge_env_variables(
+    existing: Option<&StoredEnvSet>,
+    input: &EnvSetInput,
+) -> Result<Vec<StoredEnvVariable>, String> {
+    if input.variables.len() > MAX_ENV_VARIABLES {
+        return Err(format!(
+            "An env set holds at most {MAX_ENV_VARIABLES} variables."
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut variables = Vec::with_capacity(input.variables.len());
+    for variable in &input.variables {
+        let key = variable.key.trim();
+        if !valid_env_key(key) {
+            return Err(format!(
+                "\"{key}\" is not a valid variable name. Use letters, digits and underscores, not starting with a digit."
+            ));
+        }
+        if !seen.insert(key.to_string()) {
+            return Err(format!("{key} is listed twice."));
+        }
+        let value = match &variable.value {
+            Some(value) => value.clone(),
+            None => {
+                let stored = existing
+                    .and_then(|set| set.variables.iter().find(|stored| stored.key == key))
+                    .ok_or_else(|| format!("{key} needs a value."))?;
+                if stored.secret && !variable.secret {
+                    return Err(format!(
+                        "{key} is stored as a secret. Enter its value to keep it as a variable."
+                    ));
+                }
+                stored.value.clone()
+            }
+        };
+        if let Some(issue) = env_value_issue(&value) {
+            return Err(format!("The value of {key} {issue}."));
+        }
+        variables.push(StoredEnvVariable {
+            key: key.to_string(),
+            value,
+            secret: variable.secret,
+        });
+    }
+
+    Ok(variables)
+}
+
+/// The set as Vite's dotenv loader reads it. Double quotes with `$` escaped so nothing expands;
+/// single quotes when the value itself holds a double quote, which dotenv takes verbatim.
+fn render_dotenv(variables: &[StoredEnvVariable]) -> String {
+    let mut out = String::from(
+        "# Written by BuildBridge from the attached env set. Not part of the project.\n",
+    );
+    for variable in variables {
+        out.push_str(&variable.key);
+        out.push('=');
+        if variable.value.contains('"') {
+            out.push('\'');
+            out.push_str(&variable.value);
+            out.push('\'');
+        } else {
+            out.push('"');
+            for character in variable.value.chars() {
+                match character {
+                    '\\' => out.push_str("\\\\"),
+                    '$' => out.push_str("\\$"),
+                    '`' => out.push_str("\\`"),
+                    other => out.push(other),
+                }
+            }
+            out.push('"');
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+/// The same set as a POSIX shell sources it: single-quoted, which is exact for anything but a
+/// single quote, and that is spelled `'\''`.
+fn render_shell_env(variables: &[StoredEnvVariable]) -> String {
+    let mut out = String::from("# Written by BuildBridge from the attached env set.\n");
+    for variable in variables {
+        out.push_str("export ");
+        out.push_str(&variable.key);
+        out.push_str("='");
+        out.push_str(&variable.value.replace('\'', "'\\''"));
+        out.push_str("'\n");
+    }
+
+    out
+}
+
+/// Removes an identity BuildBridge created for this kit. Its password lived only in the kit
+/// that was just deleted, so the file could not be used again anyway.
+fn remove_managed_certificate_for(app: &AppHandle, kit: &StoredSigningKit) -> Result<(), String> {
+    let managed = managed_apple_certificates_dir(app)?;
+    if let Some(path) = &kit.signing_certificate_path {
+        let candidate = std::path::Path::new(path);
+        if candidate.starts_with(&managed)
+            && let Some(directory) = candidate.parent()
+            && directory != managed
+        {
+            let _ = fs::remove_dir_all(directory);
+        }
+    }
+
+    Ok(())
+}
+
+/// Removes only the Apple-created profile files this kit owns, leaving other kits alone.
+fn remove_managed_profiles_for(app: &AppHandle, kit: &StoredSigningKit) -> Result<(), String> {
+    let managed = managed_apple_profiles_dir(app)?;
+    for path in &kit.provisioning_profile_paths {
+        let candidate = std::path::Path::new(path);
+        if candidate.starts_with(&managed) {
+            remove_file_if_present(candidate)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn mac_builder_credential_entry() -> Result<Entry, String> {
@@ -2316,6 +4714,9 @@ fn mac_builder_credential_entry() -> Result<Entry, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Native file pickers for the paths BuildBridge asks for: signing files, a project
+        // folder, and the Xcode archive.
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             get_runner_status,
@@ -2325,15 +4726,33 @@ pub fn run() {
             authorize_realtime,
             heartbeat_runner,
             run_once,
+            list_machines,
+            create_machine,
+            delete_machine,
+            discard_machine_container,
             get_mac_builder_status,
             configure_mac_builder,
             launch_mac_builder,
             stop_mac_builder,
-            save_mac_builder_secrets,
-            clear_mac_builder_secrets,
+            list_signing_kits,
+            save_signing_kit,
+            delete_signing_kit,
+            attach_signing_kit,
             verify_apple_developer_team,
             create_apple_replacement_profile,
+            download_apple_profile,
+            create_apple_distribution_certificate,
+            list_managed_apple_profiles,
+            cancel_machine_operation,
+            list_guest_optimizations,
+            apply_guest_optimization,
+            list_env_sets,
+            save_env_set,
+            delete_env_set,
+            attach_env_set,
+            reveal_env_secrets,
             configure_mac_guest_access,
+            authorize_mac_guest_key,
             trust_mac_builder_guest,
             forget_mac_builder_guest_trust,
             import_mac_xcode_package,
@@ -2366,8 +4785,10 @@ pub fn run() {
 mod tests {
     use super::*;
 
-    fn empty_secret_input() -> MacBuilderSecretsInput {
-        MacBuilderSecretsInput {
+    fn empty_secret_input() -> SigningKitInput {
+        SigningKitInput {
+            kit_id: None,
+            name: "Team kit".to_string(),
             app_store_connect_key_id: String::new(),
             app_store_connect_issuer_id: String::new(),
             app_store_connect_private_key_path: String::new(),
@@ -2380,12 +4801,12 @@ mod tests {
 
     #[test]
     fn app_store_connect_credentials_must_be_complete() {
-        let input = MacBuilderSecretsInput {
+        let input = SigningKitInput {
             app_store_connect_key_id: "KEY123".to_string(),
             ..empty_secret_input()
         };
 
-        let error = normalize_mac_builder_secrets(input).expect_err("partial key must fail");
+        let error = normalize_signing_kit(input).expect_err("partial key must fail");
 
         assert_eq!(
             error,
@@ -2396,14 +4817,14 @@ mod tests {
     #[test]
     fn malformed_app_store_connect_private_key_is_rejected() {
         let private_key_path = write_test_private_key("malformed", "not a private key");
-        let input = MacBuilderSecretsInput {
+        let input = SigningKitInput {
             app_store_connect_key_id: "KEY123".to_string(),
             app_store_connect_issuer_id: "issuer-123".to_string(),
             app_store_connect_private_key_path: private_key_path.display().to_string(),
             ..empty_secret_input()
         };
 
-        let error = normalize_mac_builder_secrets(input).expect_err("invalid PEM must fail");
+        let error = normalize_signing_kit(input).expect_err("invalid PEM must fail");
         remove_test_private_key(&private_key_path);
 
         assert_eq!(
@@ -2418,14 +4839,13 @@ mod tests {
             "AuthKey_837B3VAM6Z",
             "-----BEGIN PRIVATE KEY-----\ntest-only\n-----END PRIVATE KEY-----",
         );
-        let input = MacBuilderSecretsInput {
+        let input = SigningKitInput {
             app_store_connect_issuer_id: "issuer-123".to_string(),
             app_store_connect_private_key_path: private_key_path.display().to_string(),
             ..empty_secret_input()
         };
 
-        let secrets =
-            normalize_mac_builder_secrets(input).expect("complete key should be accepted");
+        let secrets = normalize_signing_kit(input).expect("complete key should be accepted");
         remove_test_private_key(&private_key_path);
 
         assert_eq!(
@@ -2446,14 +4866,14 @@ mod tests {
             "AuthKey_837B3VAM6Z",
             "-----BEGIN PRIVATE KEY-----\ntest-only\n-----END PRIVATE KEY-----",
         );
-        let input = MacBuilderSecretsInput {
+        let input = SigningKitInput {
             app_store_connect_key_id: "DIFFERENT1".to_string(),
             app_store_connect_issuer_id: "issuer-123".to_string(),
             app_store_connect_private_key_path: private_key_path.display().to_string(),
             ..empty_secret_input()
         };
 
-        let error = normalize_mac_builder_secrets(input).expect_err("mismatched key must fail");
+        let error = normalize_signing_kit(input).expect_err("mismatched key must fail");
         remove_test_private_key(&private_key_path);
 
         assert_eq!(
@@ -2492,7 +4912,10 @@ mod tests {
 
     #[test]
     fn secret_summary_exposes_metadata_without_secret_values() {
-        let secrets = StoredMacBuilderSecrets {
+        let secrets = StoredSigningKit {
+            id: "team".to_string(),
+            name: "Team kit".to_string(),
+            created_at_epoch_seconds: 0,
             app_store_connect_key_id: Some("KEY123".to_string()),
             app_store_connect_issuer_id: Some("issuer-123".to_string()),
             app_store_connect_private_key: Some("private-value".to_string()),
@@ -2502,7 +4925,7 @@ mod tests {
             guest_keychain_password: Some("keychain-password".to_string()),
         };
 
-        let summary = summarize_mac_builder_secrets(&secrets);
+        let summary = summarize_signing_kit(&secrets);
         let encoded = serde_json::to_string(&summary).expect("summary should serialize");
 
         assert!(summary.app_store_connect_configured);
@@ -2511,7 +4934,11 @@ mod tests {
             summary.signing_certificate_name.as_deref(),
             Some("signing.p12")
         );
-        assert_eq!(summary.provisioning_profile_count, 1);
+        assert_eq!(
+            summary.provisioning_profile_names,
+            vec!["app.mobileprovision"]
+        );
+        assert_eq!(summary.name, "Team kit");
         assert!(!encoded.contains("private-value"));
         assert!(!encoded.contains("certificate-password"));
         assert!(!encoded.contains("keychain-password"));
@@ -2519,7 +4946,10 @@ mod tests {
 
     #[test]
     fn saving_one_signing_route_preserves_the_other_stored_route() {
-        let existing = StoredMacBuilderSecrets {
+        let existing = StoredSigningKit {
+            id: "team".to_string(),
+            name: "Team kit".to_string(),
+            created_at_epoch_seconds: 7,
             app_store_connect_key_id: Some("KEY123".to_string()),
             app_store_connect_issuer_id: Some("issuer-123".to_string()),
             app_store_connect_private_key: Some("private-value".to_string()),
@@ -2528,15 +4958,17 @@ mod tests {
             provisioning_profile_paths: Vec::new(),
             guest_keychain_password: None,
         };
-        let incoming = StoredMacBuilderSecrets {
+        let incoming = StoredSigningKit {
+            id: String::new(),
+            name: "Renamed kit".to_string(),
             signing_certificate_path: Some("/secure/signing.p12".to_string()),
             signing_certificate_password: Some("certificate-password".to_string()),
             provisioning_profile_paths: vec!["/secure/app.mobileprovision".to_string()],
             guest_keychain_password: Some("keychain-password".to_string()),
-            ..StoredMacBuilderSecrets::default()
+            ..StoredSigningKit::default()
         };
 
-        let merged = merge_mac_builder_secrets(existing, incoming);
+        let merged = merge_signing_kit(existing, incoming);
 
         assert_eq!(merged.app_store_connect_key_id.as_deref(), Some("KEY123"));
         assert_eq!(
@@ -2544,24 +4976,40 @@ mod tests {
             Some("/secure/signing.p12")
         );
         assert_eq!(merged.provisioning_profile_paths.len(), 1);
+        assert_eq!(merged.id, "team", "an update keeps the kit's identity");
+        assert_eq!(merged.created_at_epoch_seconds, 7);
+        assert_eq!(merged.name, "Renamed kit", "an update may rename the kit");
+    }
+
+    #[test]
+    fn a_kit_needs_a_name() {
+        let input = SigningKitInput {
+            name: "   ".to_string(),
+            ..empty_secret_input()
+        };
+
+        assert_eq!(
+            normalize_signing_kit(input).expect_err("a blank name must fail"),
+            "Give the signing kit a name of 1 to 60 characters."
+        );
     }
 
     #[test]
     fn xcode_project_settings_detect_one_team_and_prefer_the_release_bundle() {
         let project = r#"
-            DEVELOPMENT_TEAM = F5QA294KSX;
-            PRODUCT_BUNDLE_IDENTIFIER = nz.co.thinksolar.app.debug;
-            DEVELOPMENT_TEAM = F5QA294KSX;
-            PRODUCT_BUNDLE_IDENTIFIER = nz.co.thinksolar.app;
+            DEVELOPMENT_TEAM = TEAM123456;
+            PRODUCT_BUNDLE_IDENTIFIER = com.example.app.debug;
+            DEVELOPMENT_TEAM = TEAM123456;
+            PRODUCT_BUNDLE_IDENTIFIER = com.example.app;
         "#;
 
         assert_eq!(
             one_xcode_setting(project, "DEVELOPMENT_TEAM").as_deref(),
-            Some("F5QA294KSX")
+            Some("TEAM123456")
         );
         assert_eq!(
             release_bundle_identifier(project).as_deref(),
-            Some("nz.co.thinksolar.app")
+            Some("com.example.app")
         );
         assert!(
             one_xcode_setting("DEVELOPMENT_TEAM = $(malicious);", "DEVELOPMENT_TEAM").is_none()
@@ -2586,6 +5034,427 @@ mod tests {
 
         assert_eq!(workspace.development_team, None);
         assert_eq!(workspace.bundle_identifier, None);
+    }
+
+    fn kit(id: &str, complete: bool) -> StoredSigningKit {
+        StoredSigningKit {
+            id: id.to_string(),
+            name: format!("{id} kit"),
+            signing_certificate_path: complete.then(|| "/secure/dist.p12".to_string()),
+            signing_certificate_password: complete.then(|| "passphrase".to_string()),
+            provisioning_profile_paths: if complete {
+                vec!["/secure/app.mobileprovision".to_string()]
+            } else {
+                Vec::new()
+            },
+            guest_keychain_password: complete.then(|| "keychain".to_string()),
+            ..StoredSigningKit::default()
+        }
+    }
+
+    fn variable(key: &str, value: &str) -> StoredEnvVariable {
+        StoredEnvVariable {
+            key: key.to_string(),
+            value: value.to_string(),
+            secret: false,
+        }
+    }
+
+    fn secret(key: &str, value: &str) -> StoredEnvVariable {
+        StoredEnvVariable {
+            secret: true,
+            ..variable(key, value)
+        }
+    }
+
+    #[test]
+    fn env_keys_follow_shell_and_dotenv_naming() {
+        for ok in ["VITE_API_URL", "_private", "A1", "lower_case"] {
+            assert!(valid_env_key(ok), "{ok}");
+        }
+        for bad in ["", "1ABC", "MY-KEY", "MY KEY", "a.b", "KEY="] {
+            assert!(!valid_env_key(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn env_values_that_the_two_renderings_would_disagree_on_are_refused() {
+        assert_eq!(env_value_issue("https://api.example.com"), None);
+        assert_eq!(env_value_issue("it's fine"), None);
+        assert_eq!(env_value_issue("say \"hi\""), None);
+        assert!(env_value_issue("both ' and \"").is_some());
+        assert!(env_value_issue("two\nlines").is_some());
+        assert!(env_value_issue(&"x".repeat(MAX_ENV_VALUE_LENGTH + 1)).is_some());
+    }
+
+    #[test]
+    fn dotenv_rendering_keeps_dollars_and_quotes_literal() {
+        let rendered = render_dotenv(&[
+            variable("VITE_API_URL", "https://api.example.com/v1"),
+            variable("VITE_PRICE", "$5 and `more`"),
+            variable("VITE_QUOTED", "say \"hi\""),
+        ]);
+
+        assert!(rendered.contains("VITE_API_URL=\"https://api.example.com/v1\"\n"));
+        assert!(rendered.contains("VITE_PRICE=\"\\$5 and \\`more\\`\"\n"));
+        assert!(rendered.contains("VITE_QUOTED='say \"hi\"'\n"));
+        assert!(rendered.starts_with("# Written by BuildBridge"));
+    }
+
+    #[test]
+    fn shell_rendering_single_quotes_everything_exactly() {
+        let rendered = render_shell_env(&[
+            variable("API_URL", "https://api.example.com/$path"),
+            variable("GREETING", "it's fine"),
+        ]);
+
+        assert!(rendered.contains("export API_URL='https://api.example.com/$path'\n"));
+        assert!(rendered.contains("export GREETING='it'\\''s fine'\n"));
+    }
+
+    #[test]
+    fn editing_a_set_keeps_unchanged_values_and_drops_unlisted_keys() {
+        let existing = StoredEnvSet {
+            id: "production".to_string(),
+            name: "production".to_string(),
+            variables: vec![variable("KEEP", "old"), variable("GONE", "x")],
+            created_at_epoch_seconds: 0,
+        };
+        let input = EnvSetInput {
+            set_id: Some("production".to_string()),
+            name: "production".to_string(),
+            variables: vec![
+                EnvVariableInput {
+                    key: "KEEP".to_string(),
+                    value: None,
+                    secret: false,
+                },
+                EnvVariableInput {
+                    key: "NEW".to_string(),
+                    value: Some("fresh".to_string()),
+                    secret: false,
+                },
+            ],
+        };
+
+        let merged = merge_env_variables(Some(&existing), &input).expect("merges");
+
+        assert_eq!(
+            merged,
+            vec![variable("KEEP", "old"), variable("NEW", "fresh")]
+        );
+    }
+
+    #[test]
+    fn a_new_key_needs_a_value_and_keys_cannot_repeat() {
+        let missing = EnvSetInput {
+            set_id: None,
+            name: "staging".to_string(),
+            variables: vec![EnvVariableInput {
+                key: "NEW".to_string(),
+                value: None,
+                secret: false,
+            }],
+        };
+        assert!(merge_env_variables(None, &missing).is_err());
+
+        let repeated = EnvSetInput {
+            set_id: None,
+            name: "staging".to_string(),
+            variables: vec![
+                EnvVariableInput {
+                    key: "A".to_string(),
+                    value: Some("1".to_string()),
+                    secret: false,
+                },
+                EnvVariableInput {
+                    key: "A".to_string(),
+                    value: Some("2".to_string()),
+                    secret: false,
+                },
+            ],
+        };
+        assert!(merge_env_variables(None, &repeated).is_err());
+    }
+
+    #[test]
+    fn a_stored_secret_is_kept_blank_but_never_carried_into_a_plain_variable() {
+        let existing = StoredEnvSet {
+            id: "production".to_string(),
+            name: "production".to_string(),
+            variables: vec![
+                secret("TOKEN", "hidden"),
+                variable("URL", "https://a.example"),
+            ],
+            created_at_epoch_seconds: 0,
+        };
+        let listed = |secret: bool| EnvSetInput {
+            set_id: Some("production".to_string()),
+            name: "production".to_string(),
+            variables: vec![EnvVariableInput {
+                key: "TOKEN".to_string(),
+                value: None,
+                secret,
+            }],
+        };
+
+        assert_eq!(
+            merge_env_variables(Some(&existing), &listed(true)).expect("keeps"),
+            vec![secret("TOKEN", "hidden")]
+        );
+        let refused = merge_env_variables(Some(&existing), &listed(false)).expect_err("refuses");
+        assert!(refused.contains("stored as a secret"), "{refused}");
+    }
+
+    #[test]
+    fn sets_stored_before_secrets_were_distinguished_read_back_as_secrets() {
+        let stored: StoredEnvSets = serde_json::from_str(
+            r#"{"sets":[{"id":"p","name":"p","variables":[{"key":"A","value":"1"},{"key":"B","value":"2","secret":false}]}]}"#,
+        )
+        .expect("parses");
+
+        assert_eq!(
+            stored.sets[0].variables,
+            vec![secret("A", "1"), variable("B", "2")]
+        );
+    }
+
+    #[test]
+    fn a_summary_shows_plain_values_and_only_the_keys_of_secrets() {
+        let set = StoredEnvSet {
+            id: "production".to_string(),
+            name: "production".to_string(),
+            variables: vec![
+                variable("URL", "https://a.example"),
+                secret("TOKEN", "hidden"),
+            ],
+            created_at_epoch_seconds: 0,
+        };
+
+        let summary = summarize_env_set(&set, &[]);
+
+        assert_eq!(summary.variables.len(), 1);
+        assert_eq!(summary.variables[0].key, "URL");
+        assert_eq!(summary.variables[0].value, "https://a.example");
+        assert_eq!(summary.secret_keys, vec!["TOKEN".to_string()]);
+        let encoded = serde_json::to_string(&summary).expect("serializes");
+        assert!(!encoded.contains("hidden"), "{encoded}");
+    }
+
+    #[test]
+    fn a_set_reveals_its_secrets_and_nothing_else() {
+        let stored = StoredEnvSets {
+            sets: vec![StoredEnvSet {
+                id: "production".to_string(),
+                name: "production".to_string(),
+                variables: vec![
+                    variable("URL", "https://a.example"),
+                    secret("TOKEN", "hidden"),
+                ],
+                created_at_epoch_seconds: 0,
+            }],
+        };
+
+        assert_eq!(
+            stored_env_secrets(&stored, "production").expect("reveals"),
+            vec![EnvVariableSummary {
+                key: "TOKEN".to_string(),
+                value: "hidden".to_string(),
+            }]
+        );
+        assert!(stored_env_secrets(&stored, "staging").is_err());
+    }
+
+    #[test]
+    fn the_openssl_recipe_is_fixed_argv_with_the_password_kept_out_of_it() {
+        let key = certificate_key_args();
+        assert_eq!(key[0], "genpkey");
+        assert!(key.contains(&"rsa_keygen_bits:2048".to_string()));
+
+        let csr = certificate_csr_args("/keys/key.pem");
+        assert!(csr.contains(&"-batch".to_string()), "must never prompt");
+        assert!(csr.contains(&"/CN=BuildBridge Distribution".to_string()));
+
+        let p12 = certificate_p12_args(
+            "/keys/key.pem",
+            "/keys/certificate.pem",
+            "Apple Distribution: Example",
+        );
+        assert!(p12.contains(&"env:BUILDBRIDGE_P12_PASSWORD".to_string()));
+        assert!(!p12.iter().any(|arg| arg.starts_with("pass:")));
+        assert!(
+            !p12.contains(&"-out".to_string()),
+            "the .p12 is written owner-only by BuildBridge"
+        );
+        for arg in key.iter().chain(csr.iter()).chain(p12.iter()) {
+            assert!(!arg.contains(';') && !arg.contains("$("));
+        }
+    }
+
+    #[test]
+    fn only_managed_profile_copies_are_offered_from_the_host() {
+        assert!(is_managed_profile_file(
+            "2f3d9c10-0a6b-4f4e-9c2e-1d0b7a5e6c11.mobileprovision"
+        ));
+        assert!(is_managed_profile_file("AppStore.MOBILEPROVISION"));
+        assert!(!is_managed_profile_file(".hidden.mobileprovision"));
+        assert!(!is_managed_profile_file("notes.txt"));
+        assert!(!is_managed_profile_file("mobileprovision"));
+        assert!(!is_managed_profile_file(""));
+    }
+
+    #[test]
+    fn the_pre_registry_vault_record_migrates_to_one_named_kit() {
+        // Exactly what the first release wrote: a bare object with no `kits` array.
+        let legacy = serde_json::json!({
+            "appStoreConnectKeyId": "KEYID12345",
+            "appStoreConnectIssuerId": "issuer",
+            "appStoreConnectPrivateKey": "-----BEGIN PRIVATE KEY-----",
+            "signingCertificatePath": "/secure/dist.p12",
+            "signingCertificatePassword": "passphrase",
+            "provisioningProfilePaths": ["/secure/app.mobileprovision"],
+            "guestKeychainPassword": "keychain"
+        })
+        .to_string();
+
+        let kits = parse_signing_vault(&legacy).expect("the legacy record should migrate");
+
+        assert_eq!(kits.kits.len(), 1);
+        assert_eq!(kits.kits[0].id, DEFAULT_SIGNING_KIT_ID);
+        assert_eq!(kits.kits[0].name, "Signing kit");
+        assert_eq!(
+            kits.kits[0].signing_certificate_path.as_deref(),
+            Some("/secure/dist.p12"),
+            "migration must carry the material across, not just the shape"
+        );
+        assert!(kit_is_complete(&kits.kits[0]));
+    }
+
+    #[test]
+    fn a_registry_vault_record_is_read_as_stored_and_gains_missing_identity() {
+        let stored = serde_json::json!({
+            "kits": [
+                { "id": "team-a", "name": "Team A", "provisioningProfilePaths": [],
+                  "appStoreConnectKeyId": null, "appStoreConnectIssuerId": null,
+                  "appStoreConnectPrivateKey": null, "signingCertificatePath": null,
+                  "signingCertificatePassword": null, "guestKeychainPassword": null },
+                { "provisioningProfilePaths": [],
+                  "appStoreConnectKeyId": null, "appStoreConnectIssuerId": null,
+                  "appStoreConnectPrivateKey": null, "signingCertificatePath": null,
+                  "signingCertificatePassword": null, "guestKeychainPassword": null }
+            ]
+        })
+        .to_string();
+
+        let kits = parse_signing_vault(&stored).expect("a registry record should load");
+
+        assert_eq!(kits.kits.len(), 2);
+        assert_eq!(kits.kits[0].id, "team-a");
+        assert_eq!(
+            kits.kits[1].id, DEFAULT_SIGNING_KIT_ID,
+            "a blank id is filled in"
+        );
+        assert_eq!(kits.kits[1].name, "Signing kit");
+    }
+
+    #[test]
+    fn an_empty_registry_vault_record_is_not_mistaken_for_a_legacy_one() {
+        let kits = parse_signing_vault(r#"{"kits": []}"#).expect("an empty registry should load");
+
+        assert!(kits.kits.is_empty());
+    }
+
+    #[test]
+    fn unreadable_vault_content_is_reported_rather_than_silently_empty() {
+        let error = parse_signing_vault("not json").expect_err("garbage must not read as empty");
+
+        assert!(
+            error.starts_with("The signing vault entry is invalid"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn a_machine_uses_its_attached_kit_and_no_other() {
+        let kits = vec![kit("team-a", true), kit("team-b", true)];
+
+        let resolved =
+            resolve_signing_kit(&kits, Some("team-b")).expect("the attachment should resolve");
+
+        assert_eq!(resolved.id, "team-b");
+        assert!(resolve_signing_kit(&kits, Some("gone")).is_none());
+    }
+
+    #[test]
+    fn a_kit_is_never_picked_for_a_machine_even_when_it_is_the_only_one() {
+        let kits = vec![kit("only", true)];
+
+        assert!(
+            resolve_signing_kit(&kits, None).is_none(),
+            "which identity signs a build is a choice the interface must show being made"
+        );
+    }
+
+    #[test]
+    fn an_attachment_to_a_removed_kit_resolves_to_nothing() {
+        let kits = vec![kit("team-a", true)];
+
+        assert!(resolve_signing_kit(&kits, Some("deleted")).is_none());
+    }
+
+    #[test]
+    fn a_provisioned_machine_whose_vault_was_cleared_reports_a_missing_kit() {
+        // The shape left behind when the operating-system keyring is recreated: the guest still
+        // holds a provisioned keychain, but nothing remains to unlock or rebuild it with.
+        assert_eq!(
+            signing_health(None, None, true),
+            SigningHealth::KitMissing,
+            "this must not read as 'never configured'"
+        );
+        assert_eq!(
+            signing_health(None, None, false),
+            SigningHealth::Unconfigured
+        );
+    }
+
+    #[test]
+    fn signing_health_separates_a_complete_kit_from_a_partial_one() {
+        assert_eq!(
+            signing_health(None, Some(&kit("team", true)), false),
+            SigningHealth::Ready
+        );
+        assert_eq!(
+            signing_health(None, Some(&kit("team", false)), false),
+            SigningHealth::Incomplete
+        );
+    }
+
+    #[test]
+    fn an_unreadable_vault_outranks_every_other_signing_state() {
+        assert_eq!(
+            signing_health(Some("vault locked"), Some(&kit("team", true)), true),
+            SigningHealth::VaultUnavailable,
+            "a stale cached kit must not mask a vault that cannot be read"
+        );
+    }
+
+    #[test]
+    fn a_kit_is_complete_only_with_certificate_password_profile_and_keychain() {
+        assert!(kit_is_complete(&kit("team", true)));
+
+        for missing in ["certificate", "password", "profile", "keychain"] {
+            let mut partial = kit("team", true);
+            match missing {
+                "certificate" => partial.signing_certificate_path = None,
+                "password" => partial.signing_certificate_password = None,
+                "profile" => partial.provisioning_profile_paths.clear(),
+                _ => partial.guest_keychain_password = None,
+            }
+            assert!(
+                !kit_is_complete(&partial),
+                "a kit without its {missing} cannot provision"
+            );
+        }
     }
 
     #[test]

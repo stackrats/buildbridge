@@ -12,12 +12,12 @@
     "app": {
         "windows": [
             {
-                "title": "BuildBridge Runner",
-                "width": 1100,
-                "height": 780,
-                "minWidth": 760,
-                "minHeight": 600,
-                "backgroundColor": "#07111f"
+                "title": "BuildBridge",
+                "width": 1180,
+                "height": 800,
+                "minWidth": 900,
+                "minHeight": 620,
+                "backgroundColor": "#09090b"
             }
         ],
         "security": {
