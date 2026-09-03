@@ -164,6 +164,41 @@ impl MachinePaths {
         self.data_dir.join("artifacts")
     }
 
+    /// The macOS disk, its NVRAM and, once migrated, its install media: what the container is
+    /// created around, so the container itself can be recreated at will.
+    pub fn disk_dir(&self) -> PathBuf {
+        self.data_dir.join("disk")
+    }
+
+    /// Where QEMU creates the control socket the desktop uses to hand it USB devices.
+    pub fn qmp_dir(&self) -> PathBuf {
+        self.data_dir.join("qmp")
+    }
+
+    pub fn qmp_socket(&self) -> PathBuf {
+        self.qmp_dir().join(buildbridge_docker_osx::QMP_SOCKET_NAME)
+    }
+
+    /// Scratch for files handed to a privileged host command, such as the USB udev rule.
+    pub fn usb_staging_dir(&self) -> PathBuf {
+        self.data_dir.join("usb")
+    }
+
+    pub fn apple_device_run_record(&self) -> PathBuf {
+        self.config_dir.join("device-run.json")
+    }
+
+    pub fn apple_device_run_error(&self) -> PathBuf {
+        self.config_dir.join("device-run-error.txt")
+    }
+
+    /// Removes the disk and the control directory: everything the container was built
+    /// around. Discarding a container discards its macOS, so this goes with it.
+    pub fn remove_container_storage(&self) -> Result<(), String> {
+        remove_dir_all_if_present(&self.disk_dir())?;
+        remove_dir_all_if_present(&self.qmp_dir())
+    }
+
     /// Where a remote build checks out a revision of the approved project. One directory per
     /// machine, reused across builds so a fetch is incremental.
     pub fn checkout_dir(&self) -> PathBuf {
@@ -185,9 +220,13 @@ impl MachinePaths {
             self.signing_provisioning(),
             self.apple_archive_record(),
             self.apple_archive_error(),
+            self.apple_device_run_record(),
+            self.apple_device_run_error(),
         ] {
             remove_file_if_present(&path)?;
         }
+        self.remove_container_storage()?;
+        remove_dir_all_if_present(&self.usb_staging_dir())?;
         remove_dir_all_if_present(&self.artifacts_dir())?;
         remove_dir_all_if_present(&self.data_dir.join("sources"))?;
         let _ = fs::remove_dir(&self.data_dir);

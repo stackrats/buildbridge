@@ -36,6 +36,7 @@ const XCODE_PROGRESS_EVENT: &str = "machine-xcode-progress";
 const SIGNING_PROGRESS_EVENT: &str = "machine-signing-progress";
 const PROJECT_PROGRESS_EVENT: &str = "machine-project-progress";
 const ARCHIVE_PROGRESS_EVENT: &str = "machine-archive-progress";
+const USB_MIGRATION_PROGRESS_EVENT: &str = "machine-usb-migration-progress";
 
 const CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop";
 const MAC_BUILDER_CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop.macos-builder";
@@ -58,6 +59,39 @@ struct AppState {
     busy_machines: Mutex<HashMap<String, &'static str>>,
     /// The cancellable scope of each in-flight operation, keyed by machine id.
     operation_scopes: Mutex<HashMap<String, Arc<OperationScope>>>,
+    /// A privileged host change (the USB udev rule) is in flight, so a second authorization
+    /// prompt cannot stack on the first.
+    host_usb_busy: AtomicBool,
+    /// Why the phone a machine holds has not shown up in the guest yet, from the last attach.
+    /// Cleared once the guest enumerates it or the phone is detached.
+    usb_attach_issues: Mutex<HashMap<String, String>>,
+}
+
+/// Marks the host busy with a privileged USB change until dropped.
+struct HostUsbGuard {
+    app: AppHandle,
+}
+
+impl Drop for HostUsbGuard {
+    fn drop(&mut self) {
+        self.app
+            .state::<AppState>()
+            .host_usb_busy
+            .store(false, Ordering::Release);
+    }
+}
+
+fn begin_host_usb_operation(app: &AppHandle) -> Result<HostUsbGuard, String> {
+    let claimed = app
+        .state::<AppState>()
+        .host_usb_busy
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok();
+    if !claimed {
+        return Err("A USB rule change is already waiting for authorization.".to_string());
+    }
+
+    Ok(HostUsbGuard { app: app.clone() })
 }
 
 /// Marks one machine busy until dropped so concurrent operations cannot interleave.
@@ -143,6 +177,9 @@ async fn cancel_machine_operation(app: AppHandle, machine_id: String) -> Result<
     let Some(scope) = scope else {
         return Err("Nothing is running on this machine.".to_string());
     };
+    if label.as_deref() == Some("migrating_usb") {
+        return Err("The disk migration cannot be stopped; wait for it to finish.".to_string());
+    }
     scope.cancel();
 
     if matches!(label.as_deref(), Some("test_building" | "archiving")) {
@@ -268,6 +305,8 @@ struct MachineSummary {
     signing_identity: Option<String>,
     archive_retained: bool,
     env_set_name: Option<String>,
+    /// The container keeps its disk on the host and can be handed USB devices.
+    usb_ready: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -673,6 +712,15 @@ struct MacBuilderView {
     archive_env_set: Option<String>,
     archive_error: Option<String>,
     logs: Vec<String>,
+    /// USB passthrough: the host's phones and rule, the container's access, the attachment.
+    usb: buildbridge_docker_osx::MachineUsbStatus,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AttachUsbDeviceInput {
+    bus: u8,
+    port: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1338,10 +1386,194 @@ async fn discard_machine_container(
     }
     remove_file_if_present(&paths.known_hosts())?;
     remove_signing_provisioning_record(&paths)?;
+    // The disk is the macOS installation the person just agreed to discard.
+    paths.remove_container_storage()?;
+    clear_usb_attach_issue(&app, &machine_id);
     drop(guard);
     tray::refresh(&app);
 
     build_mac_builder_view(&app, &paths).await
+}
+
+/// Installs the udev rule that stops usbmuxd from claiming iPhones on this host, through one
+/// authorization prompt. Host-level, so it holds no machine.
+#[tauri::command]
+async fn install_usb_release_rule(
+    app: AppHandle,
+) -> Result<buildbridge_docker_osx::HostUsbStatus, String> {
+    let guard = begin_host_usb_operation(&app)?;
+    let staging = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("usb");
+    let installed = tauri::async_runtime::spawn_blocking(move || {
+        buildbridge_docker_osx::install_iphone_udev_rule(&staging)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    drop(guard);
+
+    installed
+}
+
+#[tauri::command]
+async fn remove_usb_release_rule(
+    app: AppHandle,
+) -> Result<buildbridge_docker_osx::HostUsbStatus, String> {
+    let guard = begin_host_usb_operation(&app)?;
+    let removed = tauri::async_runtime::spawn_blocking(|| {
+        buildbridge_docker_osx::remove_iphone_udev_rule().map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    drop(guard);
+
+    removed
+}
+
+/// Moves a container's macOS disk onto this host and recreates the container with the disk
+/// bound in, the control socket, and USB access. Nothing on the disk changes; the signing
+/// record is rebound to the new container because the keychain it describes moved with it.
+#[tauri::command]
+async fn migrate_machine_for_usb(
+    app: AppHandle,
+    machine_id: String,
+    input: ConfirmInput,
+) -> Result<MacBuilderView, String> {
+    if !input.confirmed {
+        return Err("Confirm the container migration before continuing.".to_string());
+    }
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let guard = begin_machine_operation(&app, &machine_id, "migrating_usb")?;
+    let identity_path = paths.identity();
+    let disk_dir = paths.disk_dir();
+    let qmp_dir = paths.qmp_dir();
+    let container_name = paths.container_name.clone();
+    let event_app = app.clone();
+    let event_machine_id = machine_id.clone();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        let options = buildbridge_docker_osx::LaunchOptions {
+            identity_path: &identity_path,
+            disk_dir: &disk_dir,
+            qmp_dir: &qmp_dir,
+            usb: buildbridge_docker_osx::resolve_usb_options(),
+        };
+        buildbridge_docker_osx::migrate_disk_to_host(
+            &container_name,
+            &profile,
+            &options,
+            |progress| {
+                emit_machine_progress(
+                    &event_app,
+                    USB_MIGRATION_PROGRESS_EVENT,
+                    &event_machine_id,
+                    progress,
+                );
+            },
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string());
+    drop(guard);
+    let runtime = finish_operation(&cancel_probe, joined)?;
+    if let (Some(container_id), Some(mut stored)) =
+        (runtime.container_id, load_signing_provisioning(&paths)?)
+    {
+        stored.container_id = container_id;
+        save_signing_provisioning(&paths, &stored)?;
+    }
+    tray::refresh(&app);
+
+    build_mac_builder_view(&app, &paths).await
+}
+
+/// Hands one host port to the running guest. The phone leaves this host until detached, or
+/// until the machine stops.
+#[tauri::command]
+async fn attach_usb_device(
+    app: AppHandle,
+    machine_id: String,
+    input: AttachUsbDeviceInput,
+) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    machines::load_registry(&app)?.find(&machine_id)?;
+    if !buildbridge_docker_osx::valid_usb_port_path(&input.port) {
+        return Err("The USB port is not valid.".to_string());
+    }
+    let guard = begin_machine_operation(&app, &machine_id, "attaching_usb")?;
+    let container_name = paths.container_name.clone();
+    let socket = paths.qmp_socket();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        let runtime =
+            buildbridge_docker_osx::status(&container_name).map_err(|error| error.to_string())?;
+        if runtime.state != ContainerState::Running {
+            return Err("Start the machine before attaching a phone.".to_string());
+        }
+        let device = buildbridge_docker_osx::host_usb_status(None)
+            .devices
+            .into_iter()
+            .find(|device| device.bus == input.bus && device.port == input.port)
+            .ok_or_else(|| {
+                "No Apple device is plugged into that port. Plug the phone in and refresh."
+                    .to_string()
+            })?;
+        buildbridge_docker_osx::attach_usb_device(&socket, &container_name, &device)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string());
+    drop(guard);
+    let attached = finish_operation(&cancel_probe, joined)?;
+    match attached.issue {
+        Some(issue) if !attached.enumerated => {
+            if let Ok(mut issues) = app.state::<AppState>().usb_attach_issues.lock() {
+                issues.insert(machine_id.clone(), issue);
+            }
+        }
+        _ => clear_usb_attach_issue(&app, &machine_id),
+    }
+
+    build_mac_builder_view(&app, &paths).await
+}
+
+#[tauri::command]
+async fn detach_usb_device(app: AppHandle, machine_id: String) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    machines::load_registry(&app)?.find(&machine_id)?;
+    let guard = begin_machine_operation(&app, &machine_id, "detaching_usb")?;
+    let socket = paths.qmp_socket();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        buildbridge_docker_osx::detach_usb_device(&socket).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string());
+    drop(guard);
+    finish_operation(&cancel_probe, joined)?;
+    clear_usb_attach_issue(&app, &machine_id);
+
+    build_mac_builder_view(&app, &paths).await
+}
+
+fn clear_usb_attach_issue(app: &AppHandle, machine_id: &str) {
+    if let Ok(mut issues) = app.state::<AppState>().usb_attach_issues.lock() {
+        issues.remove(machine_id);
+    }
 }
 
 #[tauri::command]
@@ -1383,6 +1615,8 @@ async fn launch_mac_builder(app: AppHandle, machine_id: String) -> Result<MacBui
         .clone();
     let guard = begin_machine_operation(&app, &machine_id, "starting")?;
     let identity_path = paths.identity();
+    let disk_dir = paths.disk_dir();
+    let qmp_dir = paths.qmp_dir();
     let container_name = paths.container_name.clone();
     let event_app = app.clone();
     let event_machine_id = machine_id.clone();
@@ -1390,7 +1624,13 @@ async fn launch_mac_builder(app: AppHandle, machine_id: String) -> Result<MacBui
     let cancel_probe = Arc::clone(&scope);
     let joined = tauri::async_runtime::spawn_blocking(move || {
         let _operation = buildbridge_docker_osx::enter_operation(scope);
-        buildbridge_docker_osx::launch(&container_name, &profile, &identity_path, |progress| {
+        let options = buildbridge_docker_osx::LaunchOptions {
+            identity_path: &identity_path,
+            disk_dir: &disk_dir,
+            qmp_dir: &qmp_dir,
+            usb: buildbridge_docker_osx::resolve_usb_options(),
+        };
+        buildbridge_docker_osx::launch(&container_name, &profile, &options, |progress| {
             emit_machine_progress(
                 &event_app,
                 LAUNCH_PROGRESS_EVENT,
@@ -3151,6 +3391,12 @@ async fn build_machine_list_view(app: &AppHandle) -> Result<MachineListView, Str
                 signing_identity: signing.map(|stored| stored.result.identity_name),
                 archive_retained: paths.apple_archive_record().is_file(),
                 env_set_name: None,
+                usb_ready: buildbridge_docker_osx::inspect_container_layout(&paths.container_name)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|layout| {
+                        layout.disk_on_host && layout.usb_access && layout.control_socket
+                    }),
             });
         }
 
@@ -3201,7 +3447,7 @@ async fn build_mac_builder_view(
     let busy_operation = busy_operation(app, &paths.id)?;
     let probe_paths = paths.clone();
     let probe_profile = profile.clone();
-    let (runtime, logs, guest) = tauri::async_runtime::spawn_blocking(move || {
+    let (runtime, logs, guest, mut usb) = tauri::async_runtime::spawn_blocking(move || {
         let runtime = buildbridge_docker_osx::status(&probe_paths.container_name)
             .map_err(|error| error.to_string())?;
         let logs = buildbridge_docker_osx::recent_logs(&probe_paths.container_name)
@@ -3212,11 +3458,31 @@ async fn build_mac_builder_view(
             guest_access.as_ref(),
             &probe_paths,
         )?;
+        let usb = buildbridge_docker_osx::machine_usb_status(
+            &probe_paths.container_name,
+            &probe_paths.qmp_socket(),
+            runtime.state,
+        );
 
-        Ok::<_, String>((runtime, logs, guest))
+        Ok::<_, String>((runtime, logs, guest, usb))
     })
     .await
     .map_err(|error| error.to_string())??;
+    // The attach reports why the guest has not enumerated the phone; the probe cannot, so the
+    // last reason is carried until the phone shows up or is detached.
+    if let Some(attached) = usb.attached.as_mut() {
+        let remembered = app
+            .state::<AppState>()
+            .usb_attach_issues
+            .lock()
+            .ok()
+            .and_then(|issues| issues.get(&paths.id).cloned());
+        if attached.enumerated {
+            clear_usb_attach_issue(app, &paths.id);
+        } else {
+            attached.issue = remembered;
+        }
+    }
     let attached = attached_kit_id(app, &paths.id)?;
     let (kits, vault_issue) = match read_signing_kits().await {
         Ok(stored) => (stored.kits, None),
@@ -3261,6 +3527,7 @@ async fn build_mac_builder_view(
         archive_env_set,
         archive_error,
         logs,
+        usb,
     })
 }
 
@@ -4768,6 +5035,11 @@ pub fn run() {
             configure_mac_builder,
             launch_mac_builder,
             stop_mac_builder,
+            install_usb_release_rule,
+            remove_usb_release_rule,
+            migrate_machine_for_usb,
+            attach_usb_device,
+            detach_usb_device,
             list_signing_kits,
             save_signing_kit,
             delete_signing_kit,

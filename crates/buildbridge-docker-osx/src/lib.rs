@@ -15,6 +15,24 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+mod disk;
+mod qmp;
+mod usb;
+
+pub use disk::{
+    ContainerLayout, DISK_IMAGE_NAME, DISK_NVRAM_NAME, DiskMigrationPhase, DiskMigrationProgress,
+    MachineDisk, ensure_machine_disk, inspect_container_layout, migrate_disk_to_host,
+    remove_machine_disk, required_free_bytes, validate_bind_path,
+};
+pub use qmp::{QMP_CONTAINER_DIR, QMP_SOCKET_NAME};
+pub use usb::{
+    AttachedUsbDevice, ContainerUsbOptions, HostUsbDevice, HostUsbStatus, MachineUsbStatus,
+    USB_UDEV_RULE, USB_UDEV_RULE_PATH, UdevRuleState, UsbHolder, attach_usb_device,
+    attached_usb_device, detach_usb_device, host_usb_status, install_iphone_udev_rule,
+    is_apple_mobile_product, machine_usb_status, remove_iphone_udev_rule, resolve_usb_options,
+    valid_usb_port_path,
+};
+
 /// Identifier of the builder that existed before BuildBridge kept a machine registry.
 pub const DEFAULT_MACHINE_ID: &str = "default";
 /// Container name of the legacy single builder; newer machines derive their own name.
@@ -254,9 +272,21 @@ pub enum LaunchPhase {
     Preparing,
     PullingImage,
     GeneratingIdentity,
+    PreparingDisk,
     CreatingContainer,
     Starting,
     Completed,
+}
+
+/// Everything a container needs from the host besides its profile: the identity file, the
+/// directory holding the macOS disk, the control-socket directory, and USB access when the
+/// host can grant it.
+#[derive(Debug, Clone)]
+pub struct LaunchOptions<'a> {
+    pub identity_path: &'a Path,
+    pub disk_dir: &'a Path,
+    pub qmp_dir: &'a Path,
+    pub usb: Option<ContainerUsbOptions>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -984,6 +1014,10 @@ pub enum ProviderError {
     },
     #[error("macOS guest bridge failed: {0}")]
     GuestBridge(String),
+    #[error("USB passthrough failed: {0}")]
+    UsbPassthrough(String),
+    #[error("host authorization failed: {0}")]
+    HostAuthorization(String),
 }
 
 /// Probes the forwarded SSH port and compares the live guest key with an optional pin.
@@ -5722,13 +5756,15 @@ pub fn status(container_name: &str) -> Result<RuntimeStatus, ProviderError> {
 pub fn launch<F>(
     container_name: &str,
     config: &MacBuilderConfig,
-    identity_path: &Path,
+    options: &LaunchOptions<'_>,
     mut on_progress: F,
 ) -> Result<RuntimeStatus, ProviderError>
 where
     F: FnMut(LaunchProgress),
 {
     config.validate()?;
+    let disk = MachineDisk::new(options.disk_dir)?;
+    validate_bind_path(options.qmp_dir, "control socket directory")?;
     let started = Instant::now();
     let mut report = |phase: LaunchPhase, detail: &str| {
         on_progress(LaunchProgress {
@@ -5756,7 +5792,13 @@ where
             LaunchPhase::GeneratingIdentity,
             "Generating a stable machine identity",
         );
-        ensure_identity(identity_path)?;
+        ensure_identity(options.identity_path)?;
+        report(
+            LaunchPhase::PreparingDisk,
+            "Preparing the macOS disk on this host",
+        );
+        ensure_machine_disk(&disk)?;
+        disk::ensure_control_dir(options.qmp_dir)?;
         report(
             LaunchPhase::CreatingContainer,
             "Creating the managed container",
@@ -5765,7 +5807,8 @@ where
             container_name,
             config,
             prerequisites.display.as_deref().unwrap_or(":0"),
-            identity_path,
+            options,
+            &disk,
         )?;
     } else {
         ensure_manual_restart_policy(container_name)?;
@@ -5773,6 +5816,9 @@ where
 
     let (state, _, _) = inspect_container(container_name)?;
     if state != ContainerState::Running {
+        // A control directory the daemon would have to create is created as root, and QEMU
+        // then cannot bind its socket there; make it before every start, not only the first.
+        disk::ensure_control_dir(options.qmp_dir)?;
         report(LaunchPhase::Starting, "Starting the macOS machine");
         run_docker("start", &["start".to_string(), container_name.to_string()])?;
     }
@@ -6016,9 +6062,19 @@ fn create_container(
     container_name: &str,
     config: &MacBuilderConfig,
     display: &str,
-    identity_path: &Path,
+    options: &LaunchOptions<'_>,
+    disk: &MachineDisk,
 ) -> Result<(), ProviderError> {
-    let args = create_args(container_name, config, display, identity_path);
+    validate_identity_path(options.identity_path)?;
+    let args = create_args(
+        container_name,
+        config,
+        display,
+        options.identity_path,
+        disk,
+        options.qmp_dir,
+        options.usb.as_ref(),
+    );
     run_docker("container creation", &args)?;
 
     Ok(())
@@ -6037,13 +6093,20 @@ fn ensure_manual_restart_policy(container_name: &str) -> Result<(), ProviderErro
     Ok(())
 }
 
+/// The container's fixed argv. The disk, NVRAM and control directory are bound from the host;
+/// USB access is a device cgroup rule plus the device tree plus the plugdev group — never
+/// `--privileged`. `EXTRA` is word-split by Docker-OSX's `Launch.sh`, so the display and the
+/// QMP socket are two flags in one value.
 fn create_args(
     container_name: &str,
     config: &MacBuilderConfig,
     display: &str,
     identity_path: &Path,
+    disk: &MachineDisk,
+    qmp_dir: &Path,
+    usb: Option<&ContainerUsbOptions>,
 ) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "create".to_string(),
         format!("--name={container_name}"),
         "--label=dev.buildbridge.managed=true".to_string(),
@@ -6054,13 +6117,30 @@ fn create_args(
         format!("--publish={}:10022", config.ssh_port),
         "--volume=/tmp/.X11-unix:/tmp/.X11-unix:rw".to_string(),
         format!("--volume={}:/env:ro", identity_path.display()),
+    ];
+    args.extend(disk::disk_bind_args(disk));
+    args.push(format!(
+        "--volume={}:{QMP_CONTAINER_DIR}:rw",
+        qmp_dir.display()
+    ));
+    if let Some(usb) = usb {
+        args.push(format!(
+            "--device-cgroup-rule=c {}:* rwm",
+            usb::USB_BUS_MAJOR
+        ));
+        args.push("--volume=/dev/bus/usb:/dev/bus/usb".to_string());
+        args.push(format!("--group-add={}", usb.plugdev_gid));
+    }
+    args.extend([
         format!("--env=DISPLAY={display}"),
         format!("--env=RAM={}", config.memory_gib),
         format!("--env=SMP={}", config.cpu_cores),
         format!("--env=CORES={}", config.cpu_cores),
         "--env=WIDTH=1280".to_string(),
         "--env=HEIGHT=720".to_string(),
-        "--env=EXTRA=-display gtk,zoom-to-fit=on".to_string(),
+        format!(
+            "--env=EXTRA=-display gtk,zoom-to-fit=on -qmp unix:{QMP_CONTAINER_DIR}/{QMP_SOCKET_NAME},server,nowait"
+        ),
         format!("--env=SHORTNAME={}", config.macos_release.short_name()),
         "--env=CPU=Haswell-noTSX".to_string(),
         "--env=CPUID_FLAGS=kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on".to_string(),
@@ -6072,7 +6152,9 @@ fn create_args(
         "--env=GENERATE_UNIQUE=false".to_string(),
         "--env=NOPICKER=false".to_string(),
         DOCKER_IMAGE.to_string(),
-    ]
+    ]);
+
+    args
 }
 
 fn run_docker(operation: &'static str, args: &[String]) -> Result<Output, ProviderError> {
@@ -6200,11 +6282,15 @@ mod tests {
 
     #[test]
     fn docker_create_uses_fixed_argv_without_privileged_mode_or_secrets() {
+        let disk = MachineDisk::new(Path::new("/tmp/buildbridge/disk")).expect("valid");
         let args = create_args(
             "buildbridge-macos-team-mac",
             &MacBuilderConfig::default(),
             ":1",
             Path::new("/tmp/buildbridge/identity.env"),
+            &disk,
+            Path::new("/tmp/buildbridge/qmp"),
+            Some(&ContainerUsbOptions { plugdev_gid: 46 }),
         );
 
         assert_eq!(args.first().map(String::as_str), Some("create"));
@@ -6215,11 +6301,20 @@ mod tests {
         assert!(args.contains(&"--env=GENERATE_UNIQUE=false".to_string()));
         assert!(args.contains(&"--env=WIDTH=1280".to_string()));
         assert!(args.contains(&"--env=HEIGHT=720".to_string()));
-        assert!(args.contains(&"--env=EXTRA=-display gtk,zoom-to-fit=on".to_string()));
+        assert!(args.contains(
+            &"--env=EXTRA=-display gtk,zoom-to-fit=on -qmp unix:/buildbridge-qmp/qmp.sock,server,nowait"
+                .to_string()
+        ));
         assert!(args.contains(&"--restart=no".to_string()));
         assert!(!args.contains(&"--restart=unless-stopped".to_string()));
         assert!(args.contains(&"--volume=/tmp/buildbridge/identity.env:/env:ro".to_string()));
-        assert!(args.contains(&DOCKER_IMAGE.to_string()));
+        assert!(args.contains(&"--volume=/tmp/buildbridge/disk:/image:rw".to_string()));
+        assert!(args.contains(&"--env=IMAGE_PATH=/image/mac_hdd_ng.img".to_string()));
+        assert!(args.contains(&"--volume=/tmp/buildbridge/qmp:/buildbridge-qmp:rw".to_string()));
+        assert!(args.contains(&"--device-cgroup-rule=c 189:* rwm".to_string()));
+        assert!(args.contains(&"--volume=/dev/bus/usb:/dev/bus/usb".to_string()));
+        assert!(args.contains(&"--group-add=46".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some(DOCKER_IMAGE));
         assert!(!args.iter().any(|arg| arg == "--privileged"));
         assert!(!args.iter().any(|arg| {
             let normalized = arg.to_ascii_lowercase();
@@ -6227,6 +6322,30 @@ mod tests {
                 || normalized.contains("private_key")
                 || normalized.contains("secret")
         }));
+    }
+
+    #[test]
+    fn docker_create_without_a_plugdev_group_omits_usb_access_but_keeps_the_control_socket() {
+        let disk = MachineDisk::new(Path::new("/tmp/buildbridge/disk")).expect("valid");
+        let args = create_args(
+            "buildbridge-macos-team-mac",
+            &MacBuilderConfig::default(),
+            ":1",
+            Path::new("/tmp/buildbridge/identity.env"),
+            &disk,
+            Path::new("/tmp/buildbridge/qmp"),
+            None,
+        );
+
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.starts_with("--device-cgroup-rule"))
+        );
+        assert!(!args.iter().any(|arg| arg.starts_with("--group-add")));
+        assert!(!args.contains(&"--volume=/dev/bus/usb:/dev/bus/usb".to_string()));
+        assert!(args.contains(&"--volume=/tmp/buildbridge/qmp:/buildbridge-qmp:rw".to_string()));
+        assert!(args.iter().any(|arg| arg.contains("-qmp unix:")));
     }
 
     #[test]

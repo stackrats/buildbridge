@@ -218,23 +218,26 @@ fn start_machine(app: AppHandle, machine_id: String) {
                 .clone();
             let guard = crate::begin_machine_operation(&app, &machine_id, "starting")?;
             let identity_path = paths.identity();
+            let disk_dir = paths.disk_dir();
+            let qmp_dir = paths.qmp_dir();
             let container_name = paths.container_name.clone();
             let event_app = app.clone();
             let event_machine_id = machine_id.clone();
             let joined = tauri::async_runtime::spawn_blocking(move || {
-                buildbridge_docker_osx::launch(
-                    &container_name,
-                    &profile,
-                    &identity_path,
-                    |progress| {
-                        crate::emit_machine_progress(
-                            &event_app,
-                            crate::LAUNCH_PROGRESS_EVENT,
-                            &event_machine_id,
-                            progress,
-                        );
-                    },
-                )
+                let options = buildbridge_docker_osx::LaunchOptions {
+                    identity_path: &identity_path,
+                    disk_dir: &disk_dir,
+                    qmp_dir: &qmp_dir,
+                    usb: buildbridge_docker_osx::resolve_usb_options(),
+                };
+                buildbridge_docker_osx::launch(&container_name, &profile, &options, |progress| {
+                    crate::emit_machine_progress(
+                        &event_app,
+                        crate::LAUNCH_PROGRESS_EVENT,
+                        &event_machine_id,
+                        progress,
+                    );
+                })
                 .map_err(|error| error.to_string())
             })
             .await
