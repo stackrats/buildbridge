@@ -1,13 +1,15 @@
 # BuildBridge Product Goal and Architecture
 
 Status: working product and engineering reference  
-Last updated: 2026-09-02
+Last updated: 2026-09-03
 
 This document defines what BuildBridge is intended to become, the first complete workflow we are building, the boundaries between its components, and the order in which the project should expand. It should be updated when a durable product or architecture decision changes.
 
 ## North star
 
-BuildBridge lets a developer build on the machine that has the correct native toolchain while controlling and observing every build from one web interface.
+BuildBridge turns a Linux box into a Mac build server: install the desktop, create and prepare a managed macOS machine once, hold signing material in the host's vault, and build and sign an IPA with nothing else installed. Everything else is optional. Pairing the desktop to a control plane adds two things — starting a build from any browser, and a record of every build that outlives the desktop — and it adds them without moving a secret or a path off the host.
+
+The desktop is the product; the control plane is a remote for it.
 
 The intended experience is:
 
@@ -50,9 +52,9 @@ The workflow is complete only when all of these steps work together:
 3. Create and retain a managed Docker-OSX machine and its stable machine identity.
 4. Complete macOS installation, Apple login, 2FA, and Xcode setup interactively inside the guest.
 5. Enable macOS Remote Login.
-6. Generate a dedicated BuildBridge Ed25519 access key on the host.
-7. Add the public key to the intended macOS user.
-8. Compare and explicitly pin the guest SSH host fingerprint.
+6. Compare and explicitly pin the guest SSH host fingerprint.
+7. Generate a dedicated BuildBridge Ed25519 access key on the host.
+8. Install the public key for the intended macOS user: either with the macOS login password, used once over a single SSH session to the pinned guest, or by typing the shown commands in the guest Terminal.
 9. Verify authenticated access and detect the macOS and Xcode versions.
 10. Register an approved local workspace and synchronize a build snapshot into an isolated guest directory.
 11. Provision the selected signing identity and profiles into a dedicated guest keychain.
@@ -198,7 +200,7 @@ Reverb WebSockets are the primary event transport:
 - control-plane views receive runner, build, log, and artifact changes in real time; and
 - reconnection triggers state reconciliation.
 
-The heartbeat timer is health signaling, not job polling. High-frequency job polling should not return. A future low-frequency reconciliation request may exist only as recovery from missed events and must not be the normal dispatch mechanism.
+The heartbeat timer is health signaling, not job polling. High-frequency job polling should not return. The one reconciliation that exists rides on the heartbeat that is sent anyway: its reply carries the number of builds queued for the runner (or running on a lapsed lease), and a runner that sees a non-zero count claims immediately. That recovers a queue event lost in transit within twenty seconds without becoming the normal dispatch mechanism — dispatch is still the WebSocket event, and the count is normally zero.
 
 ### Build leases
 
@@ -233,13 +235,13 @@ Workspace safety requirements:
 
 ### Current guided project workflow
 
-The first real project fixture is the Ionic/Capacitor application at `resources/test-projects/nz.co.thinksolar.app`. This path is development data, not a privileged or hard-coded product path. The desktop UI requires the user to approve the exact local folder and validates its package lock, Capacitor configuration, CocoaPods project, Xcode workspace, and Xcode project before it stores the approval.
+The first real project fixture is the Ionic/Capacitor application at the Ionic/Capacitor fixture project. This path is development data, not a privileged or hard-coded product path. The desktop UI requires the user to approve the exact local folder and validates its package lock, Capacitor configuration, CocoaPods project, Xcode workspace, and Xcode project before it stores the approval.
 
-The UI presents the current workflow as three deliberate steps:
+The desktop presents the project workflow as the first three steps of a machine's **Build** checklist (see [Desktop application](#desktop-application)):
 
-1. **Approve project** — paste or drop the local project folder. This is read-only and does not copy source yet.
+1. **Approve the project folder** — paste or drop the local project folder. This is read-only and does not copy source yet.
 2. **Synchronize source** — create a bounded, checksummed archive and stream it through the authenticated, host-key-pinned SSH bridge. The progress display reports source inspection, bytes transferred, and guest extraction.
-3. **Run unsigned test build** — prepare pinned guest tools, install Apple's iOS Simulator platform when the selected Xcode has no compatible runtime, install locked JavaScript dependencies, build the web application, run Capacitor synchronization, resolve pods from the committed native lock baseline, and compile the `App` scheme for a generic iOS Simulator. Live phase and bounded log output remain visible in the desktop UI. The multi-gigabyte Apple platform download is a one-time persistent guest operation with measured byte/percentage progress and a distinct install/register state. The guest runs one durable smoke-build job at a time, so repeating the build action after a desktop restart or development hot reload reattaches to its log instead of starting a duplicate build. If regenerated Capacitor plugin metadata requires CocoaPods to refresh `Podfile.lock`, that change remains guest-only and is reported clearly rather than silently modifying the host project.
+3. **Run the unsigned test build** — prepare pinned guest tools, install Apple's iOS Simulator platform when the selected Xcode has no compatible runtime, install locked JavaScript dependencies, build the web application, run Capacitor synchronization, resolve pods from the committed native lock baseline, and compile the `App` scheme for a generic iOS Simulator. Live phase and bounded log output remain visible in the desktop UI. The multi-gigabyte Apple platform download is a one-time persistent guest operation with measured byte/percentage progress and a distinct install/register state. The guest runs one durable smoke-build job at a time, so repeating the build action after a desktop restart or development hot reload reattaches to its log instead of starting a duplicate build. If regenerated Capacitor plugin metadata requires CocoaPods to refresh `Podfile.lock`, that change remains guest-only and is reported clearly rather than silently modifying the host project.
 
 The first implementation caps an approved snapshot at 50,000 files and 2 GiB before compression. It excludes Git metadata, `node_modules`, generated native/web output, dependency stores, common IDE/cache directories, every `.env` variant, package-manager authentication files, SSH material, private keys, certificates, provisioning profiles, and App Store Connect keys. It rejects included symlinks and non-regular files. The archive checksum and source counts are retained in the local workspace record; removing approval does not modify the host project.
 
@@ -280,18 +282,18 @@ The target domain model consists of:
 
 ### Host lifecycle
 
-The provider owns one persistent container for the initial workflow:
+The desktop keeps a registry of managed machines (`machines.json`); each entry owns one persistent container named after its identifier, a per-machine configuration directory, and a per-machine artifact directory. The builder created before the registry existed is migrated as machine `default` and keeps its original `buildbridge-macos-builder` container and `macos-builder/` directory, so an existing installation keeps working. For every machine the provider will:
 
 - validate Linux x86_64, Docker daemon access, `/dev/kvm`, display, storage, and SSH tooling;
 - create a stable generated machine identity;
-- create and start the managed container with validated, fixed arguments;
+- create and start the managed container with validated, fixed arguments, reporting image pull, identity generation, container creation, and start as distinct progress phases;
 - open the interactive GTK console at a compact 1280×720 resolution with zoom-to-fit enabled;
 - preserve the container and macOS disk on stop;
 - never remove or rebuild the machine implicitly;
 - surface missing, created, running, stopped, failed, and unavailable states without treating first-run absence as an error; and
 - pin an immutable Docker image digest before production use instead of relying on `latest`.
 
-Rebuild, reset, and delete operations must be separate, explicit, confirmation-protected actions with a clear explanation of what state will be lost.
+Rebuild, reset, and delete operations are separate, explicit, confirmation-protected actions with a clear explanation of what state will be lost. The desktop currently exposes two: **Discard container and disk** removes a stopped machine's container (and therefore its macOS disk), clears its pinned host identity and guest signing record, and keeps the machine profile, access key, approved project, and retained artifacts; **Delete machine** additionally removes those per-machine files and the registry entry. Neither touches the host project folder or the signing kit in the operating-system vault, and both refuse while the container is live. Every machine publishes a distinct forwarded SSH port; the registry rejects duplicates. Long-running operations hold a per-machine busy marker that the view model exposes as a stable key, so a reopened desktop shows which step is still running instead of failing on the next click.
 
 The Disk Utility erase and macOS installation are first-time initialization, not a per-launch workflow. Stopping and resuming the same managed container continues to use its existing macOS disk. The current implementation retains that disk in Docker's container storage; before supporting reset, cloning, or dependable backup, BuildBridge should move it to an explicit host-managed volume with visible storage location and health.
 
@@ -339,7 +341,7 @@ The user downloads a compatible Universal Xcode `.xip` from Apple using a truste
 5. installs the result into the guest user's Applications directory without requesting elevation; and
 6. offers an **Activate Xcode** action that opens a short-lived, host-generated command file in the logged-in macOS Terminal, where fixed `xcode-select`, license acceptance, and `xcodebuild -runFirstLaunch` operations execute with interactive `sudo` authorization.
 
-The user enters the local macOS login password directly into the guest Terminal; BuildBridge never accepts or transports it. This Terminal route is deliberate because macOS rejects Authorization Services interaction from a process in the SSH security session. A per-attempt status file lets BuildBridge detect success, command failure, a closed Terminal, or a 30-minute timeout rather than waiting indefinitely. The UI reports elapsed activation time and verifies the selected developer directory, first-launch status, and Xcode version afterward. Fixed manual Terminal commands remain available under a recovery disclosure.
+For activation the user enters the local macOS login password directly into the guest Terminal; BuildBridge does not accept or transport it for this step. This Terminal route is deliberate because macOS rejects Authorization Services interaction from a process in the SSH security session. A per-attempt status file lets BuildBridge detect success, command failure, a closed Terminal, or a 30-minute timeout rather than waiting indefinitely. The UI reports elapsed activation time and verifies the selected developer directory, first-launch status, and Xcode version afterward. Fixed manual Terminal commands remain available under a recovery disclosure.
 
 Once activation succeeds, normal project preparation and unsigned builds execute over the pinned SSH bridge and do not ask for the macOS password. The current smoke-build UI bootstraps Node 24.20.0, pnpm 11.5.0, and CocoaPods 1.16.2 into the guest user's BuildBridge tool directory. Node is downloaded from the official distribution URL and checked against a pinned SHA-256 digest before extraction. CocoaPods uses a pinned ActiveSupport 6.1 dependency set compatible with macOS's bundled Ruby 2.6 instead of allowing the old RubyGems resolver to select Ruby-3-only releases; the build environment explicitly preloads Ruby's standard `Logger` library required by that combination. JavaScript dependencies remain locked by `pnpm-lock.yaml`. The unsigned smoke build may refresh a guest-only `Podfile.lock` when generated native plugin metadata has drifted, and records that fact in the UI. Production archive/export recipes must instead require a reviewed, synchronized native lockfile and fail closed on drift.
 
@@ -379,7 +381,7 @@ The desktop displays the detected project team and release bundle identifier bes
 - **Verify developer team** loads the key only from the host OS vault, signs a five-minute ES256 JWT locally, and performs `GET /v1/apps` plus `GET /v1/bundleIds` with the approved project's exact bundle identifier. A successful-but-empty filtered Developer-ID result falls back to a read-only, 200-record account inventory and an exact local comparison. When the opaque Bundle-ID resource is resolved, `GET /v1/bundleIds/{id}/profiles` requests name, type, platform, state, UUID, and dates only; `GET /v1/certificates` similarly requests safe certificate metadata without certificate content. The UI receives the key ID, project team, app/bundle/profile/certificate metadata, resource visibility, and verification time; it never receives the issuer ID, private key, JWT, profile payload, or certificate payload. An empty result never triggers automatic registration or revocation.
 - Apple's read responses do not expose the Team key's assigned role. BuildBridge therefore treats record matching as verification, not permission to mutate. Managed Apple Distribution certificate creation remains disabled until the UI asks the user to confirm an **Admin** Team key; a Developer key may remain connected for read-only/app-delivery work.
 - Saving the Team API route and portable signing-file route is additive. Blank fields preserve the other already-stored route; the separate confirmation-protected **Clear signing kit** action removes the complete vault record.
-- Secret values are never serialized into normal desktop view models, web payloads, logs, Docker environment variables, or command-line arguments.
+- Secret values are never serialized into normal desktop view models, web payloads, logs, Docker environment variables, or command-line arguments. The one exception is an env set's secrets, which the editor fetches through a dedicated command when it opens on a stored set and holds masked behind an eye icon; they never travel inside a summary.
 - The UI exposes only safe summaries such as a key ID, certificate filename, and profile count.
 - The BuildBridge SSH private key is stored in the desktop application configuration directory with restricted filesystem permissions because OpenSSH requires a file-backed identity.
 
@@ -441,19 +443,97 @@ The web application should provide:
 
 ### Desktop application
 
-The desktop application should provide:
+The desktop is an application shell, not a scrolling document. A slim top bar carries the identity and the two facts that are true of the whole application — whether this host can run a machine, and whether the control plane is connected. A resizable sidebar lists **Overview** and every registered **macOS machine** with a status dot (or a spinner while an operation runs), with **Signing kit** and **Control plane** grouped beneath; the selected item fills the main pane.
 
-- control-plane pairing and connection diagnostics;
-- native toolchain and executor capability discovery;
-- local workspace approval;
-- managed macOS creation, start, stop, console guidance, and recovery;
-- guest key generation, fingerprint pinning, and authentication status;
-- Apple/Xcode readiness checks;
-- signing-kit vault and guest provisioning controls;
-- active build state, local logs, cancellation, and retry guidance; and
-- explicit destructive actions for rebuild, reset, secret removal, and unpairing.
+The visual language is BuildBridge's own, written in **stock Tailwind utilities only** — no custom colour classes and no bespoke utility layer — so any Tailwind developer can read a template and know exactly what it renders. The palette is fixed by convention, documented at the top of `apps/desktop/src/style.css` and matched by the web control plane:
 
-Closing the main window hides BuildBridge to the system tray so the paired runner can continue receiving work. The tray exposes machine state, start/resume, safe stop, explicit quit while leaving the builder running, and stop-then-quit. Window close, runner quit, and managed-machine stop are deliberately separate actions.
+| Role | Light | Dark |
+| --- | --- | --- |
+| Page | `bg-zinc-50` | `bg-zinc-950` |
+| Surface | `bg-white` | `bg-zinc-900` |
+| Well and recesses | `bg-zinc-100` / `bg-zinc-50` | `bg-zinc-800` / `bg-zinc-950` |
+| Hairline | `border-zinc-200` | `border-zinc-800` |
+| Text | `text-zinc-900`, soft `600`, muted `500` | `text-zinc-50`, soft `300`, muted `400` |
+| Action | `bg-zinc-900 text-white` | `bg-zinc-100 text-zinc-950` |
+| Success, warning, failure | `emerald`, `amber`, `red` | same families, `400` weights |
+
+Every control is a component in `apps/desktop/src/components/ui`, and none of them is a native
+form control with a border drawn around it. The browser renders a select's popup, a number's
+spinner and a checkbox's tick itself — its own font, its own row height, its own highlight colour,
+and on Linux a menu that ignores the page's dark mode — so those are built here instead: `Select`
+is a listbox (a `combobox` trigger and a teleported `listbox` panel with arrow keys, Home/End,
+typeahead, Escape, click-away, and a panel that flips above the control when there is no room
+below), `NumberField` has its own steppers, and `Checkbox` draws its own tick. A path is
+`PathField` or `PathListField` with the browse control inside the box. Anything the user can click
+therefore shares one height, radius, border and focus ring. `Field` owns the label, the optional
+action beside the control, and the hint or error below the row, so a control and the button next
+to it are aligned by structure rather than by a per-site margin.
+
+The listbox panel is teleported to the body and positioned against the viewport, because a select
+is usually inside a dialog or a scrolling pane that would otherwise clip its popup. Its Escape
+handler stops propagation so a select inside a dialog closes itself first rather than closing the
+dialog with it. Keyboard movement lives in `apps/desktop/src/lib/listbox.ts` as pure functions with
+unit tests, in the same way step state does.
+
+Content follows three rules that keep the interface tight. A **tooltip** exists only where the
+label cannot carry the consequence or the scope on its own — "Keeps the container and its disk",
+"Applies from the next sync" — and never restates the label, counts things, or narrates the
+mechanism; a labelled button that already says what it does has none, and an icon-only control
+always has one. The **timeline node is the status**: a number, a tick, a cross, or a spinner. The
+words beside a row say only what the node cannot — how long a run has taken, that a failure needs a
+person, that an open step is yours, how long it usually takes — so a step that is simply next says
+nothing extra. Every **action shows that it is running**: the button that started an operation
+carries a spinner until the operation returns, whether the work takes a hundred milliseconds or
+an hour, and a manual refresh is visible in the same way.
+
+There is deliberately no accent hue. The grey ramp is `zinc`, which is neutral rather than the blue-tinted `slate`, and an action is ink — near-black in light, near-white in dark — so colour is spent only on status: an emerald, amber or red anywhere on screen always means done, needs attention, or failed. Light and dark are the same classes with `dark:` variants, following the system unless overridden. Standing rules: sentence case everywhere, no uppercase styling, no gradients, no decorative colour, one glyph per row, and colour never carrying meaning alone — every status dot names its state on hover.
+
+Each machine page has three tabs that keep their own state while other machines are selected:
+
+1. **Setup** is done once per machine and lists seven ordered steps — check the Linux host, start the machine, install macOS in the console, pin the guest identity, authorize the BuildBridge key, import Xcode, activate Xcode. Setup and Build both render as a **step rail beside a detail panel**: the rail is a numbered vertical timeline whose node shows each step's state at a glance and never scrolls away, and the panel holds that step's instructions and controls. Each step is labelled **Automatic** (BuildBridge does it), **You do this** (the user acts inside macOS and BuildBridge verifies afterwards), or **Assisted** (BuildBridge starts it and the user confirms inside macOS). Selection follows the checklist forward on its own but yields as soon as the user picks another step. While the machine runs but SSH is not yet reachable, the page probes every ten seconds so the checklist advances by itself.
+2. **Build** is repeated per project on an already prepared machine: approve the project folder, synchronize source, run the unsigned test build, attach a signing kit, provision signing into macOS, build the signed archive and IPA. The tab states which installed macOS and Xcode it reuses; a machine whose setup is complete is marked **ready to build**, and approving a different folder replaces the project without repeating any setup.
+3. **Logs** shows bounded, secret-free output per source: session activity, the test build, the signed archive, and the Docker-OSX console tail. The drawer never opens on its own — a running step's progress strip already shows the phase and the last line, and the collapsed bar keeps a live summary — it only re-points itself at the source of whatever started, so opening it lands on the lines that matter.
+
+Step state is derived from the backend view model by pure, unit-tested functions (`apps/desktop/src/model/steps.ts`); components never infer readiness on their own. Every native command is wrapped once in a typed backend adapter, and a development-only mock backend lets the whole interface run in a plain browser without Docker or a guest.
+
+The **Signing kits** page is host-level. Each kit is a named set of Apple material — a `.p12` identity and its passphrase, one or more provisioning profiles, a guest keychain password, and optionally an App Store Connect Team key — held in the operating-system vault so the files are entered once rather than per machine. A host keeps as many kits as it has developer teams or apps (bounded at twelve), and every kit shows exactly what is stored: the identity filename, whether each password is held, the profile filenames, the Team key ID, when it was added, and which machines are attached to it. Secret values are never returned to the interface, so editing a kit treats a blank field as "keep what is stored".
+
+A kit can also **create its own identity at Apple with no Mac anywhere**. The button on the kit
+generates an RSA key and a CSR on this host with fixed-argv OpenSSL, sends the CSR to Apple's
+certificates endpoint through the kit's Team key (which needs the Admin role), and packages the
+returned certificate with the host key as a password-protected `.p12`, written owner-only into
+BuildBridge's managed certificates directory with a password OpenSSL generated and received
+through the environment, never an argument. The `.p12` path and password land in the kit, the
+loose key and PEM are deleted, and the existing profile action then works against that
+certificate. Nothing at Apple is revoked; if the team is at its certificate limit Apple refuses
+and that refusal is shown as is. The private key exists only in that `.p12`, which is why the
+confirmation says to keep the host's vault backed up. Removing the kit removes the identity it
+created, since its password lived nowhere else.
+
+Every provisioning profile BuildBridge downloads is retained under its owner-only managed
+profiles directory, and the kit form lists what is already there so a profile can be put back into
+a kit with one click. This matters because a kit stores a *path* to a profile, not the file: if the
+vault is lost the files are not, and re-entering a kit should not mean going back to Apple for
+something already on the disk. The same applies from the other direction — the verification list
+offers **Add to kit** on any active App Store profile, which downloads Apple's copy into the
+attached kit and shows **In kit** once the kit holds that UUID.
+
+The kit form separates what is required from what is not, because the two are additive rather
+than alternatives: the four signing files are what actually sign a build, and the App Store
+Connect key only adds read-only verification and replacement-profile creation on top. Presenting
+them as tabs would imply a choice. Instead the required set is always visible, each field is
+marked, a running count and a "still needed" line name the gap, the acquisition guide is one
+disclosure away, and the optional key is collapsed with a sentence about what it buys. Readiness
+counts what is typed now plus what the vault already holds, so editing a stored kit does not
+report its own stored values as missing.
+
+Attachment is what ties the two levels together: a machine's Build checklist chooses which kit it uses, and provisioning then imports that kit into that machine's own guest keychain. The same kit can serve several machines. The page also hosts the read-only Apple verification and the confirmed replacement-profile creation, both of which run against a chosen machine — the Team key comes from that machine's attached kit and the bundle identifier from the project approved on it.
+
+Every path the desktop asks for — the signing identity, provisioning profiles, the App Store Connect key, the project folder, and the Xcode archive — is chosen through a native file picker with the matching type filter, typed directly, or dropped on the window. The picker is the primary route, so no path has to be known by heart; a dropped file claims only a field whose filter it matches, and picking profiles adds to the list rather than replacing it.
+
+Destructive actions — discard container, delete machine, forget pinned identity, remove provisioned signing, clear artifacts, clear signing kit, unpair — open a confirmation dialog that states exactly what is lost; high-risk ones require an explicit acknowledgement checkbox.
+
+Closing the main window hides BuildBridge to the system tray so the paired runner can continue receiving work. The tray lists every machine as a submenu with its state, start/resume, and safe stop, plus refresh, open, stop-all-then-quit, and quit-while-machines-keep-running. Window close, runner quit, and machine stop are deliberately separate actions.
 
 The web and desktop should expose the same underlying states and identifiers, but only the desktop may perform operations requiring local trust or filesystem access.
 
@@ -464,15 +544,16 @@ As of 2026-09-02:
 | Area | Current state | Next gap |
 | --- | --- | --- |
 | Monorepo | Vite+ JavaScript workspace, Tauri/Vue desktop app, Cargo workspace | CI and release packaging |
-| Runner pairing | Single-use code and scoped runner token; token stored in OS vault | Human web authentication and full revocation UI |
-| Realtime | Reverb private runner channel wakes the desktop; heartbeat is separate | Browser log/artifact event coverage and reconnection tests |
-| Job protocol | Versioned DTOs, leases, ordered logs, completion | Cancellation, renewal, retries, executor assignment |
-| Build kinds | Control-plane diagnostics, a typed local unsigned Apple smoke build, signing provisioning, and a live-accepted local signed Release archive/App Store Connect export recipe | Add the same typed Apple recipe to the control-plane job protocol |
+| Runner pairing | Single-use code and scoped runner token; token stored in OS vault; a runner can be removed from the control plane, which deletes its tokens, keeps its build history, and hides it from the dashboard | Human web authentication, and reusing one runner identity across re-pairings instead of creating a second record |
+| Realtime | Reverb private runner channel wakes the desktop; the heartbeat is separate but its reply reports work still waiting, so a lost queue event is recovered within twenty seconds | Browser log/artifact event coverage and reconnection tests |
+| Job protocol | Versioned DTOs, leases with renewal, ordered logs streamed during long jobs, completion with a kind-specific result, and heartbeats that report each machine's name and readiness | Cancellation, retries, executor assignment |
+| Build kinds | Control-plane diagnostics and `apple_archive` — a signed Release archive and App Store export on a named machine, of the approved folder or of a ref of the same project — plus the local unsigned smoke build and signing provisioning the archive builds on | Cancellation and retries; Android and native Linux/Windows kinds |
 | Native runner | Fixed-argv platform diagnostics | Native-host workspace and real build providers |
-| Desktop lifecycle | Close-to-tray with managed-machine start, stop, refresh, and explicit quit actions | Notifications and richer background-state recovery |
-| Docker-OSX host | Prerequisite probing, stable identity, create/start/stop/status/logs, elapsed-time and guest-readiness monitoring | Image pinning, host-managed disks, local templates, storage checks, recovery and explicit rebuild |
-| macOS guest bridge | SSH reachability, Ed25519 access key, explicit fingerprint pin, mismatch rejection, macOS/Xcode probes, measured Xcode XIP transfer/expansion, bounded project snapshot transfer, fixed tool bootstrap, automatic Simulator installation progress, durable unsigned-build reconnection, a validated simulator build, password-safe signing provisioning, and fixed signed archive/export execution | Per-build isolation, signed-job restart recovery, and cancellation |
-| Signing kit | Portable file import remains available; Xcode VM sign-in is labeled best-effort; `.p8` keys are accepted by restricted host path and retained in the OS vault; Apple app, Bundle ID, certificate, and profile metadata are verified read-only; an expired App Store profile can be replaced through confirmed native creation and owner-only retention; certificate/profile paths are revalidated and the real signing kit is provisioned and code-sign probed through a fixed native helper; archive execution unlocks and relocks the dedicated keychain within that helper's process boundary | Generate the guest private key/CSR and Apple Distribution certificate, then add rotation/revocation handling |
+| Desktop lifecycle | Close-to-tray with per-machine start, stop, refresh, and explicit quit actions; a machine registry with per-machine directories, container names, ports, busy markers, and legacy migration; a sidebar/tab shell with Setup, Build, and Logs per machine; every long-running operation carries a **Stop** that kills its host-side processes and, for builds that outlive their SSH session, the job inside the guest | Notifications and richer background-state recovery |
+| Docker-OSX host | Prerequisite probing, stable identity, create/start/stop/status/logs with launch-phase progress, elapsed-time and guest-readiness monitoring, explicit confirmation-protected container discard and machine deletion | Image pinning, host-managed disks, local templates (clone a prepared machine), storage checks, cancellation |
+| macOS guest bridge | SSH reachability, Ed25519 access key, explicit fingerprint pin, one-time password-authenticated key install on the pin, mismatch rejection, macOS/Xcode probes, measured Xcode XIP transfer/expansion, bounded project snapshot transfer, fixed tool bootstrap, automatic Simulator installation progress, durable unsigned-build reconnection, a validated simulator build, password-safe signing provisioning, and fixed signed archive/export execution | Per-build isolation, signed-job restart recovery, and cancellation |
+| Env sets | Named sets of build variables in the OS vault, attached per machine as a default and chosen per signed archive (desktop step and dashboard form), written into the guest as `.env.production.local` for the web build and sourced by the build shell, with the web assets rebuilt in place for a per-archive choice; variables read back with their values, secrets by key only in summaries, fetched masked into the editor with an eye to show one; set names travel in the heartbeat | Env for native compile-time configuration |
+| Signing kits | Multiple named kits in the OS vault with per-machine attachment, safe stored-detail display, and named recovery states when the vault is cleared or unreadable; portable file import remains available; Xcode VM sign-in is labeled best-effort; `.p8` keys are accepted by restricted host path and retained in the OS vault; Apple app, Bundle ID, certificate, and profile metadata are verified read-only; an expired App Store profile can be replaced through confirmed native creation and owner-only retention, and an existing Apple profile can be downloaded into the attached kit or re-added from the host's retained copies; a Distribution identity can be created at Apple for a key generated on the Linux host and packaged into the kit, so no Mac is needed at any point; certificate/profile paths are revalidated and the real signing kit is provisioned and code-sign probed through a fixed native helper; archive execution unlocks and relocks the dedicated keychain within that helper's process boundary | Generate the guest private key/CSR and Apple Distribution certificate, then add rotation/revocation handling |
 | Workspaces | Exact local path approval, project-shape validation, secret-filtered bounded archive, checksum, measured pinned-SSH transfer, atomic active-workspace replacement | Opaque workspace IDs in the control plane, dirty-state fingerprint, per-build snapshots and retention |
 | Artifacts | Local `.ipa` and portable `.xcarchive.zip` transfer with bounded sizes, guest/host SHA-256 agreement, private retention, reveal/copy actions, and confirmation-protected cleanup | Control-plane upload, download authorization, retention policy, and dSYM separation |
 | Windows Docker-OSX | Not implemented | WSL2 provider after Linux golden path |
@@ -487,7 +568,7 @@ The first real local executor slice has passed end to end:
 - host: Linux x86_64 with Docker, QEMU, and KVM;
 - executor: persistent managed Docker-OSX guest with pinned SSH identity;
 - guest/toolchain: macOS 26.6.2, Xcode 26.6, and iOS Simulator 26.5;
-- fixture: `resources/test-projects/nz.co.thinksolar.app`, an Ionic/Vue/Capacitor application with CocoaPods;
+- fixture: the Ionic/Capacitor fixture project, an Ionic/Vue/Capacitor application with CocoaPods;
 - source path: explicitly approved on the host, filtered, checksummed, transferred, and atomically installed at the managed guest workspace;
 - build: fixed unsigned `App` scheme build for the generic iOS Simulator with signing disabled; and
 - result: the repeat UI build completed in 49 seconds and produced `App.app` under the isolated DerivedData directory. The desktop retained the successful Xcode version and presented signing as the next stage.
@@ -507,9 +588,9 @@ The desktop now exposes the next guided action after a successful unsigned build
 
 The native Security-framework helper was compiled inside the live macOS 26.6.2/Xcode 26.6 guest and exercised with a generated one-day PKCS#12 fixture. Keychain creation, user search-list registration, PKCS#12 import, non-secret DER extraction, and cleanup completed successfully. A separate generated CMS profile fixture verified UUID/team/application/expiry extraction and embedded-certificate fingerprinting. The real Apple-issued `.p12` also reached and passed the native import helper; the original post-import `security find-identity -v` gate then returned no valid identity. BuildBridge now validates the helper's exact imported identity count and uses an actual disposable `codesign`/strict-verification probe instead of treating that macOS 26 enumeration as authoritative.
 
-The isolated keychain also receives Apple's public WWDR G3 intermediate before the signing probe. The PEM is retained in the release from Apple's official PKI endpoint, converted to DER in the guest, and must match pinned SHA-256 `DCF21878C77F4198E4B4614F03D696D89C66C66008D4244E1B99161AAC91601F` before import; no runtime download or password is involved. Apple documents G3 as the software-signing intermediate for Apple Development, Apple Distribution, iOS Development, and iOS Distribution certificates, with expiry on 2030-02-20. This release asset must be deliberately rotated before then. The native helper also applies Apple's `apple-tool:` and `apple:` signing partitions to the one imported private key and commits the ACL using Security.framework with the dedicated keychain password still held only in helper memory. It follows Apple's own open-source partition-list implementation and avoids the insecure `security -k <password>` command-line route. Because macOS scopes the usable unlocked state to the SSH security session, the probe mode reads the keychain password through the same protected framing, unlocks with Security.framework, runs fixed `codesign` and strict-verification children, and relocks before exit. The later archive command must use the same unlock-and-child-process boundary. No real signing credential has been read or logged during development.
+The isolated keychain also receives Apple's public WWDR G3 intermediate before the signing probe. The PEM is retained in the release from Apple's official PKI endpoint, converted to DER in the guest, and must match pinned SHA-256 a pinned SHA-256 before import; no runtime download or password is involved. Apple documents G3 as the software-signing intermediate for Apple Development, Apple Distribution, iOS Development, and iOS Distribution certificates, with expiry on 2030-02-20. This release asset must be deliberately rotated before then. The native helper also applies Apple's `apple-tool:` and `apple:` signing partitions to the one imported private key and commits the ACL using Security.framework with the dedicated keychain password still held only in helper memory. It follows Apple's own open-source partition-list implementation and avoids the insecure `security -k <password>` command-line route. Because macOS scopes the usable unlocked state to the SSH security session, the probe mode reads the keychain password through the same protected framing, unlocks with Security.framework, runs fixed `codesign` and strict-verification children, and relocks before exit. The later archive command must use the same unlock-and-child-process boundary. No real signing credential has been read or logged during development.
 
-The real signing retry then completed successfully in the desktop. The guest reports **Provisioned** for `iPhone Distribution: Think Solar Limited (F5QA294KSX)`, exact project match `nz.co.thinksolar.app`, certificate validity through 2027-09-02, and one installed profile for `F5QA294KSX.nz.co.thinksolar.app`. App Store Connect verification independently reports one active iOS App Store profile, `BuildBridge App Store 1788351973`, expiring on 2027-09-02. This accepts the complete real certificate/private-key/profile path.
+The real signing retry then completed successfully in the desktop. The guest reports **Provisioned** for `iPhone Distribution: the developer team (TEAM123456)`, exact project match `com.example.app`, certificate validity through 2027-09-02, and one installed profile for `TEAM123456.com.example.app`. App Store Connect verification independently reports one active iOS App Store profile, `the created App Store profile`, expiring on 2027-09-02. This accepts the complete real certificate/private-key/profile path.
 
 ### Signed local archive/export implementation — 2026-09-02
 
@@ -519,13 +600,13 @@ Selecting **Build signed archive & IPA** compiles the fixed native helper with t
 
 After export, BuildBridge requires exactly one IPA, strictly verifies the archived app with `codesign`, rechecks its bundle identifier, reads its marketing/build versions, packages the `.xcarchive` as a portable ZIP, and computes both guest checksums. Each artifact is copied through pinned SSH into a new owner-only application-data directory with a 20 GiB combined bound, written to a restricted partial file, checked for exact length and ZIP signature, checksummed again on the host, and atomically renamed only when the guest and host SHA-256 values agree. The UI retains safe version, size, hash, and path metadata and provides **Reveal folder**, path-copy, rebuild, and two-click cleanup actions. It states explicitly that this stage does not upload to Apple. Failures are also retained as a bounded safe diagnostic across desktop restarts so the recovery history is not lost.
 
-Live acceptance completed on 2026-09-02 against the real Think Solar workspace in macOS 26.6.2/Xcode 26.6. Xcode reported both `ARCHIVE SUCCEEDED` and `EXPORT SUCCEEDED` for `nz.co.thinksolar.app`, marketing version `3.2.0`, build `15`, using `iPhone Distribution: Think Solar Limited (F5QA294KSX)` and profile `ecbcf632-0220-4dbc-ad49-87f48d6deea6`. BuildBridge returned an owner-only 7,096,076-byte IPA with SHA-256 `B502A431E0EDE5A75A207B1149A63E70E68EC1FFD7BE319C091250591A4B054F` and a 28,268,787-byte portable archive with SHA-256 `430B5DA5CA93C91C76328D536FDF06D958D25E298D46524EEB5A587500E424C9`. Independent host checks reproduced both hashes and `unzip -t` accepted both files without errors. The final desktop state displayed version/build, sizes, shortened hashes, retained paths, reveal/copy controls, rebuild, and confirmation-protected cleanup.
+Live acceptance completed on 2026-09-02 against the real fixture workspace in macOS 26.6.2/Xcode 26.6. Xcode reported both `ARCHIVE SUCCEEDED` and `EXPORT SUCCEEDED` for `com.example.app`, marketing version `3.2.0`, build `15`, using `iPhone Distribution: the developer team (TEAM123456)` and profile `11111111-2222-3333-4444-555555555555`. BuildBridge returned an owner-only 7,096,076-byte IPA with SHA-256 a recorded SHA-256 and a 28,268,787-byte portable archive with SHA-256 a recorded SHA-256. Independent host checks reproduced both hashes and `unzip -t` accepted both files without errors. The final desktop state displayed version/build, sizes, shortened hashes, retained paths, reveal/copy controls, rebuild, and confirmation-protected cleanup.
 
 ### App Store Connect Team-key verification implementation — 2026-09-02
 
 The desktop now exposes **Verify developer team** after a complete Team key is stored and an approved Apple project supplies one unambiguous development team and release bundle identifier. The native layer creates an Apple-compatible five-minute ES256 JWT, checks Apple's App Store app list and Developer bundle-ID list independently with exact identifier filters, and applies a 20-second timeout to each call. If the Developer bundle-ID filter succeeds but returns no data, BuildBridge performs one bounded read-only account-inventory request and compares the requested identifier locally. Once the opaque Bundle-ID resource is found, it reads the related provisioning profiles and returns only names, types, platforms, states, UUIDs, and creation/expiry dates. The UI shows active versus expired/invalid profiles and recommends replacement without silently creating, revoking, or downloading anything. A provisioning `403` is retained as a safe partial result when the app lookup succeeded. `401`, `403`, `429`, timeout, invalid-key, and malformed-response failures are mapped to actionable messages without logging the `.p8`, issuer ID, JWT, or profile content.
 
-Live verification on 2026-09-02 established that Admin Team key `HR55SX45BS` is accepted by Apple, project team `F5QA294KSX` matches, and App Store app `6593688375` exists for `nz.co.thinksolar.app`. Apple's exact filtered Developer bundle-ID request returned an empty list even though the same explicit identifier was visible in Certificates, Identifiers & Profiles. The account-inventory fallback resolved the existing `UNIVERSAL` Bundle ID, Apple allowed its related profiles request, and the tolerant decoder rendered the live profile inventory successfully after a native restart. At that point all four returned profiles were expired: the newest iOS App Store profile expired on 2026-07-28 and the remaining App Store, ad hoc, and team profiles expired on 2025-07-31. The UI correctly reported **Replacement needed**, preserved those records, and subsequently created the explicitly confirmed replacement described below.
+Live verification on 2026-09-02 established that Admin Team key `KEYID12345` is accepted by Apple, project team `TEAM123456` matches, and App Store app `1234567890` exists for `com.example.app`. Apple's exact filtered Developer bundle-ID request returned an empty list even though the same explicit identifier was visible in Certificates, Identifiers & Profiles. The account-inventory fallback resolved the existing `UNIVERSAL` Bundle ID, Apple allowed its related profiles request, and the tolerant decoder rendered the live profile inventory successfully after a native restart. At that point all four returned profiles were expired: the newest iOS App Store profile expired on 2026-07-28 and the remaining App Store, ad hoc, and team profiles expired on 2025-07-31. The UI correctly reported **Replacement needed**, preserved those records, and subsequently created the explicitly confirmed replacement described below.
 
 ### Managed replacement-profile creation implementation — 2026-09-02
 
@@ -535,7 +616,7 @@ The confirmed request sends Apple's typed `POST /v1/profiles` body with one exis
 
 This operation deliberately uses an existing Apple Distribution certificate. The matching private key must be available in the `.p12` signing identity, and the later guest provisioning check verifies that match. Managed guest private-key/CSR and new certificate creation remain separate work; BuildBridge will not create a profile against an arbitrary certificate while implying that the profile alone can sign an archive.
 
-Live acceptance succeeded on 2026-09-02. After the user confirmed the exact Bundle ID and selected the future-dated `iOS Distribution` certificate, Apple created the replacement profile, BuildBridge retained it as `ecbcf632-0220-4dbc-ad49-87f48d6deea6.mobileprovision` under its owner-only managed profiles directory, and the exact path was added to the existing OS-vault signing kit. The four expired profiles remained untouched.
+Live acceptance succeeded on 2026-09-02. After the user confirmed the exact Bundle ID and selected the future-dated `iOS Distribution` certificate, Apple created the replacement profile, BuildBridge retained it as `11111111-2222-3333-4444-555555555555.mobileprovision` under its owner-only managed profiles directory, and the exact path was added to the existing OS-vault signing kit. The four expired profiles remained untouched.
 
 ### Issues encountered and durable resolutions
 
@@ -547,7 +628,8 @@ Live acceptance succeeded on 2026-09-02. After the user confirmed the exact Bund
 | The QEMU console opened excessively large | Default guest display sizing was unsuitable for onboarding | Launch at a compact 1280×720 with QEMU zoom-to-fit; retain manual zoom controls as recovery | Resolved and manually verified |
 | EFI boot and Disk Utility did not explain which disk to erase | First boot exposes installer and target disks without product guidance | The desktop identifies the largest uninitialized top-level target, instructs the user to erase it as `Macintosh HD` using APFS/GUID, and explains that this occurs once per retained disk | UI-guided by design; destructive choice remains explicit |
 | macOS installation took a long time with little desktop feedback | Apple exposes the authoritative install estimate only in its graphical installer | Show the current setup stage, elapsed time, Docker output, and keep the compact console available for Apple’s remaining-time estimate | UI-guided; extracting exact installer percentage remains a future console-integration improvement |
-| Remote Login and initial SSH authorization required manual setup | No authenticated guest channel exists before the first public key is installed | Generate the dedicated key in the desktop, display copyable steps, require the local macOS user to enable Remote Login and authorize the key, then explicitly pin the discovered host fingerprint | UI-guided trust bootstrap; BuildBridge never collects the guest password |
+| Remote Login and initial SSH authorization required manual setup | No authenticated guest channel exists before the first public key is installed | Require the local macOS user to enable Remote Login, explicitly pin the discovered host fingerprint, generate the dedicated key in the desktop, then install it either with the macOS login password over one password-authenticated SSH session to the pinned guest (the `ssh-copy-id` route) or with copyable Terminal commands | UI-guided trust bootstrap; the macOS password is held in memory for that one session, never stored or logged |
+| Authorizing the key meant typing a 68-character public key into the guest by hand | Nothing pastes into the QEMU console window, and the desktop refused to accept the guest password on principle | Accept the macOS login password once, after the host fingerprint is pinned, and hand it to `ssh` through the environment of that one process via a fixed askpass helper; keep the Terminal commands as the no-password route | Resolved in the desktop; the password never appears in an argument, a file, or a diagnostic |
 | Apple Account sign-in returned an unknown verification error in both macOS Settings and Xcode Accounts | Apple services can detect and reject generic macOS virtual machines; Docker-OSX's documented VM-hiding workaround changes kernel behavior and carries guest-agent and account risks | Do not make Apple Account login a build prerequisite or apply the patch in BuildBridge; recommend file import now and make Team API-key provisioning the managed route | Resolved architecturally and manually verified; API provisioning pending |
 | Opening Xcode showed the platform component chooser after command-line activation | Xcode retains a separate first-GUI-launch acknowledgement even when required tools or the selected iOS platform were prepared from the command line | Keep component installation automatic and show an in-app one-time instruction to retain iOS, omit unused platforms, and confirm Apple’s sheet; preserve the result in the retained disk/local template | UI-guided; unsupported preference hacks are deliberately avoided |
 | Xcode activation failed when elevation was attempted through SSH | macOS did not present usable Authorization Services UI in the SSH session | **Activate Xcode** opens a short-lived fixed command file in the guest Terminal; the user enters only the local macOS password in Apple’s native `sudo` prompt | Resolved and manually verified |
@@ -576,7 +658,7 @@ Live acceptance succeeded on 2026-09-02. After the user confirmed the exact Bund
 | The refreshed inventory showed a new future-dated `IOS_DISTRIBUTION` certificate with generic `activated: false` metadata while Xcode continued using a separate `Apple Development` identity and team development profile | BuildBridge incorrectly treated Apple's generic activation field as a prerequisite for iOS code-signing profiles; trying the generic certificate-activation update against this record produced Apple's unrelated “no Merchant ID ios” error | Removed the unsupported activation action and stopped requesting/using that metadata for distribution eligibility. Keep the working Development identity untouched, classify future-dated `DISTRIBUTION`/`IOS_DISTRIBUTION` records as ready, and let Apple's profile-creation endpoint validate the confirmed certificate relationship | Resolved from live API evidence and confirmed when Apple accepted the replacement-profile request |
 | Provisioning the real signing kit failed with “the imported archive must contain exactly one valid code-signing identity” even though native PKCS#12 import had succeeded | The old gate relied on `security find-identity -v`; current macOS 26 can fail to enumerate a valid imported identity even when Security framework returned one identity, and the message could not distinguish zero/multiple archive identities from post-import validity | The fixed helper now reports the exact PKCS#12 identity count and gives specific re-export guidance for zero or multiple identities. For exactly one identity, derive bounded certificate metadata from its DER and prove usability with a disposable `codesign` plus strict verification; surface the real signing failure if that probe fails | Identity-count and real code-sign-probe paths accepted live; the probe exposed the missing trust chain below |
 | The first retry advanced past identity enumeration but reported only `certificate_expired`, while Apple's inventory showed the selected distribution certificate expiring in September 2027 | The lifetime probe mapped every failure from LibreSSL's `x509 -checkend` operation to “expired,” hiding an unsupported option, parsing failure, or incorrect guest clock behind the same message | Read `notBefore` and `notAfter` explicitly, parse them with macOS `date`, compare both against the guest epoch, and include the certificate boundary plus guest UTC time in any failure. Continue only when the imported certificate is currently valid | Resolved with command-shape regression coverage and live diagnostic confirmation |
-| The corrected lifetime check showed that the imported `.p12` expired on 2026-07-28 even though Apple lists a different distribution certificate valid until September 2027 | The exported archive contains the old distribution identity; creating a replacement provisioning profile does not update the certificate/private key inside an existing `.p12` | Keep the newly created profile. In the failed guest-signing panel, show UI-only recovery: on the trusted key-owning Mac select the unexpired Distribution identity under Keychain Access → login → My Certificates, confirm its private key, export only that item, replace the `.p12` path/password, and store the partial update in the OS vault without erasing profiles or API credentials | Resolved live: replacement `iphone dist cert.p12` passed identity, team, and lifetime checks |
+| The corrected lifetime check showed that the imported `.p12` expired on 2026-07-28 even though Apple lists a different distribution certificate valid until September 2027 | The exported archive contains the old distribution identity; creating a replacement provisioning profile does not update the certificate/private key inside an existing `.p12` | Keep the newly created profile. In the failed guest-signing panel, show UI-only recovery: on the trusted key-owning Mac select the unexpired Distribution identity under Keychain Access → login → My Certificates, confirm its private key, export only that item, replace the `.p12` path/password, and store the partial update in the OS vault without erasing profiles or API credentials | Resolved live: replacement the replacement `.p12` passed identity, team, and lifetime checks |
 | Keychain Access showed only expired Distribution identities after a new `.certSigningRequest` was generated | A CSR is the signed public-key request, not an Apple-issued certificate or portable identity; the matching private key remains in the login keychain on the Mac that created it. The host Downloads directory contained the valid 2048-bit RSA CSR and the expired `.p12`, but no issued `.cer` | The permanent acquisition guide and expired-certificate recovery explain both branches: download the already-issued unexpired Distribution `.cer` from its Apple Developer record without creating a duplicate, or upload the CSR only if it has not been issued. Open the resulting `.cer` on the same key-owning Mac, verify it pairs under **My Certificates**, then export that one identity as `.p12` | Resolved live; the resulting replacement identity imported successfully |
 | The valid replacement identity reached the real signing probe but `codesign` returned `errSecInternalComponent` with “unable to build chain to self-signed root” | BuildBridge's fresh isolated keychain contained the leaf certificate and private key but not Apple's WWDR G3 intermediate. Apple assigns G3 to both legacy iOS/iPhone Distribution and unified Apple Distribution software-signing certificates | Bundle Apple's public WWDR G3 intermediate from the official PKI endpoint, convert it to DER, verify its pinned SHA-256, and import it automatically into only the dedicated keychain before the disposable signing probe. Keep private-key ACL handling and passwords unchanged | Resolved live: the next retry no longer emitted the trust-chain warning and advanced to the private-key authorization failure below |
 | With the WWDR chain installed, the disposable probe still returned `errSecInternalComponent` while replacing its ad-hoc signature | Current macOS additionally gates unattended Apple signing with the private key's partition-ID ACL, and the dedicated keychain's usable unlocked state does not cross into a later SSH login merely because the import helper left it open | Mirror Apple's open-source partition-list implementation inside the native helper: set `apple-tool:` and `apple:` on the imported private key and commit access using the in-memory dedicated-keychain password. Run the fixed `codesign` probe as the helper's child after an in-process unlock, then relock. Never pass the password to `security -k`, argv, or logs | Resolved live: the disposable Xcode 26 test isolated the session boundary, and the following real retry provisioned and code-sign probed the Apple identity successfully |
@@ -585,19 +667,27 @@ Live acceptance succeeded on 2026-09-02. After the user confirmed the exact Bund
 | A signed-archive failure was visible in the current progress panel but disappeared after a native desktop restart | Progress events are deliberately transient and there was no durable safe failure record for this local operation | Clear a restricted `archive-error.txt` at run start/success, retain a control-character-filtered 8,000-character diagnostic on failure, reload it into the view model, and remove it with artifact cleanup | Resolved in the UI and exercised across the live retries |
 | A native restart briefly reported that no default credential store was set | The Linux host credential-vault adapter was temporarily unavailable while the restarted desktop initialized; the macOS guest login state is not involved | Keep credentials in the host OS vault, surface vault failures without falling back to plaintext, and retry once the host session service is available | Transient; subsequent verification succeeded without changing credentials |
 | Saving API credentials after a portable signing kit, or the reverse, could replace the other route with blank form values | Secret inputs are deliberately cleared after storage, so a later partial form submission did not contain the earlier values | Merge non-empty validated input into the existing vault record; only the confirmation-protected clear action removes all routes | Resolved and unit tested |
+| The desktop was one 6,300-line scrolling panel with three separate step rails, per-section error slots, and a single global operation lock | Every capability had been appended to one component with no step model, no per-machine state, and no way to reattach after a restart | Rebuilt the desktop as a sidebar-and-tabs shell over a typed backend adapter, per-machine sessions, and pure step derivation with unit tests; the native layer reports a stable busy key per machine and launch-phase progress | Rebuilt 2026-09-03; every prior command remains reachable |
+| Only one macOS machine could exist; its container name and directory were hard-coded and the profile could not be changed without a rebuild command that did not exist | The first slice modelled a singleton builder | Added a machine registry with per-machine container names, directories, ports, and artifacts; migrated the existing builder as `default` without moving its container or files; added confirmation-protected discard and delete | Implemented and unit tested; live migration of the accepted builder pending |
+| The desktop reported `Realtime connection error: [object Object]` and both surfaces sat on **realtime disconnected** | `pusher-js` reports failures as nested plain objects, so the reason never reached the screen; the reason itself was that another project's Reverb held the default port 8080 and answered the handshake with `4001 Application does not exist`, and BuildBridge's own Reverb container published no host port | Read the close code and message out of whatever shape arrives (`lib/realtime.ts`, unit tested) and name the endpoint, the code, and — for 4001 — the likely port clash; `describeError` never prints `[object Object]` again; the Reverb service moved to 8081 in `.env.example` with a comment saying why | Resolved and verified end to end: the control plane reports **realtime connected** |
+| A build queued while the desktop was connected sat at **queued** indefinitely | Its `build.queued` broadcast failed (the queue worker still pointed at the old Reverb port) and nothing ever re-checked: the heartbeat reported health only | The heartbeat reply now carries the number of builds waiting for the runner; a non-zero count triggers a claim, so a missed event costs at most one heartbeat interval | Resolved with a control-plane test and a contract test |
+| Starting a new machine showed a spinner for minutes while Docker pulled the image | `launch` reported nothing until it returned | Emit preparing, pulling-image, generating-identity, creating-container, starting, and completed phases | Implemented; the desktop shows the phase and elapsed time |
 
 ### Automation and UI boundary
 
 BuildBridge automatically performs repeatable, non-interactive work: provider probing, container lifecycle, source filtering and transfer, tool installation, runtime download, dependency installation, build execution, progress/log collection, bounded retry, signing-kit transfer/import/match verification, signed archive/export, signature verification, artifact packaging, checksummed return, and local result retention. The desktop presents a typed action and state for each operation; a terminal-only happy path is not acceptable.
 
-User interaction remains intentional where BuildBridge cannot safely infer consent or accept a secret: erasing an installation disk, creating the first macOS account, enabling Remote Login, authorizing the initial SSH key, confirming a new host fingerprint, entering the local macOS administrator password, and any optional Apple login/2FA. These actions must be explained step by step in the desktop and verified automatically afterward. BuildBridge must not automate them by collecting passwords, bypassing trust prompts, or silently performing destructive actions.
+User interaction remains intentional where BuildBridge cannot safely infer consent or accept a secret: erasing an installation disk, creating the first macOS account, enabling Remote Login, confirming a new host fingerprint, entering the local macOS administrator password for `sudo`, and any optional Apple login/2FA. These actions must be explained step by step in the desktop and verified automatically afterward. BuildBridge must not automate them by collecting passwords, bypassing trust prompts, or silently performing destructive actions.
+
+The one place BuildBridge does accept the macOS login password is installing the initial SSH key. With the host fingerprint already pinned, the desktop may take the password once, hold it only in memory for a single password-authenticated SSH session that appends the key to `authorized_keys`, and then discard it. It is never stored, logged, or reused, and the copyable Terminal commands remain available for anyone who prefers not to enter it. Xcode activation and administrator optimizations keep using the guest Terminal because macOS will not show its authorization prompt in an SSH session, not because the password is off limits.
 
 ### Verification baseline
 
-The 2026-09-02 repository baseline is:
+The 2026-09-03 repository baseline is:
 
-- 45 Rust workspace tests pass across the contract, runner, Docker-OSX, and Tauri crates; all Rust documentation tests pass;
+- 83 Rust workspace tests pass across the contract, runner, Docker-OSX, and Tauri crates; all Rust documentation tests pass;
 - Rust formatting and workspace Clippy pass with warnings denied;
+- 75 desktop unit tests pass over the pure step, signing-requirement, env-set, path, bounded-number, listbox, control-plane-chip, and realtime-failure helpers;
 - Vite+ formatting/lint, desktop Vue type checking, and production bundling pass;
 - the live fixture acceptance result above remains recorded separately from automated tests.
 
@@ -611,9 +701,9 @@ The next slice keeps execution local in the desktop while proving signing before
 2. Create a dedicated BuildBridge keychain in the guest and transfer the selected certificate and provisioning profiles over pinned SSH without placing passphrases in argv or logs. **Implemented with a fixed native Security-framework helper.**
 3. Verify the imported identity by an actual disposable code-sign operation, then verify profile application identifier, development team, bundle identifier, certificate expiry, and certificate/profile fingerprint match; display only safe metadata and actionable mismatches. **Implemented and accepted with the real Apple identity/profile in the Xcode 26 guest.**
 4. Add read-only Team API-key verification that reports safe team/key metadata, Bundle-ID fallback resolution, provisioning-profile expiry, and required permissions without sending the credential to the web control plane. **Implemented and accepted live, including fallback resolution and four expired profiles.**
-5. Generate the signing private key and CSR inside the guest, then add explicit API-backed actions to create/download an Apple Distribution certificate and matching App Store Connect profile. **Profile creation/download is implemented for a selected existing active certificate; managed private-key/CSR and certificate creation remain.** Show the exact production resources before mutation and never revoke or replace an existing certificate implicitly.
+5. Generate the signing private key and CSR, then add explicit API-backed actions to create/download an Apple Distribution certificate and matching App Store Connect profile. **Both are implemented: the key and CSR are generated on the Linux host with fixed-argv OpenSSL, Apple issues the certificate through the kit's Team key, and the result is packaged as a `.p12` straight into the kit; profile creation/download follows.** Show the exact production resources before mutation and never revoke or replace an existing certificate implicitly.
 6. Add typed project controls for scheme, configuration, archive mode, and export method, using detected defaults where unambiguous. **Implemented locally with a fixed detected scheme, `Release`, and App Store Connect export recipe.**
-7. Run `xcodebuild archive` and `xcodebuild -exportArchive`, then produce an artifact manifest with sizes and SHA-256 checksums. **Implemented and accepted live with the real Xcode 26.6 Think Solar project; both returned artifacts independently passed checksum and ZIP verification.**
+7. Run `xcodebuild archive` and `xcodebuild -exportArchive`, then produce an artifact manifest with sizes and SHA-256 checksums. **Implemented and accepted live with the real Xcode 26.6 the fixture project; both returned artifacts independently passed checksum and ZIP verification.**
 8. Let the user reveal or copy the local artifact path from the desktop, with explicit cleanup and signing-state removal actions. **Implemented for the local IPA and portable Xcode archive.**
 9. Add success, invalid certificate, mismatched profile, locked keychain, cancellation, and secret-redaction tests. **Metadata/parser, fixed-recipe, bounds, backward-compatibility, framing, helper-import, and real signing-identity coverage exists; signed-job restart recovery and cancellation remain.**
 
@@ -706,6 +796,169 @@ The following decisions should be treated as settled until this document is deli
 22. Signing passphrases move from the host OS vault to a fixed, unprivileged native macOS helper only through length-framed SSH standard input; they are never interpolated into shell commands, process arguments, logs, or UI result models.
 23. App Store Connect Team-key verification is native, local, short-lived, and GET-only. The private key, issuer ID, and JWT never enter the Vue view model, guest, control plane, or normal logs.
 24. Apple provisioning-profile creation is a separate, explicitly confirmed native action. It rechecks the exact Bundle ID, selected active certificate, and absence of an active App Store profile immediately before mutation; it never revokes existing Apple resources.
+25. The desktop manages a registry of macOS machines. Each machine owns its container, identity, keys, host-key pin, approved project, signing record, and artifacts; the signing kit is host-level and shared. The pre-registry builder is migrated as machine `default` and keeps its container and directory.
+26. The desktop derives every step's state from the backend view model through pure functions with unit tests, and can run against a development-only mock backend.
+27. Every control is a shared component from the desktop's own UI directory. No native select, number spinner, or checkbox reaches the screen — a select is a listbox with full keyboard support, not a bordered `<select>` — and a field's label, action and hint are laid out by `Field` rather than by per-site spacing. The interface is written in stock Tailwind utilities with no custom colour classes, following one documented palette: neutral zinc surfaces and text, ink-coloured actions, and emerald/amber/red reserved for success, warning and failure. There is no accent hue, so colour always carries status. Sentence case, flat fills, hairline rules; no uppercase styling, no gradients, and no ellipsis on a button label.
+28. Losing the host's credential vault is a recoverable, named state rather than an error or a
+    silent reset to "unconfigured". A machine reports `signingHealth`, and a runner reports
+    `credentialsMissing`, so the interface can distinguish a fresh install from a keyring that was
+    cleared while its on-disk records survived.
+29. Signing material is stored as one or more named **signing kits** in the host's operating-system vault, and each machine is attached to one kit. The files and passwords are entered once per kit and shared by every machine attached to it; provisioning remains per machine, importing the attached kit into that machine's own guest keychain. Nothing is attached on a machine's behalf, not even when the host holds exactly one kit: which identity signs a build is a choice, and the interface shows it being made.
+30. Provisioning profiles BuildBridge downloads are retained on the host and offered back to any
+    kit. A kit references a profile by path, so retention is what makes a lost vault recoverable
+    without contacting Apple. Pulling an existing profile from Apple into a kit is a read-only
+    download and is distinct from creating a replacement profile, which stays a confirmed mutation.
+31. The desktop is complete without a control plane, and the interface says so: an unpaired
+    desktop is **local only**, a neutral state, and only a pairing that exists but is not working
+    gets warning or failure colour. Remote triggering and history are what pairing adds.
+32. A remote build names a machine and, optionally, a ref of the project already approved there.
+    The control plane never supplies a repository or a filesystem path; the runner fetches only
+    from the approved project's own remote and refuses a revision whose bundle identifier or team
+    differs from the approved one.
+33. Long-running builds keep their lease by renewal and stream their logs while they run. A lease
+    that lapses is re-offered to the same runner, never silently abandoned.
+34. Build environments are **env sets**: vault-held, attached per machine as a default with no
+    implicit fallback, applied at synchronization, and chosen per signed archive by rebuilding
+    the web assets in place. The control plane learns set names, never values, and may name one
+    for a remote build only if the runner reported holding it.
+35. Every long-running operation can be stopped from where it is shown, and a stop is an
+    outcome, not a failure: it kills the operation's processes on both sides of the bridge,
+    keeps nothing already retained, and records no diagnostic.
+36. Signing identities can be created without a Mac. The private key is generated on the Linux
+    host, Apple signs the CSR through the kit's Team key, and the result is packaged into the
+    kit; the key never exists anywhere but that kit's `.p12`. Nothing at Apple is revoked or
+    replaced by this path, and Apple's refusal, when it comes, is shown unedited.
+37. Guest optimizations are a fixed catalogue with the source's own tiers and caveats. A
+    user-level tweak runs over the bridge; anything needing an administrator goes through the
+    guest's Terminal, never through a password BuildBridge holds, because macOS shows its
+    authorization prompt only there. The extremely insecure ones
+    are offered with the source's warning unedited and an explicit acknowledgement, on the
+    grounds that the guest is reachable from this host's loopback only.
+
+### Credential loss and recovery
+
+The host's operating-system keyring holds two things: the runner token and every signing kit. A
+keyring can be reset, recreated on a password change, or come up locked, and when that happens the
+on-disk records survive: `runner.json`, `machines.json`, each machine's `signing.json`, its
+approved workspace, and its retained artifacts. A guest keeps its provisioned keychain and
+installed profiles, because those live inside the macOS machine.
+
+Treating that as "never configured" is wrong and sends a person looking for a problem they do not
+have, so both surfaces name it:
+
+| Condition | What the interface reports | Recovery |
+| --- | --- | --- |
+| `machines.json` lists a machine, `signing.json` exists, no kit resolves | `signingHealth: kit_missing` — the Build checklist's kit step **fails** and the signed-archive step is blocked | Store the kit again, attach it, then provision once more. Provisioning recreates the guest keychain, so the new keychain password need not match the old one. |
+| The vault itself cannot be read | `signingHealth: vault_unavailable` plus the underlying reason; the machine view still renders | Unlock the keyring and refresh. Nothing has been lost. |
+| `runner.json` exists but its token does not | `credentialsMissing` on the runner, distinct from "not paired" | Generate a new pairing code and pair again; machines and artifacts are unaffected. |
+| A kit has to be entered again and its profile paths are gone | The kit form lists the profiles already on this host under the profiles field | Add the retained file back with one click. Apple is not contacted and no profile is created. |
+
+A vault read failure never fails the machine view. The view reports the condition and continues,
+so a locked keyring cannot make a working machine look broken.
+
+### Remote signed archives
+
+The control plane can queue an `apple_archive` build on any machine a runner reports as ready.
+Readiness is computed by the desktop — container running, guest identity pinned, a project
+approved, signing provisioned — and sent with every heartbeat along with the machine's name, the
+approved project's name and bundle identifier, and the project's git remote if it has one. The
+dashboard offers **Signed archive** on each ready machine with one optional field: a branch, tag
+or commit.
+
+The payload is deliberately small: `{ machine_id, ref }`. The control plane never names a
+repository or a path. A ref is a revision *of the project already approved on that machine*, and
+the runner fetches it from that project's own `origin` into a per-machine checkout directory with
+fixed-argv git, then refuses to build it if its Xcode project targets a different bundle
+identifier or team than the approved one — the provisioned signing would not match. A blank ref
+builds the approved folder as it is. The ref grammar is validated three times, by the control
+plane, the contract crate and the runner, and is limited to what git itself would accept.
+
+Execution is the Build tab's own steps in order — synchronize, unsigned test build, signed
+archive — run by the same commands the tab uses, so the desktop shows the same progress live.
+Every progress event those commands emit is also forwarded as an ordered control-plane log line
+by a pump thread that sends batches every two seconds and renews the two-minute lease every
+minute; a lapsed lease is offered back to the runner by its next claim rather than lost.
+Completion carries a result with the artifact names, sizes and SHA-256 checksums, the marketing
+version and build number. The files stay on the host; the desktop reveals them.
+
+### Stopping an operation
+
+Every running operation — starting a machine, importing Xcode, provisioning, synchronizing, the
+test build, the signed archive — shows a **Stop** on its progress strip. Stopping is not an error
+path dressed up: the operation's scope (`OperationScope` in the Docker-OSX crate) is entered by
+the blocking thread that runs it, every `ssh`, `docker` and `tar` child it starts is registered
+there, and a stop terminates those children and refuses further spawns under that scope. The
+operation then returns **Stopped.** rather than whatever the killed process last said, the
+desktop reports it as an outcome rather than a failure, and no failure diagnostic is retained
+for it. The test build and archive deliberately survive a dropped SSH session so a restarted
+desktop can reattach; a stop therefore also reaches into the guest and terminates the job's
+process group by the pid files under `~/.buildbridge/tools/jobs`, then clears them so a later
+run starts fresh rather than reattaching to a corpse.
+
+### Env sets
+
+An env set is the environment a build runs with: a named list of variables held in the host's
+operating-system vault under its own entry, next to the signing kits, and attached per machine.
+As with signing kits, nothing is attached on a machine's behalf: a machine builds with exactly the
+set it is attached to, or with none, because a production build silently pointed at the wrong
+backend is worse than a build that fails to start.
+
+The attachment is a default, not a binding. Every synchronization writes the attached set into the
+guest so the test build runs with it, and every **signed archive chooses its own set** — on the
+archive step in the desktop and on the dashboard's form, pre-selected to the attached one. Choosing
+a different set does not repeat the sync or the test build: the archive recipe writes the chosen
+set into the existing guest workspace, rebuilds the web assets (`vp build`, `cap sync ios`), refuses
+to continue if that moved the native lockfile, and then archives. A staging TestFlight build and a
+production store build therefore come from one snapshot, about a minute apart, and each retained
+archive records which set it was built with. Native code that reads its environment at compile
+time is outside this mechanism, and the interface says so.
+
+The set is rendered twice, because its two readers quote differently: as `.env.production.local` for Vite's dotenv loader (double quotes
+with `$` and backticks escaped; single quotes when the value holds a double quote) and as a
+single-quoted `export` script for the guest build shell, which the unsigned test build sources
+before installing dependencies. Both files are uploaded over the pinned SSH bridge through stdin,
+land owner-only, and are replaced or removed by the next sync. A value that the two renderings
+would read differently — line breaks, or both kinds of quote — is refused at save time by the
+dialog and again by the runner.
+
+A set holds two kinds of entry, and the dialog keeps them in two sections. A **variable** is
+configuration that is not sensitive — an API base URL, a feature flag — and reads back with its
+value, so editing shows it as stored. A **secret** — a token, a key, a DSN — is masked as it is
+typed and left out of every summary. When the editor opens on a stored set it fetches that set's
+secrets through a dedicated command and holds them masked, with an eye icon on each row to show
+one, so a secret can be checked without being retyped. If that fetch fails the row stays blank,
+where blank keeps what is stored, and the runner still refuses to carry a stored secret over into
+a variable unless its value is entered. Both kinds are rendered into the guest the same way. Sets
+stored before the distinction existed read back as secrets, since that is what they were promised.
+
+### Guest optimizations
+
+Below a machine's timeline is a **Guest optimizations** section: the tweaks from
+`sickcodes/osx-optimizer` that matter for a build VM, as a fixed catalogue in the Docker-OSX
+crate. Each entry carries the script verbatim, a check that prints whether the guest already has
+it, the source's own caveat, and a tier in the source's own words — *recommended*, *at your own
+risk*, *extremely insecure*. The desktop lists them with their current state (asked in one round
+trip over the bridge; a check that cannot run reads as *unknown*, never as *not applied*) and an
+**Apply** button. Items that only touch the user's defaults run straight over the bridge; items
+that need an administrator open the guest's own Terminal with a fixed command file, exactly as
+Xcode activation does, so `sudo` reads the password from its TTY and BuildBridge never sees it.
+The riskier the tier the more the button asks first: at-your-own-risk items confirm with the
+caveat shown, and the extremely insecure ones — disabling passwords, passwordless sudo for every
+account — require an explicit acknowledgement and are shown with the source's warning unedited.
+They are offered only because the guest listens on this host's loopback and nowhere else.
+
+### Runner identity and removal
+
+Pairing creates a runner record and a scoped token. **Unpair** in the desktop clears only that
+host's stored token, because a desktop that has just deleted its credential cannot authenticate a
+revocation; **Remove** in the control plane is the other half — it deletes the runner's tokens and
+sets `revoked_at`, so the record stops authenticating and leaves the dashboard while every build
+it ran stays readable. Nothing is deleted, because builds reference the runner.
+
+A consequence worth naming: pairing the same desktop twice produces two runner records, and the
+older one lingers until it is removed. Reusing one identity across re-pairings would need the
+desktop to present a stable host identity at pairing time, which is a protocol change rather than
+a UI one.
 
 ## Open decisions
 
@@ -718,7 +971,9 @@ These require a concrete implementation decision before their phase begins:
 - the pinned Docker-OSX image version/digest and upgrade/migration policy;
 - the supported Windows 11 editions, CPU architectures, and WSL distributions;
 - artifact and log retention defaults; and
-- the product language and distribution policy required by Apple licensing constraints.
+- the product language and distribution policy required by Apple licensing constraints;
+- how a prepared machine is captured as a local template and cloned into a new machine (host-managed disks are a prerequisite); and
+- whether projects become first-class records that can target several machines, which requires per-project guest workspace directories.
 
 ## External references
 
