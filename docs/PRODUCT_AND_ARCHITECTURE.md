@@ -81,13 +81,15 @@ flowchart LR
     Control --> Database[(Build and runner database)]
     Control --> Artifacts[(Artifact storage)]
     Control --> Reverb[Reverb WebSocket server]
-    Reverb --> Desktop[Tauri desktop runner]
-    Desktop --> Vault[Operating-system credential vault]
-    Desktop --> Native[Native host executor]
-    Desktop --> Provider[Docker-OSX provider]
+    Reverb --> Engine[BuildBridge engine crate]
+    Desktop[Tauri desktop] --> Engine
+    CLI[buildbridge command line] --> Engine
+    Engine --> Vault[Operating-system credential vault]
+    Engine --> Native[Native host executor]
+    Engine --> Provider[Docker-OSX provider]
     Provider --> Docker[Docker + QEMU/KVM]
     Docker --> Guest[Persistent macOS guest]
-    Desktop -->|Pinned SSH bridge| Guest
+    Engine -->|Pinned SSH bridge| Guest
     Native --> Artifacts
     Guest --> Artifacts
 ```
@@ -121,9 +123,9 @@ It must not own:
 - general-purpose shell commands; or
 - implicit trust of a newly discovered guest machine.
 
-### Tauri desktop runner
+### The engine and its clients
 
-The desktop application owns:
+The engine crate owns, on behalf of whichever client holds it:
 
 - the user-visible pairing and connection experience;
 - the long-lived runner token in the operating-system credential vault;
@@ -137,7 +139,9 @@ The desktop application owns:
 - typed job execution and log forwarding; and
 - safe cancellation and local recovery.
 
-The desktop runner is the primary control-plane client even when a build runs in a guest. For the first workflow, it claims the job and delegates the typed operation over the pinned SSH bridge. A separately paired guest agent remains a later optimization, not a requirement for the first signed build.
+Its clients are thin. The Tauri desktop owns the window, the tray, the native file pickers, and forwarding the engine's events to the webview; the `buildbridge` command line owns rendering results and progress in a terminal and turning Ctrl-C into a cancellation. Both build the engine on the same directories, so they see the same machines, and the engine's per-machine lock keeps them from running one machine at once. A daemon, when one is wanted, would serve the same engine over a socket.
+
+The engine is the primary control-plane client even when a build runs in a guest. For the first workflow, it claims the job and delegates the typed operation over the pinned SSH bridge. A separately paired guest agent remains a later optimization, not a requirement for the first signed build.
 
 ### Shared Rust crates
 
@@ -145,8 +149,9 @@ The Rust workspace is split by responsibility:
 
 - `buildbridge-contract` contains versioned wire DTOs and enums shared by clients.
 - `buildbridge-runner` contains control-plane transport and typed, shell-free execution logic without a Tauri dependency.
-- `buildbridge-docker-osx` contains Docker-OSX host probing, lifecycle, guest trust, and guest diagnostics.
-- the Tauri crate adapts these libraries to desktop state, secure storage, and UI commands.
+- `buildbridge-docker-osx` contains Docker-OSX host probing, lifecycle, guest trust, guest diagnostics, and every build that runs in the guest.
+- `buildbridge-engine` contains everything above them — the machine registry, per-machine records, the vault, the Apple API, templates, the runner — behind one `Engine` value and an event sink.
+- `apps/desktop/src-tauri` adapts the engine to a window and a tray; `apps/cli` adapts it to a terminal.
 
 Protocol v1 remains additive. Renaming or removing fields or enum values requires a protocol version change.
 
@@ -550,7 +555,7 @@ As of 2026-09-02:
 
 | Area | Current state | Next gap |
 | --- | --- | --- |
-| Monorepo | Vite+ JavaScript workspace, Tauri/Vue desktop app, Cargo workspace | CI and release packaging |
+| Monorepo | Vite+ JavaScript workspace, engine crate, Tauri/Vue desktop app, `buildbridge` command line, Cargo workspace | CI and release packaging |
 | Runner pairing | Single-use code and scoped runner token; token stored in OS vault; a runner can be removed from the control plane, which deletes its tokens, keeps its build history, and hides it from the dashboard | Human web authentication, and reusing one runner identity across re-pairings instead of creating a second record |
 | Realtime | Reverb private runner channel wakes the desktop; the heartbeat is separate but its reply reports work still waiting, so a lost queue event is recovered within twenty seconds | Browser log/artifact event coverage and reconnection tests |
 | Job protocol | Versioned DTOs, leases with renewal, ordered logs streamed during long jobs, completion with a kind-specific result, and heartbeats that report each machine's name and readiness | Cancellation, retries, executor assignment |
@@ -711,11 +716,11 @@ The one place BuildBridge does accept the macOS login password is installing the
 
 ### Verification baseline
 
-The 2026-09-03 repository baseline is:
+The 2026-09-04 repository baseline is:
 
-- 83 Rust workspace tests pass across the contract, runner, Docker-OSX, and Tauri crates; all Rust documentation tests pass;
+- 338 Rust workspace tests pass across the contract, runner, Docker-OSX, engine, and command-line crates; all Rust documentation tests pass;
 - Rust formatting and workspace Clippy pass with warnings denied;
-- 75 desktop unit tests pass over the pure step, signing-requirement, env-set, path, bounded-number, listbox, control-plane-chip, and realtime-failure helpers;
+- 106 desktop unit tests pass over the pure step, device, signing, env-set, operations, path, bounded-number, listbox, control-plane-chip, and realtime-failure helpers;
 - Vite+ formatting/lint, desktop Vue type checking, and production bundling pass;
 - the live fixture acceptance result above remains recorded separately from automated tests.
 
@@ -899,8 +904,9 @@ The following decisions should be treated as settled until this document is deli
     order — keychain password, then Team key, then files — and ends by saying exactly what the
     kit could do if saved now. BuildBridge still never replaces a live App Store profile it did
     not create; when one exists for another certificate, provisioning says so and stops.
-42. Both native crate roots are split by concern, and stay split. The desktop crate's root
-    holds the wire DTOs, the token keyring and `run()`; every command lives in the module of
+42. Both native crate roots are split by concern, and stay split. The engine crate's root (the
+    desktop crate's, until decision 45 moved it) holds the wire DTOs, the token keyring and
+    the `Engine`; every command lives in the module of
     its feature — `ops` (busy markers, cancellation, progress), `runner`, `machine_lifecycle`,
     `usb`, `devices`, `signing_kits`, `certificates`, `optimizations`, `env_sets`,
     `apple_profiles`, `guest_access`, `builds`, `views`, `records` (per-machine files). The
@@ -928,7 +934,7 @@ The following decisions should be treated as settled until this document is deli
     the template again. Saving is offered once a machine has its identity pinned and its key
     authorized and keeps its disk on this host; the natural moment is after Xcode is activated.
 44. The TypeScript contract is generated, never mirrored by hand. Every serde type in the
-    contract, provider and desktop crates derives ts-rs's `TS` with `#[ts(export)]`, 64-bit
+    contract, provider and engine crates derives ts-rs's `TS` with `#[ts(export)]`, 64-bit
     fields carry `#[ts(type = "number")]` because serde writes them as JSON numbers, and
     `pnpm types:generate` runs the crates' export tests into `apps/desktop/src/types/generated`
     (committed, lint-ignored) and writes its index; `types/backend.ts` re-exports it and keeps

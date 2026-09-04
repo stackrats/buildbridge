@@ -24,16 +24,16 @@ BuildBridge creates a persistent macOS build machine on your Linux host with Doc
 ## How it works
 
 ```text
-Web control plane ── Reverb + HTTPS ─┐
-Approved projects ───────────────────┼─ Tauri desktop runner
-Credential vault ────────────────────┘  trusted Linux host
-                                        ├─ Docker-OSX lifecycle ─┐
-                                        └─ pinned SSH bridge ─────┴─ macOS / Xcode ── archive / IPA
+Web control plane ── Reverb + HTTPS ─┐   Tauri desktop ─┐
+Approved projects ───────────────────┼─ BuildBridge engine ◄─ buildbridge CLI
+Credential vault ────────────────────┘   trusted Linux host
+                                          ├─ Docker-OSX lifecycle ─┐
+                                          └─ pinned SSH bridge ─────┴─ macOS / Xcode ── archive / IPA
 ```
 
-The desktop app is the trusted side. It owns the machines, approved project folders, signing credentials, and pinned SSH connection to each guest. The web app only coordinates pairing and builds; it cannot run arbitrary shell commands or access signing secrets.
+The engine is the trusted side, running inside the desktop app or the `buildbridge` command line on your Linux host. It owns the machines, approved project folders, signing credentials, and pinned SSH connection to each guest. The web app only coordinates pairing and builds; it cannot run arbitrary shell commands or access signing secrets.
 
-The desktop app guides each machine through two workflows:
+The desktop guides each machine through two workflows, and the command line drives the same steps:
 
 1. **Setup:** Check the Linux host, create the machine, install macOS, configure SSH, and install Xcode.
 2. **Build:** Approve and sync a project, test an unsigned build, provision signing credentials, and export the signed archive and IPA.
@@ -79,8 +79,9 @@ round. `buildbridge --help` lists every verb.
 This is a monorepo:
 
 ```text
-apps/desktop    Tauri and Vue desktop runner
-crates/         Shared Rust: protocol contract, runner transport, Docker-OSX provider
+apps/desktop    Tauri and Vue desktop, a thin client of the engine
+apps/cli        The buildbridge command line, the other client
+crates/         Rust: protocol contract, runner transport, Docker-OSX provider, and the engine
 ```
 
 Requirements are Rust, Docker, and the Node.js version managed by Vite+.
@@ -92,7 +93,8 @@ vp install
 Run the apps:
 
 ```bash
-pnpm dev:desktop    # Tauri desktop runner
+pnpm dev:desktop                        # Tauri desktop
+cargo run -p buildbridge-cli -- status  # the command line, on the same machines
 ```
 
 The desktop interface can be developed in a plain browser: `vp dev` inside `apps/desktop` serves it against a mock backend with one prepared machine and one fresh machine, no Docker required.
@@ -102,7 +104,9 @@ Run the checks:
 ```bash
 pnpm check          # format, lint, type check, cargo check
 pnpm test           # Rust tests
+cargo test --workspace
 vp test --run       # desktop unit tests, inside apps/desktop
+pnpm types:generate # inside apps/desktop: regenerate the TypeScript contract from the Rust DTOs
 pnpm build
 ```
 
