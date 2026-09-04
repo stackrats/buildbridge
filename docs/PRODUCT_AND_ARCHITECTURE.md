@@ -1,7 +1,7 @@
 # BuildBridge Product Goal and Architecture
 
 Status: working product and engineering reference  
-Last updated: 2026-09-03
+Last updated: 2026-09-04
 
 This document defines what BuildBridge is intended to become, the first complete workflow we are building, the boundaries between its components, and the order in which the project should expand. It should be updated when a durable product or architecture decision changes.
 
@@ -361,7 +361,7 @@ The intended signing experience is convenient without making the control plane a
 
 The desktop distinguishes three signing/account strategies before asking for credentials:
 
-1. **Link the developer team with an App Store Connect Team API key — planned primary Docker-OSX route.** The user creates a Team Key in a trusted host browser and supplies its Key ID, Issuer ID, and local `.p8` path. BuildBridge verifies that key with a short-lived ES256 token and separate read-only requests for the App Store app record and Developer provisioning identifier. If Apple's exact Developer-ID filter returns an empty result for an identifier that is visible in the portal, BuildBridge safely scans the bounded account inventory and matches the exact identifier locally. Once resolved, it lists safe provisioning-profile and certificate metadata and reports certificate type, expiry, and App Store eligibility rather than silently omitting an ineligible record. When no active App Store profile remains, the user can select an existing future-dated distribution certificate and explicitly confirm creation of one replacement; BuildBridge downloads it into owner-only local storage and adds it to the signing kit without revoking old profiles. Generating a new signing private key/CSR and Apple Distribution certificate remains the next managed step. The `.p8` authorizes provisioning but is not itself a code-signing identity. Every Apple resource mutation requires a clearly described user action; verification/list operations remain read-only.
+1. **Link the developer team with an App Store Connect Team API key — the primary route.** The user creates a Team Key in a trusted host browser and supplies its Key ID, Issuer ID, and local `.p8` path. BuildBridge verifies that key with a short-lived ES256 token and separate read-only requests for the App Store app record and Developer provisioning identifier. If Apple's exact Developer-ID filter returns an empty result for an identifier that is visible in the portal, BuildBridge safely scans the bounded account inventory and matches the exact identifier locally. Once resolved, it lists safe provisioning-profile and certificate metadata and reports certificate type, expiry, and App Store eligibility rather than silently omitting an ineligible record. When no active App Store profile remains, the user can select an existing future-dated distribution certificate and explicitly confirm creation of one replacement; BuildBridge downloads it into owner-only local storage and adds it to the signing kit without revoking old profiles. The signing private key and CSR are generated on the host and Apple issues the Distribution certificate through the key, so a kit holding only the Team key and a keychain password provisions a machine with everything created on demand (decision 41). The `.p8` authorizes provisioning but is not itself a code-signing identity. Every Apple resource mutation requires a clearly described user action; verification/list operations remain read-only.
 2. **Import signing files — recommended working route today and independent of guest Apple login.** The user supplies a password-protected `.p12`/`.pfx` containing an Apple Distribution certificate and its private key, one or more matching `.mobileprovision` files, and a newly chosen BuildBridge guest-keychain password. The files are acquired and stored on the trusted host before BuildBridge transfers them through the pinned guest bridge.
 3. **Sign in through Xcode — optional best effort.** The user may open **Xcode → Settings → Accounts** inside a persistent guest and complete sign-in and 2FA directly with Apple. Docker-OSX reports that Apple services can detect and reject virtualized environments, and the real acceptance guest returned Apple's generic verification failure in both macOS and Xcode. The UI tells the user to cancel rather than repeatedly retry and BuildBridge does not apply VM-hiding kernel patches. This route can remain available for environments where Apple permits it, but it is not a prerequisite or the recommended Docker-OSX path.
 
@@ -551,7 +551,7 @@ As of 2026-09-02:
 | Native runner | Fixed-argv platform diagnostics | Native-host workspace and real build providers |
 | Desktop lifecycle | Close-to-tray with per-machine start, stop, refresh, and explicit quit actions; a machine registry with per-machine directories, container names, ports, busy markers, and legacy migration; a sidebar/tab shell with Setup, Build, and Logs per machine; every long-running operation carries a **Stop** that kills its host-side processes and, for builds that outlive their SSH session, the job inside the guest | Notifications and richer background-state recovery |
 | Docker-OSX host | Prerequisite probing, stable identity, create/start/stop/status/logs with launch-phase progress, elapsed-time and guest-readiness monitoring, explicit confirmation-protected container discard and machine deletion; the macOS disk in a host-managed `disk/` directory bound through `IMAGE_PATH`, with in-place migration of older machines; a QMP control socket and, when the host has `plugdev` and `/dev/bus/usb`, iPhone passthrough by `usb-host` hot-plug with a root-installed udev rule that releases the phone from `usbmuxd` | Image pinning, local templates (clone a prepared machine), storage health, cancellation |
-| macOS guest bridge | SSH reachability, Ed25519 access key, explicit fingerprint pin, one-time password-authenticated key install on the pin, password-optional Xcode activation over the bridge, mismatch rejection, macOS/Xcode probes, measured Xcode XIP transfer/expansion, bounded project snapshot transfer, fixed tool bootstrap, automatic Simulator installation progress, durable unsigned-build reconnection, a validated simulator build, password-safe signing provisioning, fixed signed archive/export execution, and — experimental — `devicectl` listing of a passed-through iPhone, a Debug build signed with the development identity for that phone, install, launch, and its console streamed into the log drawer | Per-build isolation, signed-job restart recovery, cancellation, and the debugger/live-reload routes |
+| macOS guest bridge | SSH reachability, Ed25519 access key, explicit fingerprint pin, one-time password-authenticated key install on the pin, password-optional Xcode activation over the bridge, mismatch rejection, macOS/Xcode probes, measured Xcode XIP transfer/expansion, bounded project snapshot transfer, fixed tool bootstrap, automatic Simulator installation progress, durable unsigned-build reconnection, a validated simulator build, password-safe signing provisioning, fixed signed archive/export execution, and — accepted live on 2026-09-04 — `devicectl` listing and pairing of a passed-through iPhone, a Debug build signed with the development identity for that phone under its own Debug App ID, install, launch, its console streamed into the log drawer, and Safari opened in the guest for Web Inspector on the app | Per-build isolation, signed-job restart recovery, cancellation, and the debugger/live-reload routes |
 | Env sets | Named sets of build variables in the OS vault, attached per machine as a default and chosen per signed archive (desktop step and dashboard form), written into the guest as `.env.production.local` for the web build and sourced by the build shell, with the web assets rebuilt in place for a per-archive choice; variables read back with their values, secrets by key only in summaries, fetched masked into the editor with an eye to show one; set names travel in the heartbeat | Env for native compile-time configuration |
 | Signing kits | Multiple named kits in the OS vault with per-machine attachment, safe stored-detail display, and named recovery states when the vault is cleared or unreadable; portable file import remains available; Xcode VM sign-in is labeled best-effort; `.p8` keys are accepted by restricted host path and retained in the OS vault; Apple app, Bundle ID, certificate, and profile metadata are verified read-only; an expired App Store profile can be replaced through confirmed native creation and owner-only retention, and an existing Apple profile can be downloaded into the attached kit or re-added from the host's retained copies; a Distribution identity can be created at Apple for a key generated on the Linux host and packaged into the kit, so no Mac is needed at any point; certificate/profile paths are revalidated and the real signing kit is provisioned and code-sign probed through a fixed native helper; archive execution unlocks and relocks the dedicated keychain within that helper's process boundary; a kit may also hold an optional development identity, imported or created at Apple the same way, and the device step registers the attached phone and creates an `IOS_APP_DEVELOPMENT` profile for it on demand, each a confirmed, non-revoking mutation; a kit holding only a Team key and a keychain password is complete, and provisioning creates the distribution certificate and App Store profile at Apple on demand | Rotation/revocation handling |
 | Workspaces | Exact local path approval, project-shape validation, secret-filtered bounded archive, checksum, measured pinned-SSH transfer, atomic active-workspace replacement | Opaque workspace IDs in the control plane, dirty-state fingerprint, per-build snapshots and retention |
@@ -618,6 +618,20 @@ This operation deliberately uses an existing Apple Distribution certificate. The
 
 Live acceptance succeeded on 2026-09-02. After the user confirmed the exact Bundle ID and selected the future-dated `iOS Distribution` certificate, Apple created the replacement profile, BuildBridge retained it as `11111111-2222-3333-4444-555555555555.mobileprovision` under its owner-only managed profiles directory, and the exact path was added to the existing OS-vault signing kit. The four expired profiles remained untouched.
 
+### Run on a real iPhone — 2026-09-04
+
+Accepted live on this host with an iPhone 11 on iOS 26.5, against two guests (macOS 15.7.9 and
+macOS 26.6.2, both Xcode 26.6, QEMU 10.1.2): the host rule installed through one polkit prompt;
+the phone attached by QMP hot-plug onto the container's dedicated EHCI controller with the guest
+reset chosen by the guest's macOS; macOS enumerated it within seconds; **Pair with the phone**
+raised Trust and produced the CoreDevice pairing; Developer Mode read as enabled once the tunnel
+was open; **Prepare signing** created the development certificate, registered the UDID, registered
+the project's Debug App ID with the main App ID's capabilities copied, and created the
+development profile; the Debug build installed beside the store build, launched, and streamed its
+console into the drawer; **Inspect in Safari** opened the guest's Safari, and Web Inspector showed
+the app's network requests. The signing kit was then reduced to a Team key and a keychain password
+and the whole route re-run with certificates and profiles created on demand.
+
 ### Issues encountered and durable resolutions
 
 | Symptom | Cause | Durable resolution and user experience | State |
@@ -672,6 +686,11 @@ Live acceptance succeeded on 2026-09-02. After the user confirmed the exact Bund
 | The desktop reported `Realtime connection error: [object Object]` and both surfaces sat on **realtime disconnected** | `pusher-js` reports failures as nested plain objects, so the reason never reached the screen; the reason itself was that another project's Reverb held the default port 8080 and answered the handshake with `4001 Application does not exist`, and BuildBridge's own Reverb container published no host port | Read the close code and message out of whatever shape arrives (`lib/realtime.ts`, unit tested) and name the endpoint, the code, and — for 4001 — the likely port clash; `describeError` never prints `[object Object]` again; the Reverb service moved to 8081 in `.env.example` with a comment saying why | Resolved and verified end to end: the control plane reports **realtime connected** |
 | A build queued while the desktop was connected sat at **queued** indefinitely | Its `build.queued` broadcast failed (the queue worker still pointed at the old Reverb port) and nothing ever re-checked: the heartbeat reported health only | The heartbeat reply now carries the number of builds waiting for the runner; a non-zero count triggers a claim, so a missed event costs at most one heartbeat interval | Resolved with a control-plane test and a contract test |
 | Starting a new machine showed a spinner for minutes while Docker pulled the image | `launch` reported nothing until it returned | Emit preparing, pulling-image, generating-identity, creating-container, starting, and completed phases | Implemented; the desktop shows the phase and elapsed time |
+| A hot-plugged iPhone was listed by QEMU but macOS never registered it, on any configuration | Three causes stacked: the emulated xHCI never assigns an iPhone an address; the guest's permission to reset the phone is required by macOS 15 and fatal on macOS 26; an early rule selected a USB configuration on the host, which either made the phone a camera or handed its network interfaces to `cdc_ncm` | A dedicated `usb-ehci` controller on every USB-capable container, the reset flag keyed by the guest's macOS major, and an ownership-only host rule that leaves usbmuxd's configuration-0 parking in place | Resolved and accepted live on two guests |
+| Trust appeared on the phone but `devicectl` still reported it unpaired, and Developer Mode read as unknown | Trust gives only the lockdown pairing; CoreDevice needs its own, and Developer Mode is reported only through an open tunnel | The trust rung runs `devicectl manage pair` itself, and the listing runs `device info details` per phone to open the tunnel | Resolved |
+| A detached phone could not be attached again without a restart | QEMU reads a phone cleanly only the first time it opens it in a process; a re-add after `device_del` leaves a stale libusb entry | The step names the state (`replug`) and offers Restart the machine; attach is once per plug by design | Resolved by design; noted in the panel |
+| Provisioning failed with `-25264` importing a `.p12` exported on this host | OpenSSL 3 packages PKCS#12 with algorithms macOS's Security framework does not read | Repackage with SHA1-3DES and a SHA-1 MAC before transfer, in place, when the file needs it | Resolved |
+| The Debug build was refused because its bundle identifier had no profile | A project's Debug configuration often carries its own suffixed identifier, and Apple profiles are per App ID | Read the identifier the Debug build carries from the guest, register it at Apple with the main App ID's capabilities copied, and make the development profile for it; fall back to signing the app target under the approved identifier when only that has a profile | Resolved; the debug build installs beside the store build |
 
 ### Automation and UI boundary
 
@@ -724,7 +743,7 @@ Status: substantially complete.
 
 ### Phase 1 — first signed Apple build
 
-Status: in progress; the local unsigned smoke-build, real signing provisioning, signed archive/export, and verified local artifact return are accepted. The remaining Phase 1 work is control-plane dispatch/download, cancellation, lease renewal, and signed-job restart recovery.
+Status: in progress; the local unsigned smoke-build, real signing provisioning, signed archive/export, verified local artifact return, and the Debug run on a real iPhone are accepted. The remaining Phase 1 work is control-plane dispatch/download, cancellation, lease renewal, and signed-job restart recovery.
 
 - Register an approved local workspace. **Implemented locally in the desktop UI.**
 - Define the executor and Apple build recipe contracts.
@@ -734,6 +753,7 @@ Status: in progress; the local unsigned smoke-build, real signing provisioning, 
 - Provision a dedicated guest signing keychain and profiles. **Implemented and accepted with the real Apple signing kit on 2026-09-02.**
 - Execute typed `xcodebuild archive` and `-exportArchive` operations. **Implemented and accepted locally with Xcode 26.6 on 2026-09-02.**
 - Stream logs in real time. **Implemented for local smoke and signed archive operations.**
+- Run a Debug build on a plugged-in iPhone with its console streamed. **Implemented and accepted live on 2026-09-04.**
 - Upload an artifact manifest and downloadable output.
 - Implement cancellation, lease renewal, and restart recovery.
 
@@ -1038,18 +1058,30 @@ ladder is shown as a readiness grid and every rung has one primary action:
    `devicectl device process launch --console --terminate-existing`. Stop ends the console and
    keeps the run; every line reaches the drawer's **Device console** tab.
 
-Two things learned from the first real phone on this host, both now handled. usbmuxd's own udev
-rule parks an iPhone in USB configuration 0 so that usbmuxd can choose a configuration itself;
-with usbmuxd disabled nothing ever does, and an unconfigured device cannot be enumerated by the
-guest at all. BuildBridge's rule therefore assigns a configuration back, and because it sorts
-after usbmuxd's it wins. Separately, QEMU lists the passed-through device id as soon as it owns
-the host port, whether or not it could read the phone: a phone reset during the handover comes
-back as a low-speed device with no readable descriptors, which only a physical replug clears.
-Attachment is therefore judged by whether QEMU read the phone's own descriptors, not by the id
-being present, so the step no longer reports a phone as attached while macOS has nothing.
+7. **Inspect in Safari**, offered once a run exists, turns Safari's Develop menu on in the guest
+   as far as macOS allows from an SSH session, opens Safari in the guest's graphical session,
+   and lists the three things to click — Web Inspector on the phone, the Develop menu setting if
+   macOS refused it, and Develop › phone › the app's page. Only the Debug build is inspectable,
+   and nothing is driven through Safari's menus (decision 39).
 
-Hot-plugging an iPhone into a running macOS guest remains the fragile part, and the experimental
-label is there for it: repeated attach and detach cycles degrade the phone until it is replugged.
+Two things learned from the first real phone on this host, both now handled. usbmuxd's own udev
+rule parks an iPhone in USB configuration 0 so that usbmuxd can choose a configuration itself; an
+unconfigured device looks unenumerable at first sight, and an early version of BuildBridge's rule
+assigned a configuration back — a camera, as it turned out, and the highest configuration hands
+the phone's network interfaces to the host's `cdc_ncm` instead. The settled design leaves the
+parking alone: macOS selects the configuration itself while enumerating, within seconds.
+Separately, QEMU lists the passed-through device id as soon as it owns the host port, whether or
+not it could read the phone: a phone reset during the handover comes back as a low-speed device
+with no readable descriptors, which only a physical replug clears. Attachment is therefore judged
+by whether QEMU read the phone's own descriptors, not by the id being present, so the step no
+longer reports a phone as attached while macOS has nothing.
+
+What made the upstream reports flaky is now understood and designed around: the guest's
+permission to reset the phone is a catch-22 whose right answer depends on the guest's macOS
+version, the emulated xHCI never addresses an iPhone where a dedicated EHCI does, and a QEMU
+process reads a phone cleanly only the first time it opens it. With those three fixed the step
+has been reliable on two guests; the experimental label stays until more hosts and phones have
+been through it.
 
 A team's kit may hold only a development identity. Such a kit provisions and carries a machine
 through this step, but the signed archive stays locked until a distribution identity and an App
@@ -1058,10 +1090,8 @@ Store profile are added, and every place the kit appears says so.
 Why not Docker-OSX's documented `usbfluxd` route: since iOS 17, developer services run as
 CoreDevice/RemoteXPC over the phone's USB Ethernet interface, which a `usbmuxd` proxy never
 carries, so `ideviceinfo` sees the phone while Xcode and `devicectl` do not. Whole-device
-`usb-host` passthrough carries it. The Docker-OSX threads that report it working also report VM
-freezes on hot-plug, hence the label and the advice to detach before unplugging. Out of scope and
-said so in the panel: Xcode's debugger and Instruments, Capacitor live reload, and a QR/OTA
-install route.
+`usb-host` passthrough carries it. Out of scope and said so in the panel: Xcode's debugger and
+Instruments, Capacitor live reload, and a QR/OTA install route.
 
 ### Runner identity and removal
 
