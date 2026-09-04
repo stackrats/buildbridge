@@ -93,6 +93,8 @@ export interface Backend {
     listGuestDevices(machineId: string): Promise<T.MacBuilderView>;
     /** Pairs the guest with the phone; raises Trust on the phone when needed and waits for it. */
     pairGuestDevice(machineId: string, udid: string): Promise<T.MacBuilderView>;
+    /** Opens Safari in the guest, Develop menu on, for Web Inspector on the app on the phone. */
+    openSafariWebInspector(machineId: string): Promise<T.OpenSafariInspectorResult>;
     prepareAppleDeviceSigning(
         machineId: string,
         udid: string,
@@ -245,6 +247,7 @@ async function createTauriBackend(): Promise<Backend> {
         rebuildMachineContainer: (machineId) =>
             invoke('rebuild_machine_container', { machineId, input: { confirmed: true } }),
         listGuestDevices: (machineId) => invoke('list_guest_devices', { machineId }),
+        openSafariWebInspector: (machineId) => invoke('open_safari_web_inspector', { machineId }),
         pairGuestDevice: (machineId, udid) =>
             invoke('pair_guest_device', { machineId, input: { udid } }),
         prepareAppleDeviceSigning: (machineId, udid, deviceName) =>

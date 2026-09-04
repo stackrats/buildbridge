@@ -8,6 +8,7 @@ import {
     ChevronRight,
     Circle,
     CircleCheck,
+    Globe,
     HardDrive,
     Play,
     RefreshCw,
@@ -16,10 +17,12 @@ import {
     Smartphone,
     Unplug,
     Usb,
+    X,
 } from '@lucide/vue';
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 
 import { formatDate, percent, shortHash } from '../../../lib/format';
+import type { SafariInspectorResult } from '../../../types/backend';
 import type { ListboxOption } from '../../../lib/listbox';
 import { isLive } from '../../../lib/status';
 import { deviceReadiness, type DeviceSubstate } from '../../../model/device';
@@ -65,6 +68,7 @@ const running = computed(() => step.status === 'running');
 const lastLine = computed(() => session.deviceLog.at(-1)?.text ?? null);
 
 const stepOperations = new Set<OperationId>([
+    'open-inspector',
     'usb-rule',
     'usb-migrate',
     'usb-attach',
@@ -79,12 +83,27 @@ const failureTitle: Partial<Record<OperationId, string>> = {
     'usb-detach': 'The iPhone could not be detached',
     'device-signing': 'Device signing could not be prepared',
     'run-device': 'The device run failed',
+    'open-inspector': 'Safari could not be opened in the guest',
 };
 const failure = computed(() =>
     session.lastFailure && stepOperations.has(session.lastFailure.operation)
         ? session.lastFailure
         : null,
 );
+
+// Web Inspector for the app on the phone lives in the guest's Safari, not here: BuildBridge
+// opens Safari with its Develop menu on and then says what to click. Kept while this panel is
+// open; the instructions are the same every time.
+const inspector = ref<SafariInspectorResult | null>(null);
+const showInspector = computed(
+    () => readiness.value.substate === 'ready' && (run.value !== null || running.value),
+);
+async function openInspector(): Promise<void> {
+    const result = await machines.openSafariInspector(session.id);
+    if (result) {
+        inspector.value = result.inspector;
+    }
+}
 
 // Which phone on the host to hand over; preselected when there is exactly one usable.
 const usbOptions = computed<ListboxOption[]>(() =>
@@ -639,6 +658,18 @@ const runFacts = computed(() =>
                 Show console
             </Button>
             <Button
+                v-if="showInspector"
+                variant="ghost"
+                size="sm"
+                :disabled="busy"
+                title="Opens Safari in the guest console with its Develop menu; the app's web view is listed there under the phone's name"
+                @click="openInspector"
+            >
+                <Spinner v-if="session.operation === 'open-inspector'" />
+                <Globe v-else class="h-3.5 w-3.5" />
+                Inspect in Safari
+            </Button>
+            <Button
                 v-if="run || view.deviceRunError"
                 variant="ghost"
                 size="sm"
@@ -774,9 +805,48 @@ const runFacts = computed(() =>
             </Callout>
         </template>
 
-        <template v-if="run" #result>
-            <KeyValue :items="runFacts" :columns="3" />
-            <p class="mt-2 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+        <template v-if="run || inspector" #result>
+            <Callout
+                v-if="inspector"
+                tone="neutral"
+                title="Web Inspector: Safari is open in the guest console window"
+                class="mb-3"
+            >
+                <ol class="list-decimal space-y-1 pl-4">
+                    <li>
+                        On the phone, once: Settings › Safari › Advanced › <b>Web Inspector</b>
+                        (under Settings › Apps › Safari on iOS 18 and later).
+                    </li>
+                    <li v-if="!inspector.developMenuEnabled">
+                        In Safari: Safari › Settings › Advanced ›
+                        <b>Show features for web developers</b>, then quit and reopen Safari. macOS
+                        did not let BuildBridge set this from outside the graphical session.
+                    </li>
+                    <li v-else-if="inspector.safariRestarted">
+                        Safari's Develop menu is on; Safari was reopened so it appears.
+                    </li>
+                    <li v-else>Safari's Develop menu is on.</li>
+                    <li>
+                        In Safari's menu bar: <b>Develop</b> ›
+                        <b>{{ device?.name ?? 'the phone' }}</b> › the app's web view, listed as
+                        <span class="font-mono">capacitor://localhost</span> or its page title. The
+                        inspector shows its console, network requests, elements and storage.
+                    </li>
+                </ol>
+                <p class="mt-2">
+                    Only the Debug build BuildBridge installs is inspectable (Capacitor enables it
+                    in Debug), so run the app first. The console is this machine's QEMU window on
+                    this host; Ctrl+Alt+G releases the mouse.
+                </p>
+                <div class="mt-2">
+                    <Button variant="ghost" size="sm" @click="inspector = null">
+                        <X class="h-3.5 w-3.5" />
+                        Hide
+                    </Button>
+                </div>
+            </Callout>
+            <KeyValue v-if="run" :items="runFacts" :columns="3" />
+            <p v-if="run" class="mt-2 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
                 {{ run.appPath }}
             </p>
         </template>

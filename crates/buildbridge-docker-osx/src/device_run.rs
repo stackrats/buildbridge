@@ -417,6 +417,96 @@ pub(crate) fn device_pair_script(username: &str, udid: &str) -> String {
     )
 }
 
+/// What opening Safari for the Web Inspector found in the guest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafariInspectorResult {
+    /// Safari's Develop menu is on, so the phone and its inspectable pages appear under it.
+    pub develop_menu_enabled: bool,
+    /// Safari was running with the menu off and was reopened so the menu appears.
+    pub safari_restarted: bool,
+}
+
+const SAFARI_INSPECTOR_MAX_BYTES: usize = 64 * 1024;
+const SAFARI_INSPECTOR_MARKER: &str = "__BUILDBRIDGE_SAFARI__";
+
+/// Turns Safari's Develop menu on and opens Safari in the guest's graphical session. The
+/// preference write is best effort: macOS protects Safari's preferences and may refuse it over
+/// SSH, so the read-back afterwards is what counts. Safari is reopened only when the menu was
+/// just turned on, since a running Safari shows the menu after a restart and not before.
+pub(crate) fn safari_inspector_script() -> String {
+    let read = "/usr/bin/defaults read com.apple.Safari IncludeDevelopMenu 2>/dev/null || /usr/bin/printf 0";
+    let writes = [
+        "/usr/bin/defaults write com.apple.Safari IncludeDevelopMenu -bool true",
+        "/usr/bin/defaults write com.apple.Safari.SandboxBroker ShowDevelopMenu -bool true",
+        "/usr/bin/defaults write com.apple.Safari WebKitDeveloperExtrasEnabledPreferenceKey -bool true",
+        "/usr/bin/defaults write com.apple.Safari com.apple.Safari.ContentPageGroupIdentifier.WebKit2DeveloperExtrasEnabled -bool true",
+        "/usr/bin/defaults write -g WebKitDeveloperExtras -bool true",
+    ]
+    .iter()
+    .map(|write| format!("{write} >/dev/null 2>&1 || true; "))
+    .collect::<String>();
+
+    format!(
+        "set -u; was_on=$({read}); {writes}now_on=$({read}); restarted=0; \
+         if [ \"$now_on\" = 1 ] && [ \"$was_on\" != 1 ] && /usr/bin/pgrep -xq Safari; then /usr/bin/killall Safari >/dev/null 2>&1 || true; /bin/sleep 2; restarted=1; fi; \
+         if /usr/bin/open -a Safari >/dev/null 2>&1; then opened=1; else opened=0; fi; \
+         /usr/bin/printf '{SAFARI_INSPECTOR_MARKER} develop=%s restarted=%s opened=%s\\n' \"$now_on\" \"$restarted\" \"$opened\""
+    )
+}
+
+/// Reads the script's one marker line. Anything else in the output is noise from `defaults`.
+pub(crate) fn parse_safari_inspector_output(
+    output: &str,
+) -> Result<SafariInspectorResult, ProviderError> {
+    let line = output
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(SAFARI_INSPECTOR_MARKER))
+        .ok_or_else(|| {
+            ProviderError::GuestBridge("the guest did not report whether Safari opened".to_string())
+        })?;
+    let flag = |key: &str| {
+        line.split_whitespace()
+            .find_map(|part| {
+                part.strip_prefix(key)
+                    .and_then(|rest| rest.strip_prefix('='))
+            })
+            .is_some_and(|value| value == "1")
+    };
+    if !flag("opened") {
+        return Err(ProviderError::GuestBridge(
+            "macOS could not open Safari; Safari needs the graphical session, so log in on the console window first".to_string(),
+        ));
+    }
+
+    Ok(SafariInspectorResult {
+        develop_menu_enabled: flag("develop"),
+        safari_restarted: flag("restarted"),
+    })
+}
+
+/// Opens Safari in the guest ready for Web Inspector: its Develop menu on where macOS allows
+/// it to be set from here, and the app running on the phone then appears under Develop.
+pub fn open_safari_web_inspector(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+) -> Result<SafariInspectorResult, ProviderError> {
+    validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
+    let output = run_guest_command_capped(
+        ssh_port,
+        username,
+        identity_path,
+        known_hosts_path,
+        &safari_inspector_script(),
+        SAFARI_INSPECTOR_MAX_BYTES,
+    )?;
+
+    parse_safari_inspector_output(&output)
+}
+
 /// Pairs the guest with one phone, then lists again so the caller sees the result.
 pub fn pair_guest_device(
     ssh_port: u16,
@@ -472,6 +562,52 @@ pub fn list_guest_devices(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_safari_script_reads_the_menu_back_and_restarts_safari_only_when_it_just_turned_on() {
+        let script = super::safari_inspector_script();
+        assert!(script.contains("defaults read com.apple.Safari IncludeDevelopMenu"));
+        assert!(script.contains("IncludeDevelopMenu -bool true >/dev/null 2>&1 || true"));
+        assert!(
+            script.contains(
+                r#"[ "$now_on" = 1 ] && [ "$was_on" != 1 ] && /usr/bin/pgrep -xq Safari"#
+            )
+        );
+        assert!(script.contains("/usr/bin/open -a Safari"));
+        assert!(script.ends_with(r#""$now_on" "$restarted" "$opened""#));
+    }
+
+    #[test]
+    fn the_safari_report_is_read_from_its_marker_line_only() {
+        let parsed = super::parse_safari_inspector_output(
+            "2026-09-04 defaults[512:9] Could not write domain com.apple.Safari\n__BUILDBRIDGE_SAFARI__ develop=1 restarted=1 opened=1\n",
+        )
+        .expect("a marker line parses");
+        assert_eq!(
+            parsed,
+            super::SafariInspectorResult {
+                develop_menu_enabled: true,
+                safari_restarted: true,
+            }
+        );
+
+        let refused = super::parse_safari_inspector_output(
+            "__BUILDBRIDGE_SAFARI__ develop=0 restarted=0 opened=1",
+        )
+        .expect("a refused preference still opens Safari");
+        assert!(!refused.develop_menu_enabled);
+
+        let no_session = super::parse_safari_inspector_output(
+            "__BUILDBRIDGE_SAFARI__ develop=1 restarted=0 opened=0",
+        )
+        .expect_err("Safari needs a graphical session");
+        assert!(
+            no_session
+                .to_string()
+                .contains("log in on the console window")
+        );
+        assert!(super::parse_safari_inspector_output("nothing").is_err());
+    }
+
     use super::*;
 
     const LISTING: &str = r#"{

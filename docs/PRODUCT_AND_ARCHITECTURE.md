@@ -845,6 +845,13 @@ The following decisions should be treated as settled until this document is deli
     comes from the attached phone, and device registration, development certificate and
     development profile are confirmed, non-revoking mutations at Apple. Trust and Developer Mode
     stay the user's actions on the phone.
+    The app's own web view is inspected from the guest's Safari, not from the desktop: the
+    device step's **Inspect in Safari** turns Safari's Develop menu on where macOS allows it to
+    be set over SSH (its preferences are protected, so the read-back decides), opens Safari in
+    the guest's graphical session, and then lists the three things to click — Web Inspector on
+    the phone, the Develop menu setting if macOS refused it, and Develop › phone › the app's
+    page. Only the Debug build is inspectable; nothing is automated through Safari's menus.
+
 40. A kit provisions with either identity. The distribution set — identity, export password and
     an App Store profile — is what the archive needs; a development identity with its password
     is enough to run on a phone. A development-only kit is complete for that route alone, and

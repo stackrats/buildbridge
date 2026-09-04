@@ -1865,6 +1865,55 @@ async fn pair_guest_device(
     build_mac_builder_view(&app, &paths).await
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenSafariInspectorResult {
+    view: MacBuilderView,
+    inspector: buildbridge_docker_osx::SafariInspectorResult,
+}
+
+/// Opens Safari in the guest for Web Inspector on the app running on the phone: the Develop
+/// menu is turned on where macOS lets it be set over SSH, and the result says whether it took.
+#[tauri::command]
+async fn open_safari_web_inspector(
+    app: AppHandle,
+    machine_id: String,
+) -> Result<OpenSafariInspectorResult, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let access = load_mac_guest_access(&paths)?
+        .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
+    let current = build_mac_builder_view(&app, &paths).await?;
+    ensure_apple_project_guest_ready(&current)?;
+    let guard = begin_machine_operation(&app, &machine_id, "opening_inspector")?;
+    let identity_path = paths.guest_identity();
+    let known_hosts_path = paths.known_hosts();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        buildbridge_docker_osx::open_safari_web_inspector(
+            profile.ssh_port,
+            &access.username,
+            &identity_path,
+            &known_hosts_path,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string());
+    drop(guard);
+    let inspector = finish_operation(&cancel_probe, joined)?;
+
+    Ok(OpenSafariInspectorResult {
+        view: build_mac_builder_view(&app, &paths).await?,
+        inspector,
+    })
+}
+
 #[tauri::command]
 async fn list_guest_devices(app: AppHandle, machine_id: String) -> Result<MacBuilderView, String> {
     let paths = MachinePaths::resolve(&app, &machine_id)?;
@@ -6682,6 +6731,7 @@ pub fn run() {
             discard_machine_container,
             get_mac_builder_status,
             open_developer_tools,
+            open_safari_web_inspector,
             configure_mac_builder,
             launch_mac_builder,
             stop_mac_builder,

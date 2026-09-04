@@ -216,6 +216,19 @@ export type DevicePairingState = 'paired' | 'unpaired' | 'unknown';
 export type DeviceTunnelState = 'connected' | 'disconnected' | 'unavailable' | 'unknown';
 export type DeviceTransportType = 'wired' | 'local_network' | 'unknown';
 
+/** What opening Safari for Web Inspector found in the guest. */
+export interface SafariInspectorResult {
+    /** Safari's Develop menu is on, so the phone and its inspectable pages appear under it. */
+    developMenuEnabled: boolean;
+    /** Safari was running with the menu off and was reopened so the menu appears. */
+    safariRestarted: boolean;
+}
+
+export interface OpenSafariInspectorResult {
+    view: MacBuilderView;
+    inspector: SafariInspectorResult;
+}
+
 /** One row of `xcrun devicectl list devices` as the guest reports it. */
 export interface GuestDevice {
     identifier: string;
