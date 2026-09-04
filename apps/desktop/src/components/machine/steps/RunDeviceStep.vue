@@ -768,15 +768,6 @@ const runFacts = computed(() =>
                     phone and on QEMU's USB stack; Apple's supported route to a physical device is a
                     Mac. Xcode's debugger and Instruments are not part of this step.
                 </p>
-                <p class="mt-2 text-[11px] leading-4 text-amber-700 dark:text-amber-400">
-                    Known limitation, measured on this host in September 2026: macOS assigns the
-                    passed-through phone a USB address and then never registers it, so the phone
-                    reaches QEMU but never appears to the guest and Trust is never offered. It
-                    behaves the same hot-plugged and attached at boot, on the emulated xHCI and on a
-                    dedicated EHCI controller, and whether the phone is left unconfigured or put
-                    into one of its own configurations. Everything up to the guest works, so this is
-                    kept for hosts and macOS builds where it does; expect it not to on this one.
-                </p>
             </div>
         </div>
 

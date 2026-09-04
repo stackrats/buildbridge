@@ -6840,9 +6840,11 @@ fn create_args(
 /// boot — the phone itself. The image's launch script word-splits this, so every value here is
 /// either fixed text or already validated to contain no spaces.
 ///
-/// The boot device deliberately leaves `guest-reset` at QEMU's default. Hot-plugging sets it
-/// off, because a reset mid-handover leaves the phone unreadable; at boot the opposite is true,
-/// since macOS must reset the port to enumerate the device at all.
+/// `guest-reset=false` is kept at boot as well as for hot-plug. macOS enumerates the phone
+/// without a real reset — QEMU answers the reset itself — and a real one returns the phone to
+/// configuration 0, where it has nothing to describe. With the reset held off, macOS reads the
+/// configured phone, selects the configuration it wants (the NCM one on iOS 17 and later) and
+/// QEMU claims every interface, so no Linux driver gets them. Measured on a phone on the desk.
 ///
 /// The phone gets its own USB 2.0 controller rather than sharing the machine's `qemu-xhci`.
 /// An iPhone is a high-speed USB 2.0 device, and macOS never assigned one an address on the
@@ -6854,7 +6856,7 @@ fn qemu_extra_args(usb: Option<&ContainerUsbOptions>) -> String {
     );
     if let Some(boot) = usb.and_then(|usb| usb.boot_device.as_ref()) {
         extra.push_str(&format!(
-            " -device usb-ehci,id={USB_PHONE_CONTROLLER} -device usb-host,id={IPHONE_QMP_DEVICE_ID},bus={USB_PHONE_CONTROLLER}.0,hostbus={},hostport={}",
+            " -device usb-ehci,id={USB_PHONE_CONTROLLER} -device usb-host,id={IPHONE_QMP_DEVICE_ID},bus={USB_PHONE_CONTROLLER}.0,hostbus={},hostport={},guest-reset=false",
             boot.bus(),
             boot.port()
         ));
@@ -7496,8 +7498,8 @@ mod tests {
         assert!(attached.contains(
             "-device usb-host,id=buildbridge-iphone,bus=buildbridge-phone-usb.0,hostbus=3,hostport=9"
         ));
-        // Hot-plug turns the guest reset off; at boot macOS must be allowed to reset the port.
-        assert!(!attached.contains("guest-reset"));
+        // A real reset returns the phone to configuration 0; QEMU answers the reset instead.
+        assert!(attached.contains("guest-reset=false"));
         // The launch script word-splits this, so a stray quote or semicolon would be a hole.
         assert!(!attached.contains('\'') && !attached.contains(';') && !attached.contains("$("));
     }
