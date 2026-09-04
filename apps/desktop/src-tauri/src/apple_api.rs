@@ -5,6 +5,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use ts_rs::TS;
 
 const APP_STORE_CONNECT_BUNDLE_IDS_URL: &str = "https://api.appstoreconnect.apple.com/v1/bundleIds";
 const APP_STORE_CONNECT_APPS_URL: &str = "https://api.appstoreconnect.apple.com/v1/apps";
@@ -71,7 +72,8 @@ impl CertificateKind {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppleDeviceSummary {
     pub(crate) id: String,
@@ -100,24 +102,28 @@ pub(crate) struct DevelopmentProfileSearch {
     pub(crate) superseded_device_ids: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct DevicesResponse {
     data: Vec<DeviceResource>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct DeviceResponse {
     data: DeviceResource,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct DeviceResource {
     id: String,
     #[serde(default)]
     attributes: Option<DeviceAttributes>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct DeviceAttributes {
     #[serde(default)]
@@ -136,21 +142,24 @@ struct DeviceAttributes {
     added_date: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct ProfileMembershipsResponse {
     data: Vec<ProfileWithRelationships>,
     #[serde(default)]
     included: Vec<IncludedResource>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct ProfileWithRelationships {
     id: String,
     #[serde(default)]
     relationships: Option<ProfileRelationships>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, TS)]
+#[ts(export)]
 struct ProfileRelationships {
     #[serde(default)]
     devices: Option<RelationshipList>,
@@ -158,20 +167,23 @@ struct ProfileRelationships {
     certificates: Option<RelationshipList>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, TS)]
+#[ts(export)]
 struct RelationshipList {
     #[serde(default)]
     data: Vec<ResourceIdentifier>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct ResourceIdentifier {
     #[serde(rename = "type")]
     kind: String,
     id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct IncludedResource {
     #[serde(rename = "type")]
     kind: String,
@@ -188,7 +200,8 @@ pub(crate) struct ProfileMembership {
     pub(crate) certificate_ids: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppleTeamVerificationResult {
     key_id: String,
@@ -213,10 +226,12 @@ pub(crate) struct AppleTeamVerificationResult {
     devices_accessible: bool,
     devices_issue: Option<String>,
     devices: Vec<AppleDeviceSummary>,
+    #[ts(type = "number")]
     verified_at_epoch_seconds: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppleProvisioningProfileSummary {
     pub(crate) id: String,
@@ -232,7 +247,8 @@ pub(crate) struct AppleProvisioningProfileSummary {
     pub(crate) certificate_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppleCertificateSummary {
     pub(crate) id: String,
@@ -266,53 +282,62 @@ struct AppleTokenClaims<'a> {
     aud: &'static str,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct BundleIdsResponse {
     data: Vec<BundleIdResource>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct BundleIdResource {
     id: String,
     attributes: BundleIdAttributes,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct AppsResponse {
     data: Vec<AppResource>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct AppResource {
     id: String,
     attributes: AppAttributes,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct AppAttributes {
     name: String,
     bundle_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct ProfilesResponse {
     data: Vec<ProfileResource>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct ProfileResponse {
     data: ProfileResource,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct ProfileResource {
     id: String,
     #[serde(default)]
     attributes: Option<ProfileAttributes>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct ProfileAttributes {
     #[serde(default)]
@@ -333,24 +358,28 @@ struct ProfileAttributes {
     profile_content: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct CertificatesResponse {
     data: Vec<CertificateResource>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct CertificateResource {
     id: String,
     #[serde(default)]
     attributes: Option<CertificateAttributes>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct CertificateResponse {
     data: CertificateResource,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct CertificateAttributes {
     #[serde(default)]
@@ -369,7 +398,8 @@ struct CertificateAttributes {
     expiration_date: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct BundleIdAttributes {
     identifier: String,
@@ -378,12 +408,14 @@ struct BundleIdAttributes {
     seed_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct AppleErrorResponse {
     errors: Vec<AppleApiError>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct AppleApiError {
     title: Option<String>,
     detail: Option<String>,
@@ -740,17 +772,20 @@ pub(crate) async fn ensure_bundle_id(
     Err(apple_error_message(status, &body, "bundle ID registration"))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct BundleIdCapabilitiesResponse {
     data: Vec<BundleIdCapabilityResource>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct BundleIdCapabilityResource {
     attributes: BundleIdCapabilityAttributes,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct BundleIdCapabilityAttributes {
     capability_type: Option<String>,

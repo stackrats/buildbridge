@@ -2,6 +2,26 @@
 
 use super::*;
 
+/// After QEMU holds the phone: macOS enumerating it, then the CoreDevice pairing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UsbAttachPhase {
+    WaitingForMacos,
+    Pairing,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UsbAttachProgress {
+    pub(crate) phase: UsbAttachPhase,
+    #[ts(type = "number")]
+    pub(crate) elapsed_seconds: u64,
+    pub(crate) detail: String,
+}
+
 /// Installs the udev rule that stops usbmuxd from claiming iPhones on this host, through one
 /// authorization prompt. Host-level, so it holds no machine.
 #[tauri::command]
@@ -261,20 +281,20 @@ pub(crate) async fn settle_attached_phone(
     let joined = tauri::async_runtime::spawn_blocking(move || {
         let _operation = buildbridge_docker_osx::enter_operation(scope);
         let started = std::time::Instant::now();
-        let report = |phase: &str, detail: &str| {
+        let report = |phase: UsbAttachPhase, detail: &str| {
             emit_machine_progress(
                 &event_app,
                 USB_ATTACH_PROGRESS_EVENT,
                 &event_machine_id,
-                serde_json::json!({
-                    "phase": phase,
-                    "elapsedSeconds": started.elapsed().as_secs(),
-                    "detail": detail,
-                }),
+                UsbAttachProgress {
+                    phase,
+                    elapsed_seconds: started.elapsed().as_secs(),
+                    detail: detail.to_string(),
+                },
             );
         };
         report(
-            "waiting_for_macos",
+            UsbAttachPhase::WaitingForMacos,
             "macOS is enumerating the phone; this takes up to a minute",
         );
         let mut devices = Vec::new();
@@ -303,7 +323,7 @@ pub(crate) async fn settle_attached_phone(
             {
                 if let Some(udid) = &device.udid {
                     report(
-                        "pairing",
+                        UsbAttachPhase::Pairing,
                         "Unlock the phone and tap Trust when it asks about this computer",
                     );
                     if let Ok(paired) = buildbridge_docker_osx::pair_guest_device(
@@ -319,7 +339,7 @@ pub(crate) async fn settle_attached_phone(
             }
             _ => {}
         }
-        report("completed", "Done");
+        report(UsbAttachPhase::Completed, "Done");
         Ok::<_, String>(devices)
     })
     .await

@@ -17,6 +17,7 @@ use crate::{
     ProviderError, TrackedCommand, clean_output, guest_ssh_command, shell_single_quote,
     valid_device_udid, valid_profile_uuid, validate_guest_operation,
 };
+use ts_rs::TS;
 
 /// One `devicectl` entry is a few kilobytes of capabilities; a handful of phones fits well
 /// inside a mebibyte, and anything larger is not a device list.
@@ -29,7 +30,8 @@ const DEVICE_PAIR_TIMEOUT_SECONDS: u32 = 90;
 const NAME_MAX_CHARS: usize = 128;
 const MODEL_MAX_CHARS: usize = 64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum DeveloperModeState {
     Enabled,
@@ -37,7 +39,8 @@ pub enum DeveloperModeState {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum PairingState {
     Paired,
@@ -45,7 +48,8 @@ pub enum PairingState {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum TunnelState {
     Connected,
@@ -54,7 +58,8 @@ pub enum TunnelState {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {
     Wired,
@@ -104,7 +109,8 @@ impl TransportType {
 }
 
 /// A phone as the guest reports it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct GuestDevice {
     /// CoreDevice's UUID for the device; what `devicectl` commands take as `--device`.
@@ -124,19 +130,22 @@ pub struct GuestDevice {
     pub issue: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct DevicectlOutput {
     #[serde(default)]
     result: Option<DevicectlResult>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, TS)]
+#[ts(export)]
 struct DevicectlResult {
     #[serde(default)]
     devices: Vec<DevicectlDevice>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct DevicectlDevice {
     identifier: String,
@@ -148,7 +157,8 @@ struct DevicectlDevice {
     connection_properties: Option<ConnectionProperties>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct HardwareProperties {
     #[serde(default)]
@@ -161,7 +171,8 @@ struct HardwareProperties {
     product_type: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct DeviceProperties {
     #[serde(default)]
@@ -172,7 +183,8 @@ struct DeviceProperties {
     developer_mode_status: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct ConnectionProperties {
     #[serde(default)]
@@ -230,7 +242,8 @@ fn device_issue(
 pub(crate) const DEVICE_DETAILS_MARKER: &str = "__BUILDBRIDGE_DEVICE_DETAILS__";
 
 /// One `device info details` report: the same shape as a listing entry, under `result`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 struct DeviceDetailsEnvelope {
     #[serde(default)]
     result: Option<DevicectlDevice>,
@@ -419,7 +432,8 @@ pub(crate) fn device_pair_script(username: &str, udid: &str) -> String {
 }
 
 /// What opening Safari for the Web Inspector found in the guest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct SafariInspectorResult {
     /// Safari's Develop menu is on, so the phone and its inspectable pages appear under it.
@@ -857,7 +871,8 @@ const CONSOLE_TAIL_LINES: usize = 400;
 const CONSOLE_BATCH_LINES: usize = 200;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum AppleDeviceRunPhase {
     Preparing,
@@ -873,17 +888,20 @@ pub enum AppleDeviceRunPhase {
 
 /// Progress carries every console line since the last event rather than the latest one: an
 /// app console must not drop lines between ticks the way filtered build output may.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct AppleDeviceRunProgress {
     pub phase: AppleDeviceRunPhase,
+    #[ts(type = "number")]
     pub elapsed_seconds: u64,
     pub detail: String,
     pub log_lines: Vec<String>,
 }
 
 /// How the console session ended. Each of these is a run that happened, not a failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum ConsoleEnd {
     Stopped,
@@ -891,7 +909,8 @@ pub enum ConsoleEnd {
     Disconnected,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct AppleDeviceRunResult {
     pub device: GuestDevice,
@@ -905,6 +924,7 @@ pub struct AppleDeviceRunResult {
     pub marketing_version: String,
     pub build_number: String,
     pub provisioning_profile_uuid: String,
+    #[ts(type = "number")]
     pub installed_at_epoch_seconds: u64,
     pub console_end: ConsoleEnd,
     pub exit_status: Option<i32>,

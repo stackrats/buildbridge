@@ -1,10 +1,12 @@
 //! Guest optimizations: the catalogue, checking which apply, and applying one.
 
 use super::*;
+use ts_rs::TS;
 
 /// How much a guest optimization changes about the machine's security posture, in the words
 /// the osx-optimizer project uses for them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum OptimizationTier {
     /// Faster builds, no meaningful change to who can do what on the machine.
@@ -19,7 +21,8 @@ pub enum OptimizationTier {
 /// guest, a check that reports whether it is already in effect, and the caveat the source gives.
 /// Admin tweaks run in the guest's own Terminal, where `sudo` reads the password from its TTY;
 /// BuildBridge never sees it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct GuestOptimization {
     pub id: &'static str,

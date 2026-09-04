@@ -210,6 +210,7 @@ function readyMachine(): MockMachine {
             lastXcodeVersion: '26.6',
             lastNativeLockUpdated: lockDrift,
             lastBuildTarget: 'simulator',
+            debugBundleIdentifier: null,
         },
         signing: {
             keychainPath: '/Users/builder/Library/Keychains/buildbridge-signing.keychain-db',
@@ -1546,6 +1547,7 @@ export function createMockBackend(): Backend {
                     reattached: false,
                     buildTail: ['** BUILD SUCCEEDED **'],
                     consoleTail: consoleLines,
+                    projectBundleIdentifier: null,
                 };
                 machine.deviceRunError = null;
                 return { view: view(machine), run: machine.deviceRun };

@@ -1,10 +1,12 @@
 //! Guest optimizations: the catalogue with this guest's state, and applying one.
 
 use super::*;
+use ts_rs::TS;
 
 /// One optimization as the interface shows it: the catalogue entry plus whether the guest
 /// already has it, when the guest can be asked.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GuestOptimizationView {
     #[serde(flatten)]
@@ -13,7 +15,8 @@ pub(crate) struct GuestOptimizationView {
     pub(crate) applied: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GuestOptimizationsView {
     /// Whether the guest is reachable enough to check or apply anything.
@@ -84,7 +87,8 @@ pub(crate) async fn list_guest_optimizations(
     })
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApplyOptimizationInput {
     pub(crate) optimization_id: String,

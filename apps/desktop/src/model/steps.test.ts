@@ -262,6 +262,7 @@ function provisionedView(): MacBuilderView {
         lastXcodeVersion: '26.6',
         lastNativeLockUpdated: false,
         lastBuildTarget: 'device_sdk',
+        debugBundleIdentifier: null,
         lastSource: null,
     };
     view.signing = {
@@ -325,6 +326,7 @@ describe('deriveBuildSteps', () => {
             lastXcodeVersion: '26.6',
             lastNativeLockUpdated: false,
             lastBuildTarget: 'device_sdk',
+            debugBundleIdentifier: null,
             lastSource: null,
         };
 
@@ -361,6 +363,7 @@ describe('deriveBuildSteps', () => {
             lastXcodeVersion: '26.6',
             lastNativeLockUpdated: true,
             lastBuildTarget: 'simulator',
+            debugBundleIdentifier: null,
             lastSource: null,
         };
         view.signingKit = {
@@ -821,6 +824,7 @@ describe('run on the device', () => {
             reattached: false,
             buildTail: [],
             consoleTail: [],
+            projectBundleIdentifier: null,
         };
         const done = at(view);
         expect(done.status).toBe('done');

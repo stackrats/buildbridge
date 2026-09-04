@@ -57,6 +57,7 @@ use records::*;
 use runner::*;
 use signing_kits::*;
 use templates::*;
+use ts_rs::TS;
 use usb::*;
 use views::*;
 
@@ -95,13 +96,15 @@ struct MachineProgressEvent<T: Serialize> {
     progress: T,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MachineChangedEvent {
     pub(crate) machine_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct ConfirmInput {
     confirmed: bool,
@@ -109,7 +112,8 @@ struct ConfirmInput {
 
 /// What a machine can do about signing, including the state left behind when the host's
 /// credential vault is cleared while the guest keeps its provisioned keychain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 enum SigningHealth {
     /// No kit resolved, and none has been used on this machine before.
@@ -124,11 +128,13 @@ enum SigningHealth {
     VaultUnavailable,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct MachineSummary {
     id: String,
     config: MacBuilderConfig,
+    #[ts(type = "number")]
     created_at_epoch_seconds: u64,
     state: ContainerState,
     container_id: Option<String>,
@@ -148,21 +154,24 @@ struct MachineSummary {
     template_name: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct MachineListView {
     host: HostPrerequisites,
     machines: Vec<MachineSummary>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 struct StoredConfig {
     server_url: String,
     runner_id: String,
     runner_name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct DesktopStatus {
     paired: bool,
@@ -176,7 +185,8 @@ struct DesktopStatus {
     version: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct PairInput {
     server_url: String,
@@ -184,14 +194,16 @@ struct PairInput {
     runner_name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct AuthorizeRealtimeInput {
     socket_id: String,
     channel_name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct RunOnceResult {
     state: RunState,
@@ -203,7 +215,8 @@ struct RunOnceResult {
 ///
 /// A host can hold several: one per developer team or per app. A machine is attached to one
 /// kit, and provisioning imports that kit's identity into that machine's guest keychain.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct StoredSigningKit {
     #[serde(default)]
@@ -218,6 +231,7 @@ struct StoredSigningKit {
     provisioning_profile_paths: Vec<String>,
     guest_keychain_password: Option<String>,
     #[serde(default)]
+    #[ts(type = "number")]
     created_at_epoch_seconds: u64,
     /// The optional development identity, for Debug builds on registered phones.
     #[serde(default)]
@@ -230,14 +244,16 @@ struct StoredSigningKit {
     development_certificate_serial_number: Option<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct StoredSigningKits {
     #[serde(default)]
     kits: Vec<StoredSigningKit>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct SigningKitInput {
     /// Absent creates a kit; present updates that kit in place.
@@ -256,7 +272,8 @@ struct SigningKitInput {
     development_certificate_password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct AttachSigningKitInput {
     /// Null detaches the machine from every kit.
@@ -264,7 +281,8 @@ struct AttachSigningKitInput {
 }
 
 /// Everything about a kit that is safe to show: names and counts, never a secret value.
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct SigningKitSummary {
     id: String,
@@ -276,6 +294,7 @@ struct SigningKitSummary {
     signing_certificate_password_stored: bool,
     provisioning_profile_names: Vec<String>,
     guest_keychain_configured: bool,
+    #[ts(type = "number")]
     created_at_epoch_seconds: u64,
     /// Machines currently attached to this kit, by display name.
     attached_machines: Vec<String>,
@@ -284,20 +303,23 @@ struct SigningKitSummary {
     development_certificate_password_stored: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct CreateAppleProfileInput {
     certificate_id: String,
     confirmed: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct CreateAppleCertificateInput {
     confirmed: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct CreateAppleCertificateResult {
     certificate: apple_api::AppleCertificateSummary,
@@ -305,7 +327,8 @@ struct CreateAppleCertificateResult {
     kit: SigningKitSummary,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct DownloadAppleProfileResult {
     profile: apple_api::AppleProvisioningProfileSummary,
@@ -316,7 +339,8 @@ struct DownloadAppleProfileResult {
 /// One named set of environment variables for a build, held in the host's vault like a signing
 /// kit and attached per machine. A plain variable's value is shown back in the interface; a
 /// secret's is left out of every summary and comes back only to the editor, on request.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct StoredEnvVariable {
     key: String,
@@ -332,7 +356,8 @@ fn stored_as_secret() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct StoredEnvSet {
     #[serde(default)]
@@ -342,17 +367,20 @@ struct StoredEnvSet {
     #[serde(default)]
     variables: Vec<StoredEnvVariable>,
     #[serde(default)]
+    #[ts(type = "number")]
     created_at_epoch_seconds: u64,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct StoredEnvSets {
     #[serde(default)]
     sets: Vec<StoredEnvSet>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct EnvVariableInput {
     key: String,
@@ -362,7 +390,8 @@ struct EnvVariableInput {
     secret: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct EnvSetInput {
     /// Absent creates a set; present updates that set in place.
@@ -372,7 +401,8 @@ struct EnvSetInput {
     variables: Vec<EnvVariableInput>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct AttachEnvSetInput {
     /// Null detaches the machine from every set.
@@ -380,7 +410,8 @@ struct AttachEnvSetInput {
 }
 
 /// One variable as the interface shows it, value included.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct EnvVariableSummary {
     key: String,
@@ -388,7 +419,8 @@ struct EnvVariableSummary {
 }
 
 /// An env set as the interface may show it: plain variables with their values, secrets by key.
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct EnvSetSummary {
     id: String,
@@ -396,11 +428,13 @@ struct EnvSetSummary {
     variables: Vec<EnvVariableSummary>,
     /// Their values are left out; `reveal_env_secrets` hands them to the editor on request.
     secret_keys: Vec<String>,
+    #[ts(type = "number")]
     created_at_epoch_seconds: u64,
     attached_machines: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct CreateAppleProfileResult {
     profile: apple_api::AppleProvisioningProfileSummary,
@@ -409,19 +443,22 @@ struct CreateAppleProfileResult {
     kit: SigningKitSummary,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct StoredMacGuestAccess {
     username: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct MacGuestAccessInput {
     username: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct AuthorizeMacGuestKeyInput {
     username: String,
@@ -440,7 +477,8 @@ impl std::fmt::Debug for AuthorizeMacGuestKeyInput {
 
 /// How Xcode activation gets its administrator password: typed here, it runs over the bridge
 /// with `sudo`; absent or blank, the guest Terminal opens and the user types it there.
-#[derive(Deserialize)]
+#[derive(Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct ActivateMacXcodeInput {
     #[serde(default)]
@@ -456,25 +494,29 @@ impl std::fmt::Debug for ActivateMacXcodeInput {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct TrustMacGuestInput {
     fingerprint: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct ImportMacXcodeInput {
     path: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct ApproveAppleWorkspaceInput {
     path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct StoredAppleWorkspace {
     local_path: String,
@@ -486,7 +528,9 @@ struct StoredAppleWorkspace {
     #[serde(default)]
     bundle_identifier: Option<String>,
     last_snapshot_sha256: Option<String>,
+    #[ts(type = "number | null")]
     last_sync_file_count: Option<u64>,
+    #[ts(type = "number | null")]
     last_sync_bytes: Option<u64>,
     last_build_succeeded: bool,
     last_xcode_version: Option<String>,
@@ -506,7 +550,8 @@ struct StoredAppleWorkspace {
     last_source: Option<WorkspaceSource>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceSource {
     /// `folder` or `git`.
@@ -525,14 +570,16 @@ impl WorkspaceSource {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct StoredSigningProvisioning {
     container_id: String,
     result: SigningProvisioningResult,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct StoredAppleArchive {
     container_id: String,
@@ -544,7 +591,8 @@ struct StoredAppleArchive {
     env_set_name: Option<String>,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct MacGuestAccessView {
     username: Option<String>,
@@ -555,7 +603,8 @@ struct MacGuestAccessView {
     devices: Vec<buildbridge_docker_osx::GuestDevice>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct MacBuilderView {
     machine_id: String,
@@ -587,14 +636,16 @@ struct MacBuilderView {
     template: Option<MachineTemplateRef>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct AttachUsbDeviceInput {
     bus: u8,
     port: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct ImportMacXcodeResult {
     view: MacBuilderView,
@@ -602,7 +653,8 @@ struct ImportMacXcodeResult {
     activation_commands: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct SyncAppleWorkspaceResult {
     view: MacBuilderView,
@@ -611,7 +663,8 @@ struct SyncAppleWorkspaceResult {
 
 /// The guest's refreshed Podfile.lock adopted into the approved project: what changed, where it
 /// went, and where the previous copy is kept.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct AdoptPodfileLockResult {
     view: MacBuilderView,
@@ -620,34 +673,39 @@ struct AdoptPodfileLockResult {
     backup_path: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct PairGuestDeviceInput {
     udid: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct RunAppleSmokeBuildInput {
     #[serde(default)]
     target: UnsignedBuildTarget,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct RunAppleSmokeBuildResult {
     view: MacBuilderView,
     build: AppleSmokeBuildResult,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct RunAppleArchiveResult {
     view: MacBuilderView,
     archive: AppleArchiveResult,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 enum RunState {
     Idle,

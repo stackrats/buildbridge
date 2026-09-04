@@ -10,6 +10,7 @@ export default defineConfig({
             '.claude/**',
             '.codex/**',
             'apps/desktop/src-tauri/**',
+            'apps/desktop/src/types/generated/**',
             'target/**',
         ],
         options: {
@@ -30,6 +31,7 @@ export default defineConfig({
             '**/*.toml',
             '.mcp.json',
             'apps/desktop/src-tauri/gen/**',
+            'apps/desktop/src/types/generated/**',
             'opencode.json',
         ],
         sortTailwindcss: {

@@ -4,10 +4,12 @@
 //! or removed. Breaking wire changes require a protocol version bump.
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct PairRunnerRequest {
     pub code: String,
     pub name: String,
@@ -18,20 +20,23 @@ pub struct PairRunnerRequest {
     pub protocol_version: u32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
 pub struct PairRunnerResponse {
     pub protocol_version: u32,
     pub runner: RunnerIdentity,
     pub token: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct RunnerIdentity {
     pub id: String,
     pub name: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct HeartbeatRequest {
     pub version: String,
     pub capabilities: Vec<String>,
@@ -43,7 +48,8 @@ pub struct HeartbeatRequest {
 
 /// What a control plane needs to know about one machine to queue work on it. Nothing here is a
 /// secret or a host path: the project is named, not located.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct MachineReport {
     pub id: String,
     pub name: String,
@@ -61,7 +67,8 @@ pub struct MachineReport {
     pub env_sets: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
 pub struct RenewLeaseResponse {
     pub lease_expires_at: String,
 }
@@ -69,22 +76,26 @@ pub struct RenewLeaseResponse {
 /// What the control plane says back to a heartbeat. `queued_builds` is the recovery path for a
 /// missed queue event: the heartbeat is sent anyway, so carrying the count costs nothing, and a
 /// runner that sees work waiting claims it instead of waiting for a broadcast that never came.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
 pub struct HeartbeatResponse {
     pub protocol_version: u32,
     pub server_time: String,
     /// Builds queued for this runner, or running on a lease that has lapsed.
     #[serde(default)]
+    #[ts(type = "number")]
     pub queued_builds: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
 pub struct RealtimeConfigurationResponse {
     pub protocol_version: u32,
     pub realtime: RealtimeConfiguration,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct RealtimeConfiguration {
     pub key: String,
@@ -94,28 +105,33 @@ pub struct RealtimeConfiguration {
     pub channel: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct RealtimeAuthorizationRequest {
     pub socket_id: String,
     pub channel_name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
 pub struct ClaimBuildResponse {
     pub protocol_version: u32,
     pub build: ClaimedBuild,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
 pub struct ClaimedBuild {
     pub id: String,
     pub kind: BuildKind,
     pub payload: serde_json::Value,
     pub lease_expires_at: String,
+    #[ts(type = "number")]
     pub next_log_sequence: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildKind {
     Diagnostics,
@@ -126,7 +142,8 @@ pub enum BuildKind {
 /// The payload of an `apple_archive` build. The machine is the runner's own; `git_ref` names a
 /// revision of the project already approved on that machine, and `None` builds the approved
 /// folder as it is.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct AppleArchivePayload {
     pub machine_id: String,
     #[serde(default, rename = "ref")]
@@ -160,7 +177,8 @@ pub fn valid_git_ref(git_ref: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum LogStream {
     Stdout,
@@ -168,26 +186,31 @@ pub enum LogStream {
     System,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct AppendLogsRequest {
     pub lines: Vec<BuildLogLine>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct BuildLogLine {
+    #[ts(type = "number")]
     pub sequence: u64,
     pub stream: LogStream,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum CompletionStatus {
     Succeeded,
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct CompleteBuildRequest {
     pub status: CompletionStatus,
     pub exit_code: Option<i32>,

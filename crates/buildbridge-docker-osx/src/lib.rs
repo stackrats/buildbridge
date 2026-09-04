@@ -63,6 +63,7 @@ pub use disk::{
 };
 use qmp::USB_PHONE_CONTROLLER;
 pub use qmp::{QMP_CONTAINER_DIR, QMP_SOCKET_NAME, guest_reset_for_macos};
+use ts_rs::TS;
 pub use usb::{
     AttachedUsbDevice, ContainerUsbOptions, HostUsbDevice, HostUsbStatus, MachineUsbStatus,
     USB_UDEV_RULE, USB_UDEV_RULE_PATH, UdevRuleState, UsbHolder, attach_usb_device,
@@ -129,7 +130,8 @@ const PORTABLE_RUBY_DARWIN_X64_SHA256: &str =
     "99bec6d4440dc4f114754f7b9e18d79258a6dacc4089a9a50638e22a1e8665d0";
 const COCOAPODS_VERSION: &str = "1.16.2";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum MacOsRelease {
     Tahoe,
@@ -161,7 +163,8 @@ impl MacOsRelease {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct MacBuilderConfig {
     pub name: String,
@@ -215,7 +218,8 @@ impl MacBuilderConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct HostPrerequisites {
     pub supported_host: bool,
@@ -229,7 +233,8 @@ pub struct HostPrerequisites {
     pub issues: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum ContainerState {
     #[default]
@@ -258,7 +263,8 @@ impl ContainerState {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStatus {
     pub prerequisites: HostPrerequisites,
@@ -267,7 +273,8 @@ pub struct RuntimeStatus {
     pub started_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum GuestTrustState {
     #[default]
@@ -277,7 +284,8 @@ pub enum GuestTrustState {
     Mismatch,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct GuestSshStatus {
     pub port_open: bool,
@@ -294,7 +302,8 @@ pub struct ScannedHostKey {
     pub fingerprint: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct GuestDiagnostics {
     pub authenticated: bool,
@@ -307,7 +316,8 @@ pub struct GuestDiagnostics {
     pub issue: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchPhase {
     Preparing,
@@ -333,15 +343,18 @@ pub struct LaunchOptions<'a> {
     pub template_dir: Option<&'a Path>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchProgress {
     pub phase: LaunchPhase,
+    #[ts(type = "number")]
     pub elapsed_seconds: u64,
     pub detail: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum XcodeImportPhase {
     Preparing,
@@ -353,24 +366,30 @@ pub enum XcodeImportPhase {
     Activating,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct XcodeImportProgress {
     pub phase: XcodeImportPhase,
+    #[ts(type = "number")]
     pub transferred_bytes: u64,
+    #[ts(type = "number")]
     pub total_bytes: u64,
+    #[ts(type = "number")]
     pub elapsed_seconds: u64,
     pub detail: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct XcodeImportResult {
     pub installed_path: String,
     pub activation_commands: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum SigningProvisioningPhase {
     /// The Team key route: a distribution certificate is being created at Apple for the kit.
@@ -386,12 +405,16 @@ pub enum SigningProvisioningPhase {
     Completed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct SigningProvisioningProgress {
     pub phase: SigningProvisioningPhase,
+    #[ts(type = "number")]
     pub completed_bytes: u64,
+    #[ts(type = "number")]
     pub total_bytes: u64,
+    #[ts(type = "number")]
     pub elapsed_seconds: u64,
     pub detail: String,
 }
@@ -399,7 +422,8 @@ pub struct SigningProvisioningProgress {
 /// What a profile is for, read from its entitlements rather than from a name. The plist has no
 /// explicit type; the combination of `get-task-allow`, `ProvisionedDevices`, and
 /// `ProvisionsAllDevices` is unambiguous.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileKind {
     AppStore,
@@ -408,7 +432,8 @@ pub enum ProfileKind {
     Enterprise,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvisioningProfileSummary {
     pub uuid: String,
@@ -426,7 +451,8 @@ pub struct ProvisioningProfileSummary {
 }
 
 /// One certificate/private-key pair in the guest keychain.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvisionedIdentity {
     pub identity_name: String,
@@ -435,7 +461,8 @@ pub struct ProvisionedIdentity {
     pub certificate_expires_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase", from = "SigningProvisioningWire")]
 pub struct SigningProvisioningResult {
     pub keychain_path: String,
@@ -451,7 +478,8 @@ pub struct SigningProvisioningResult {
 
 /// The stored shape, old and new. Records written before the distribution identity became
 /// optional carried its four fields at the top level; they still read.
-#[derive(Deserialize)]
+#[derive(Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct SigningProvisioningWire {
     keychain_path: String,
@@ -525,7 +553,8 @@ enum HelperImportMode {
     Add,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum AppleProjectPhase {
     Snapshotting,
@@ -541,24 +570,32 @@ pub enum AppleProjectPhase {
     Completed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct AppleProjectProgress {
     pub phase: AppleProjectPhase,
+    #[ts(type = "number")]
     pub completed_bytes: u64,
+    #[ts(type = "number")]
     pub total_bytes: u64,
+    #[ts(type = "number")]
     pub elapsed_seconds: u64,
     pub detail: String,
     pub log_line: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct AppleWorkspaceSyncResult {
     pub guest_path: String,
     pub snapshot_sha256: String,
+    #[ts(type = "number")]
     pub source_file_count: u64,
+    #[ts(type = "number")]
     pub source_bytes: u64,
+    #[ts(type = "number")]
     pub archive_bytes: u64,
 }
 
@@ -566,7 +603,8 @@ pub struct AppleWorkspaceSyncResult {
 /// what a signed archive and a device run use, so it needs nothing downloaded; the Simulator is
 /// the only target that can be run on screen inside the guest, and Xcode lacks its runtime until
 /// Apple's iOS platform — several gigabytes — has been downloaded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum UnsignedBuildTarget {
     #[default]
@@ -574,7 +612,8 @@ pub enum UnsignedBuildTarget {
     Simulator,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct AppleSmokeBuildResult {
     pub target: UnsignedBuildTarget,
@@ -583,7 +622,8 @@ pub struct AppleSmokeBuildResult {
     pub output_tail: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum AppleArchivePhase {
     Preparing,
@@ -597,26 +637,33 @@ pub enum AppleArchivePhase {
     Completed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct AppleArchiveProgress {
     pub phase: AppleArchivePhase,
+    #[ts(type = "number")]
     pub completed_bytes: u64,
+    #[ts(type = "number")]
     pub total_bytes: u64,
+    #[ts(type = "number")]
     pub elapsed_seconds: u64,
     pub detail: String,
     pub log_line: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct AppleArchiveArtifact {
     pub path: String,
+    #[ts(type = "number")]
     pub bytes: u64,
     pub sha256: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct AppleArchiveResult {
     pub scheme: String,

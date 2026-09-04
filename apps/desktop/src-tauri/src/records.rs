@@ -1,6 +1,7 @@
 //! Per-machine records on disk: workspace, signing, archive, and the guest key material.
 
 use super::*;
+use ts_rs::TS;
 
 pub(crate) fn prepare_apple_archive_output_dir(paths: &MachinePaths) -> Result<PathBuf, String> {
     let root = paths.artifacts_dir();
@@ -34,11 +35,13 @@ pub(crate) fn managed_apple_profiles_dir(app: &AppHandle) -> Result<PathBuf, Str
 
 /// A provisioning profile this host already downloaded, kept so a kit can be rebuilt without
 /// going back to Apple. Only the file name and path are exposed; the contents stay on disk.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ManagedAppleProfile {
     pub(crate) file_name: String,
     pub(crate) path: String,
+    #[ts(type = "number")]
     pub(crate) saved_at_epoch_seconds: u64,
 }
 

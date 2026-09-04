@@ -1,6 +1,7 @@
 //! Phones the guest sees: listing, pairing, device signing, and the device run.
 
 use super::*;
+use ts_rs::TS;
 
 /// Asks the guest which phones it sees and serves the answer from the view until the next
 /// listing. Holds the machine so the probe cannot interleave with a build.
@@ -35,7 +36,8 @@ pub(crate) async fn pair_guest_device(
     build_mac_builder_view(&app, &paths).await
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OpenSafariInspectorResult {
     pub(crate) view: MacBuilderView,
@@ -111,7 +113,8 @@ pub(crate) fn open_developer_tools(window: tauri::WebviewWindow) -> Result<(), S
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PrepareDeviceSigningInput {
     pub(crate) udid: String,
@@ -119,7 +122,8 @@ pub(crate) struct PrepareDeviceSigningInput {
     pub(crate) confirmed: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PrepareDeviceSigningResult {
     pub(crate) view: MacBuilderView,
@@ -128,7 +132,8 @@ pub(crate) struct PrepareDeviceSigningResult {
     pub(crate) profile_created: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DeviceSigningPhase {
     CheckingKit,
@@ -141,10 +146,12 @@ pub(crate) enum DeviceSigningPhase {
     Completed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DeviceSigningProgress {
     pub(crate) phase: DeviceSigningPhase,
+    #[ts(type = "number")]
     pub(crate) elapsed_seconds: u64,
     pub(crate) detail: String,
 }
@@ -491,7 +498,8 @@ pub(crate) async fn prepare_apple_device_signing(
     })
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RunAppleDeviceBuildInput {
     pub(crate) udid: String,
@@ -499,20 +507,23 @@ pub(crate) struct RunAppleDeviceBuildInput {
     pub(crate) env_set_id: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RunAppleDeviceResult {
     pub(crate) view: MacBuilderView,
     pub(crate) run: AppleDeviceRunResult,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StoredAppleDeviceRun {
     pub(crate) container_id: String,
     pub(crate) snapshot_sha256: String,
     pub(crate) device_identifier: String,
     pub(crate) result: AppleDeviceRunResult,
+    #[ts(type = "number")]
     pub(crate) finished_at_epoch_seconds: u64,
 }
 

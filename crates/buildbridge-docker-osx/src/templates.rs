@@ -16,6 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::disk::{
     DISK_BASESYSTEM_NAME, DISK_IMAGE_NAME, DISK_NVRAM_NAME, MachineDisk, THROWAWAY_DISK_DIR,
@@ -80,7 +81,8 @@ impl MachineTemplateFiles {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum TemplateSavePhase {
     ShuttingDown,
@@ -90,10 +92,12 @@ pub enum TemplateSavePhase {
     Completed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct TemplateSaveProgress {
     pub phase: TemplateSavePhase,
+    #[ts(type = "number")]
     pub elapsed_seconds: u64,
     pub detail: String,
     /// How far `qemu-img` is through the compression, when it says.

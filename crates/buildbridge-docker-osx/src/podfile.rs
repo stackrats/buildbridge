@@ -1,12 +1,14 @@
 //! Podfile.lock: reading the guest's copy and diffing it against the project's.
 
 use super::*;
+use ts_rs::TS;
 
 /// A Podfile.lock is small; anything past this is not one.
 pub const PODFILE_LOCK_MAX_BYTES: usize = 1024 * 1024;
 
 /// One pod whose pinned version differs between two lockfiles.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct PodfileLockChange {
     pub name: String,
@@ -14,11 +16,14 @@ pub struct PodfileLockChange {
     pub after: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct PodfileLockChanges {
     pub pods: Vec<PodfileLockChange>,
+    #[ts(type = "number")]
     pub lines_added: usize,
+    #[ts(type = "number")]
     pub lines_removed: usize,
     pub identical: bool,
 }

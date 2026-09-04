@@ -27,6 +27,7 @@ keyring = "4.2"
 reqwest.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
 serde.workspace = true
+ts-rs.workspace = true
 serde_json.workspace = true
 time = { version = "0.3", features = ["parsing"] }
 tauri-plugin-dialog = "2"

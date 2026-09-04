@@ -16,6 +16,7 @@ use serde::Serialize;
 use crate::disk::inspect_container_layout;
 use crate::qmp::{IPHONE_QMP_DEVICE_ID, QmpClient, UsbAttachment, usb_attachment};
 use crate::{ContainerState, ProviderError, TrackedCommand, clean_output, recent_logs};
+use ts_rs::TS;
 
 /// Sorted after `39-usbmuxd.rules`, whose ownership and systemd activation it overrides, and
 /// before the `80-`/`99-` rules that do not touch phones.
@@ -45,7 +46,8 @@ const ATTACH_TIMEOUT: Duration = Duration::from_secs(15);
 const ATTACH_POLL: Duration = Duration::from_millis(500);
 
 /// Who has the phone's node open on the host side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum UsbHolder {
     Usbmuxd,
@@ -53,7 +55,8 @@ pub enum UsbHolder {
     Other,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct HostUsbDevice {
     pub bus: u8,
@@ -71,7 +74,8 @@ pub struct HostUsbDevice {
     pub held_by: Option<UsbHolder>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum UdevRuleState {
     Missing,
@@ -79,7 +83,8 @@ pub enum UdevRuleState {
     Modified,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct HostUsbStatus {
     pub supported: bool,
@@ -92,13 +97,15 @@ pub struct HostUsbStatus {
 }
 
 /// What a container needs at creation to reach USB devices without `--privileged`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainerUsbOptions {
     pub plugdev_gid: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachedUsbDevice {
     pub bus: u8,
@@ -108,7 +115,8 @@ pub struct AttachedUsbDevice {
     pub issue: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct MachineUsbStatus {
     pub host: HostUsbStatus,

@@ -6,7 +6,7 @@ import { ChevronDown, RefreshCw, Terminal, Zap } from '@lucide/vue';
 import { computed, onMounted, ref, watch } from 'vue';
 
 import { useMachinesStore, type MachineSession } from '../../stores/machines';
-import type { GuestOptimization, OptimizationTier } from '../../types/backend';
+import type { GuestOptimizationView, OptimizationTier } from '../../types/backend';
 import ConfirmDialog from '../dialogs/ConfirmDialog.vue';
 import Badge from '../ui/Badge.vue';
 import Button from '../ui/Button.vue';
@@ -17,7 +17,7 @@ const { session } = defineProps<{ session: MachineSession }>();
 const machines = useMachinesStore();
 
 const open = ref(false);
-const pending = ref<GuestOptimization | null>(null);
+const pending = ref<GuestOptimizationView | null>(null);
 const applyingId = ref<string | null>(null);
 
 const view = computed(() => session.optimizations);
@@ -72,7 +72,7 @@ onMounted(load);
 // A guest that just became reachable can now be asked; a guest that went away cannot.
 watch(guestReady, load);
 
-function request(item: GuestOptimization): void {
+function request(item: GuestOptimizationView): void {
     if (item.tier === 'recommended') {
         void apply(item);
         return;
@@ -80,7 +80,7 @@ function request(item: GuestOptimization): void {
     pending.value = item;
 }
 
-async function apply(item: GuestOptimization): Promise<void> {
+async function apply(item: GuestOptimizationView): Promise<void> {
     pending.value = null;
     applyingId.value = item.id;
     try {
@@ -90,7 +90,7 @@ async function apply(item: GuestOptimization): Promise<void> {
     }
 }
 
-const stateBadge = (item: GuestOptimization) =>
+const stateBadge = (item: GuestOptimizationView) =>
     item.applied === true
         ? { tone: 'ok' as const, label: 'applied' }
         : item.applied === false

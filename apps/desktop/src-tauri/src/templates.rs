@@ -9,16 +9,19 @@
 //! the template's, and the journey resumes at the first project step.
 
 use super::*;
+use ts_rs::TS;
 
 const TEMPLATES_DIRECTORY: &str = "templates";
 const TEMPLATE_RECORD_FILE: &str = "template.json";
 const MAX_TEMPLATE_NAME_CHARS: usize = 60;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StoredMachineTemplate {
     pub(crate) id: String,
     pub(crate) name: String,
+    #[ts(type = "number")]
     pub(crate) created_at_epoch_seconds: u64,
     pub(crate) source_machine_name: String,
     pub(crate) macos_version: Option<String>,
@@ -27,18 +30,22 @@ pub(crate) struct StoredMachineTemplate {
     /// The guest's SSH host key as pinned on the source machine. A clone boots with the same
     /// key, which is how it is recognised.
     pub(crate) known_hosts_line: String,
+    #[ts(type = "number")]
     pub(crate) size_bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MachineTemplateSummary {
     pub(crate) id: String,
     pub(crate) name: String,
+    #[ts(type = "number")]
     pub(crate) created_at_epoch_seconds: u64,
     pub(crate) source_machine_name: String,
     pub(crate) macos_version: Option<String>,
     pub(crate) xcode_version: Option<String>,
+    #[ts(type = "number")]
     pub(crate) size_bytes: u64,
     /// Machines cloned from it. While any exists the template cannot be deleted, since their
     /// disks read through it.
@@ -48,14 +55,16 @@ pub(crate) struct MachineTemplateSummary {
 }
 
 /// The template a machine was cloned from, as the machine view names it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MachineTemplateRef {
     pub(crate) id: String,
     pub(crate) name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SaveTemplateInput {
     name: String,

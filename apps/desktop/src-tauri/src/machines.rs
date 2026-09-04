@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use buildbridge_docker_osx::{DEFAULT_MACHINE_ID, MacBuilderConfig, container_name};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
+use ts_rs::TS;
 
 const REGISTRY_FILE: &str = "machines.json";
 const LEGACY_CONFIG_FILE: &str = "mac-builder.json";
@@ -22,11 +23,13 @@ const MACHINES_DIRECTORY: &str = "machines";
 /// Upper bound on registered machines; each one publishes a host port and owns a large disk.
 pub(crate) const MAX_MACHINES: usize = 12;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StoredMachine {
     pub id: String,
     pub config: MacBuilderConfig,
+    #[ts(type = "number")]
     pub created_at_epoch_seconds: u64,
     /// The signing kit this machine provisions. `None` falls back to the sole kit, if there is
     /// exactly one, so a single-kit host needs no attachment step.
@@ -42,7 +45,8 @@ pub(crate) struct StoredMachine {
     pub template_id: Option<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MachineRegistry {
     #[serde(default)]

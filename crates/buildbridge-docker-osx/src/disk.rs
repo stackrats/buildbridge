@@ -25,6 +25,7 @@ use crate::{
     TrackedCommand, clean_output, create_container, inspect_container, probe_host, run_docker,
     status, stop,
 };
+use ts_rs::TS;
 
 pub const DISK_IMAGE_NAME: &str = "mac_hdd_ng.img";
 pub const DISK_NVRAM_NAME: &str = "OVMF_VARS-1024x768.fd";
@@ -110,7 +111,8 @@ pub(crate) fn non_empty_file(path: &Path) -> bool {
 
 /// What a container was created with, read back from Docker rather than remembered, so it
 /// cannot drift from the truth after a discard.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainerLayout {
     pub disk_on_host: bool,
@@ -124,7 +126,8 @@ pub struct ContainerLayout {
 
 /// Recreating the container from its current profile: the same disk, identity and options, so
 /// a container created before an option existed picks it up. macOS restarts once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum ContainerRebuildPhase {
     ShuttingDown,
@@ -134,15 +137,18 @@ pub enum ContainerRebuildPhase {
     Completed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainerRebuildProgress {
     pub phase: ContainerRebuildPhase,
+    #[ts(type = "number")]
     pub elapsed_seconds: u64,
     pub detail: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum DiskMigrationPhase {
     CheckingSpace,
@@ -154,12 +160,16 @@ pub enum DiskMigrationPhase {
     Completed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct DiskMigrationProgress {
     pub phase: DiskMigrationPhase,
+    #[ts(type = "number")]
     pub completed_bytes: u64,
+    #[ts(type = "number")]
     pub total_bytes: u64,
+    #[ts(type = "number")]
     pub elapsed_seconds: u64,
     pub detail: String,
 }

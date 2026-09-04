@@ -1,6 +1,7 @@
 //! The control-plane runner: pairing, heartbeat, and remote job execution.
 
 use super::*;
+use ts_rs::TS;
 
 #[tauri::command]
 pub(crate) async fn get_runner_status(app: AppHandle) -> Result<DesktopStatus, String> {
@@ -113,10 +114,12 @@ pub(crate) async fn heartbeat_runner(app: AppHandle) -> Result<HeartbeatSummary,
 }
 
 /// The part of a heartbeat reply the interface acts on.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct HeartbeatSummary {
     /// Work waiting for this runner. Non-zero means a queue event was missed; claim now.
+    #[ts(type = "number")]
     pub(crate) queued_builds: u64,
 }
 

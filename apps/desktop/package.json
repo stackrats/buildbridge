@@ -7,6 +7,7 @@
         "dev": "vp dev",
         "build": "vue-tsc --noEmit && vp build",
         "typecheck": "vue-tsc --noEmit",
+        "types:generate": "node scripts/generate-types.mjs",
         "check": "vp check",
         "test": "vp test --run",
         "preview": "vp preview",
