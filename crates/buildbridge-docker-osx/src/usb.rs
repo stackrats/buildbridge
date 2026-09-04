@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::disk::inspect_container_layout;
-use crate::qmp::{IPHONE_QMP_DEVICE_ID, QmpClient, UsbAttachment, usb_attachment};
+use crate::qmp::{IPHONE_QMP_DEVICE_ID, QmpClient, UsbAttachment, usb_attachment, QmpEndpoint};
 use crate::{ContainerState, ProviderError, TrackedCommand, clean_output, recent_logs};
 use ts_rs::TS;
 
@@ -429,7 +429,7 @@ pub fn remove_iphone_udev_rule() -> Result<HostUsbStatus, ProviderError> {
 /// open failure only reaches QEMU's own stderr, so the call waits for the guest to enumerate
 /// the phone and otherwise reports the last USB line the container logged.
 pub fn attach_usb_device(
-    qmp_socket: &Path,
+    qmp_endpoint: &QmpEndpoint,
     container_name: &str,
     device: &HostUsbDevice,
     guest_reset: bool,
@@ -447,7 +447,7 @@ pub fn attach_usb_device(
         ));
     }
 
-    let mut client = QmpClient::connect(qmp_socket)?;
+    let mut client = QmpClient::connect(qmp_endpoint)?;
     // QEMU reads a phone cleanly only the first time it opens it in a process, so a phone it
     // already holds is never released and re-added here: one it can read is left exactly as it
     // is, and one it could not read needs a replug, which only a person can do.
@@ -525,17 +525,17 @@ pub fn attach_usb_device(
     })
 }
 
-pub fn detach_usb_device(qmp_socket: &Path) -> Result<(), ProviderError> {
-    QmpClient::connect(qmp_socket)?.delete_device(IPHONE_QMP_DEVICE_ID)
+pub fn detach_usb_device(qmp_endpoint: &QmpEndpoint) -> Result<(), ProviderError> {
+    QmpClient::connect(qmp_endpoint)?.delete_device(IPHONE_QMP_DEVICE_ID)
 }
 
 /// What the guest currently holds, or `None` when QEMU is unreachable or holds nothing.
-pub fn attached_usb_device(qmp_socket: &Path) -> Option<AttachedUsbDevice> {
-    probe_qmp(qmp_socket).1
+pub fn attached_usb_device(qmp_endpoint: &QmpEndpoint) -> Option<AttachedUsbDevice> {
+    probe_qmp(qmp_endpoint).1
 }
 
-fn probe_qmp(qmp_socket: &Path) -> (bool, Option<AttachedUsbDevice>) {
-    let Ok(mut client) = QmpClient::connect(qmp_socket) else {
+fn probe_qmp(qmp_endpoint: &QmpEndpoint) -> (bool, Option<AttachedUsbDevice>) {
+    let Ok(mut client) = QmpClient::connect(qmp_endpoint) else {
         return (false, None);
     };
     let held = client
@@ -583,12 +583,12 @@ fn probe_qmp(qmp_socket: &Path) -> (bool, Option<AttachedUsbDevice>) {
 /// The whole USB picture for one machine: host, container, control socket, and attachment.
 pub fn machine_usb_status(
     container_name: &str,
-    qmp_socket: &Path,
+    qmp_endpoint: &QmpEndpoint,
     state: ContainerState,
 ) -> MachineUsbStatus {
     let running = state == ContainerState::Running;
     let (qmp_reachable, attached) = if running {
-        probe_qmp(qmp_socket)
+        probe_qmp(qmp_endpoint)
     } else {
         (false, None)
     };

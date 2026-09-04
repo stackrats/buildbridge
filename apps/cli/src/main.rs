@@ -8,7 +8,7 @@ use std::io::{BufRead, IsTerminal};
 use std::sync::{Arc, Mutex};
 
 use buildbridge_engine::{Engine, EngineDeps, EventSink};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
@@ -81,6 +81,10 @@ enum MachineCommand {
         /// Clone a saved template instead of installing macOS.
         #[arg(long)]
         from_template: Option<String>,
+        /// Which image runs macOS: docker-osx, or dockur-macos (experimental) whose screen is a
+        /// web page on the port after the SSH port.
+        #[arg(long, value_enum, default_value_t = ProviderArg::DockerOsx)]
+        provider: ProviderArg,
     },
     Start {
         machine: String,
@@ -515,6 +519,21 @@ fn machine_rows(list: &Value) -> Vec<Vec<String>> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ProviderArg {
+    DockerOsx,
+    DockurMacos,
+}
+
+impl ProviderArg {
+    fn value(self) -> &'static str {
+        match self {
+            Self::DockerOsx => "docker_osx",
+            Self::DockurMacos => "dockur_macos",
+        }
+    }
+}
+
 fn print_machine_list(list: &Value) {
     let host = &list["host"];
     if host["ready"].as_bool() == Some(true) {
@@ -545,9 +564,14 @@ fn print_machine(view: &Value) {
         ("busy", text(&view["busyOperation"]).replace('_', " ")),
         ("template", text(&view["template"]["name"])),
         (
+            "provider",
+            text(&view["profile"]["provider"]).replace('_', " "),
+        ),
+        (
             "ssh",
             format!("127.0.0.1:{}", text(&view["profile"]["sshPort"])),
         ),
+        ("screen", text(&view["displayUrl"])),
         ("identity", text(&view["guest"]["ssh"]["trust"])),
         ("fingerprint", text(&view["guest"]["ssh"]["fingerprint"])),
         ("user", text(&view["guest"]["username"])),
@@ -588,6 +612,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             cores,
             port,
             from_template,
+            provider,
         }) => {
             let used = serde_json::to_value(e::list_machines(engine).await?)
                 .map_err(|error| error.to_string())?;
@@ -610,6 +635,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 "memoryGib": memory,
                 "cpuCores": cores,
                 "sshPort": port,
+                "provider": provider.value(),
             }))?;
             report(
                 json,

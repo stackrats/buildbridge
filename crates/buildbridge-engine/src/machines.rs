@@ -10,7 +10,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use buildbridge_docker_osx::{DEFAULT_MACHINE_ID, MacBuilderConfig, container_name};
+use buildbridge_docker_osx::{
+    DEFAULT_MACHINE_ID, MacBuilderConfig, MachineProvider, QmpEndpoint, container_name,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::Engine;
@@ -69,21 +71,33 @@ impl MachineRegistry {
             .ok_or_else(|| "This machine is no longer registered.".to_string())
     }
 
-    /// Rejects a profile whose forwarded SSH port is already published by another machine.
+    /// Rejects a profile that would publish a host port another machine already publishes:
+    /// its SSH port, or the screen port a dockur/macos machine serves after it.
     pub fn ensure_unique_ssh_port(
         &self,
         profile: &MacBuilderConfig,
         except_machine_id: Option<&str>,
     ) -> Result<(), String> {
+        let ports = profile.published_ports();
         let conflict = self.machines.iter().find(|machine| {
             Some(machine.id.as_str()) != except_machine_id
-                && machine.config.ssh_port == profile.ssh_port
+                && machine
+                    .config
+                    .published_ports()
+                    .iter()
+                    .any(|port| ports.contains(port))
         });
 
         match conflict {
             Some(machine) => Err(format!(
-                "SSH port {} is already used by {}. Choose a different port.",
-                profile.ssh_port, machine.config.name
+                "SSH port {} is already used by {}. Choose a different port{}.",
+                profile.ssh_port,
+                machine.config.name,
+                if ports.len() > 1 || machine.config.display_port().is_some() {
+                    "; a dockur/macos machine also uses the port after its SSH port for its screen"
+                } else {
+                    ""
+                }
             )),
             None => Ok(()),
         }
@@ -186,6 +200,11 @@ impl MachinePaths {
 
     pub fn qmp_socket(&self) -> PathBuf {
         self.qmp_dir().join(buildbridge_docker_osx::QMP_SOCKET_NAME)
+    }
+
+    /// How this machine's QEMU control socket is reached, which its provider decides.
+    pub fn qmp_endpoint(&self, provider: MachineProvider) -> QmpEndpoint {
+        QmpEndpoint::for_machine(provider, &self.qmp_dir(), &self.container_name)
     }
 
     /// Scratch for files handed to a privileged host command, such as the USB udev rule.

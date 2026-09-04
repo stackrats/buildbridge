@@ -43,8 +43,11 @@ pub(crate) async fn build_machine_list_view(app: &Engine) -> Result<MachineListV
         let host = buildbridge_docker_osx::probe_host();
         let mut summaries = Vec::with_capacity(entries.len());
         for (machine, paths, workspace_name, signing) in entries {
-            let runtime = buildbridge_docker_osx::status(&paths.container_name)
-                .map_err(|error| error.to_string())?;
+            let runtime = buildbridge_docker_osx::status_for(
+                &paths.container_name,
+                machine.config.provider,
+            )
+            .map_err(|error| error.to_string())?;
             // Signing belongs to the container it was imported into; a rebuilt container drops it.
             let signing = signing
                 .filter(|stored| runtime.container_id.as_deref() == Some(&stored.container_id));
@@ -136,8 +139,11 @@ pub(crate) async fn build_mac_builder_view(
         .and_then(|devices| devices.get(&paths.id).cloned())
         .unwrap_or_default();
     let (runtime, logs, guest, mut usb) = tokio::task::spawn_blocking(move || {
-        let runtime = buildbridge_docker_osx::status(&probe_paths.container_name)
-            .map_err(|error| error.to_string())?;
+        let runtime = buildbridge_docker_osx::status_for(
+            &probe_paths.container_name,
+            probe_profile.provider,
+        )
+        .map_err(|error| error.to_string())?;
         let logs = buildbridge_docker_osx::recent_logs(&probe_paths.container_name)
             .map_err(|error| error.to_string())?;
         let guest = build_mac_guest_view(
@@ -149,7 +155,7 @@ pub(crate) async fn build_mac_builder_view(
         )?;
         let usb = buildbridge_docker_osx::machine_usb_status(
             &probe_paths.container_name,
-            &probe_paths.qmp_socket(),
+            &probe_paths.qmp_endpoint(probe_profile.provider),
             runtime.state,
         );
 
@@ -207,6 +213,7 @@ pub(crate) async fn build_mac_builder_view(
     Ok(MacBuilderView {
         machine_id: paths.id.clone(),
         template: template_ref_for(app, &paths.id),
+        display_url: profile.display_url(),
         profile,
         busy_operation,
         runtime,
@@ -285,6 +292,12 @@ pub(crate) async fn ensure_mac_builder_profile_can_change(
     stored: &MacBuilderConfig,
     profile: &MacBuilderConfig,
 ) -> Result<(), String> {
+    if stored.provider != profile.provider {
+        return Err(
+            "The provider is fixed when a machine is created; make a new machine to try another one."
+                .to_string(),
+        );
+    }
     let unchanged_hardware = stored.macos_release == profile.macos_release
         && stored.memory_gib == profile.memory_gib
         && stored.cpu_cores == profile.cpu_cores

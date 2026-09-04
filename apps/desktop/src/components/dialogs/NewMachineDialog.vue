@@ -33,6 +33,7 @@ function blank(): MacBuilderConfig {
         memoryGib: 8,
         cpuCores: 4,
         sshPort: nextPort.value,
+        provider: 'docker_osx',
     };
 }
 
@@ -52,6 +53,16 @@ const startOptions = computed(() => [
         label: `${template.name} · macOS ${template.macosVersion ?? '?'} · Xcode ${template.xcodeVersion ?? '?'}`,
     })),
 ]);
+
+// A dockur/macos machine installs macOS itself; a template is a Docker-OSX disk.
+watch(
+    () => profile.value.provider,
+    (provider) => {
+        if (provider === 'dockur_macos') {
+            startFrom.value = '';
+        }
+    },
+);
 
 watch(open, (value) => {
     if (value) {
@@ -92,19 +103,20 @@ async function create(): Promise<void> {
     <Modal v-model:open="open" title="New macOS machine">
         <form class="space-y-3" @submit.prevent="create">
             <p class="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                A machine is a persistent Docker-OSX guest on this host. Install macOS and Xcode in
-                it once, then reuse it for every project you build.
+                A machine is a persistent macOS guest on this host, run by Docker-OSX or by
+                dockur/macos. Install macOS and Xcode in it once, then reuse it for every project
+                you build.
             </p>
             <Callout
                 v-if="!hostReady"
                 tone="warn"
-                title="This host is not ready for Docker-OSX yet"
+                title="This host is not ready for a macOS machine yet"
             >
                 You can still create the machine now; its timeline shows what to fix before it can
                 start.
             </Callout>
             <Field
-                v-if="readyTemplates.length"
+                v-if="readyTemplates.length && profile.provider !== 'dockur_macos'"
                 label="Start from"
                 :hint="
                     startFrom
@@ -115,6 +127,16 @@ async function create(): Promise<void> {
                 <Select v-model="startFrom" :options="startOptions" />
             </Field>
             <MachineProfileForm v-model="profile" />
+            <Callout
+                v-if="profile.provider === 'dockur_macos'"
+                tone="neutral"
+                title="dockur/macos is experimental here"
+            >
+                Its screen opens as a web page from the machine's Install step, the image forwards
+                the guest's SSH port to this host, and a phone attaches through the same USB
+                controller. Templates, disk migration and the console window are Docker-OSX only for
+                now.
+            </Callout>
             <Callout v-if="error" tone="danger">{{ error }}</Callout>
             <div class="flex justify-end gap-2">
                 <Button variant="outline" size="sm" :disabled="saving" @click="open = false">

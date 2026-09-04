@@ -978,6 +978,13 @@ export function useMachinesStore() {
             );
             return result.inspector;
         },
+        /** Opens the machine's screen when its provider serves one as a web page. */
+        openMachineScreen: async (id: string): Promise<void> => {
+            const view = session(id).view;
+            if (view?.displayUrl) {
+                await useBackend().openMachineScreen(view.displayUrl, view.profile.name);
+            }
+        },
         clearDeviceRun: (id: string) =>
             runOperation(id, 'clear-device-run', () => useBackend().clearAppleDeviceRun(id), {
                 finished: 'Last device run cleared.',

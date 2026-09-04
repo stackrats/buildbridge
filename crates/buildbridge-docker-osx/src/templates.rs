@@ -8,6 +8,7 @@
 //! therefore never modified while a clone exists, and macOS is never shipped anywhere: the
 //! template is the user's own installation, on the user's own host.
 
+use crate::qmp::QmpEndpoint;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -183,7 +184,7 @@ pub(crate) fn parse_convert_progress(output: &str) -> Option<u8> {
 /// could pick up. Returns the template's size on disk.
 pub fn save_template<F>(
     container_name: &str,
-    qmp_socket: &Path,
+    qmp_endpoint: &QmpEndpoint,
     source: &MachineDisk,
     template: &MachineTemplateFiles,
     mut on_progress: F,
@@ -216,7 +217,7 @@ where
             "Asking macOS to shut down so the disk is copied at rest",
             None,
         );
-        shut_down_guest(container_name, qmp_socket, &mut |detail| {
+        shut_down_guest(container_name, qmp_endpoint, &mut |detail| {
             report(TemplateSavePhase::ShuttingDown, detail, None)
         })?;
     }

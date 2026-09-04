@@ -20,10 +20,11 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::qmp::QmpClient;
+use crate::qmp::QmpEndpoint;
 use crate::{
-    ContainerState, DOCKER_IMAGE, LaunchOptions, MacBuilderConfig, ProviderError, RuntimeStatus,
-    TrackedCommand, clean_output, create_container, inspect_container, probe_host, run_docker,
-    status, stop,
+    ContainerState, DOCKER_IMAGE, LaunchOptions, MacBuilderConfig, MachineProvider, ProviderError,
+    RuntimeStatus, TrackedCommand, clean_output, create_container, inspect_container, probe_host,
+    probe_host_for, run_docker, status, status_for, stop,
 };
 use ts_rs::TS;
 
@@ -296,11 +297,15 @@ pub(crate) fn restrict_directory(path: &Path) -> Result<(), ProviderError> {
 }
 
 /// Reads the layout back from `docker inspect`'s `HostConfig`.
-/// Whether the container's `EXTRA` carries the phone controller, read back so the interface
-/// knows which containers predate it.
+/// Whether the container's QEMU arguments (`EXTRA` for Docker-OSX, `ARGUMENTS` for dockur/macos)
+/// carry the phone controller, read back so the interface knows which containers predate it.
 pub(crate) fn phone_controller_from_env(env: &[String]) -> bool {
     env.iter()
-        .find_map(|entry| entry.strip_prefix("EXTRA="))
+        .find_map(|entry| {
+            entry
+                .strip_prefix("EXTRA=")
+                .or_else(|| entry.strip_prefix("ARGUMENTS="))
+        })
         .is_some_and(|extra| {
             extra
                 .split_whitespace()
@@ -340,12 +345,13 @@ pub(crate) fn container_layout(
     Ok(ContainerLayout {
         phone_controller: phone_controller_from_env(&env),
         from_template: bound(crate::templates::CONTAINER_TEMPLATE_DIR),
-        disk_on_host: bound(CONTAINER_DISK_DIR),
+        disk_on_host: bound(CONTAINER_DISK_DIR) || bound(crate::dockur::STORAGE_CONTAINER_DIR),
         usb_access: rules
             .iter()
             .any(|rule| rule == &format!("c {}:* rwm", crate::usb::USB_BUS_MAJOR))
             && bound("/dev/bus/usb"),
-        control_socket: bound(crate::qmp::QMP_CONTAINER_DIR),
+        control_socket: bound(crate::qmp::QMP_CONTAINER_DIR)
+            || env.iter().any(|entry| entry.starts_with("QMP=")),
     })
 }
 
@@ -501,6 +507,11 @@ where
     F: FnMut(DiskMigrationProgress),
 {
     config.validate()?;
+    if config.provider == MachineProvider::DockurMacos {
+        return Err(ProviderError::UsbPassthrough(
+            "a dockur/macos machine keeps its disk on this host from its first start; there is nothing to migrate".to_string(),
+        ));
+    }
     let disk = MachineDisk::for_launch(options)?;
     validate_bind_path(options.qmp_dir, "control socket directory")?;
     let started = Instant::now();
@@ -662,7 +673,7 @@ where
             detail: detail.to_string(),
         });
     };
-    let prerequisites = probe_host();
+    let prerequisites = probe_host_for(config.provider);
     if !prerequisites.ready {
         return Err(ProviderError::Prerequisites(prerequisites.issues.join(" ")));
     }
@@ -682,7 +693,7 @@ where
         );
         shut_down_guest(
             container_name,
-            &options.qmp_dir.join(crate::QMP_SOCKET_NAME),
+            &QmpEndpoint::for_machine(config.provider, options.qmp_dir, container_name),
             &mut |detail| report(ContainerRebuildPhase::ShuttingDown, detail),
         )?;
 
@@ -713,7 +724,7 @@ where
     run_docker("start", &["start".to_string(), container_name.to_string()])?;
     report(ContainerRebuildPhase::Completed, "The machine is starting");
 
-    status(container_name)
+    status_for(container_name, config.provider)
 }
 
 /// Asks the guest to power down and waits for QEMU to exit, then stops the container whatever
@@ -721,10 +732,10 @@ where
 /// rebuild, and `stop` is a no-op once the container has already exited.
 pub(crate) fn shut_down_guest(
     container_name: &str,
-    qmp_socket: &Path,
+    qmp_endpoint: &QmpEndpoint,
     on_wait: &mut dyn FnMut(&str),
 ) -> Result<(), ProviderError> {
-    if let Ok(mut client) = QmpClient::connect(qmp_socket)
+    if let Ok(mut client) = QmpClient::connect(qmp_endpoint)
         && client.power_down().is_ok()
     {
         let deadline = Instant::now() + GUEST_SHUTDOWN_TIMEOUT;
@@ -746,11 +757,17 @@ pub(crate) fn shut_down_guest(
     stop(container_name).map(|_| ())
 }
 
-/// Deletes the disk directory. Callers confirm first; this is the macOS installation.
+/// Deletes the disk directory. Callers confirm first; this is the macOS installation. Files a
+/// dockur/macos container created as root are not this user's to unlink, so a refusal is
+/// retried once after a throwaway container has emptied the directory.
 pub fn remove_machine_disk(disk: &MachineDisk) -> Result<(), ProviderError> {
     match fs::remove_dir_all(disk.dir()) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            crate::dockur::empty_storage_with_container(disk.dir())?;
+            fs::remove_dir_all(disk.dir()).map_err(|error| ProviderError::Identity(error.to_string()))
+        }
         Err(error) => Err(ProviderError::Identity(error.to_string())),
     }
 }

@@ -13,6 +13,10 @@ const { session, step } = defineProps<{ session: MachineSession; step: JourneySt
 const machines = useMachinesStore();
 
 const prerequisites = computed(() => session.view!.runtime.prerequisites);
+const provider = computed(() => session.view!.profile.provider);
+const providerLabel = computed(() =>
+    provider.value === 'dockur_macos' ? 'dockur/macos' : 'Docker-OSX',
+);
 
 const checks = computed(() => [
     {
@@ -20,7 +24,7 @@ const checks = computed(() => [
         ok: prerequisites.value.supportedHost,
         detail: prerequisites.value.supportedHost
             ? 'Supported'
-            : 'Docker-OSX needs x86_64 Linux with KVM',
+            : `${providerLabel.value} needs x86_64 Linux with KVM`,
     },
     {
         label: 'Docker engine',
@@ -34,13 +38,21 @@ const checks = computed(() => [
             ? '/dev/kvm is readable and writable'
             : 'Grant read/write access to /dev/kvm',
     },
-    {
-        label: 'X11 display',
-        ok: prerequisites.value.displayAccess,
-        detail: prerequisites.value.display
-            ? `DISPLAY ${prerequisites.value.display}`
-            : 'Needed for the first-boot macOS console window',
-    },
+    provider.value === 'dockur_macos'
+        ? {
+              label: 'Network tunnel device',
+              ok: prerequisites.value.tunAccess,
+              detail: prerequisites.value.tunAccess
+                  ? '/dev/net/tun is present'
+                  : 'dockur/macos needs /dev/net/tun; load the tun module on this host',
+          }
+        : {
+              label: 'X11 display',
+              ok: prerequisites.value.displayAccess,
+              detail: prerequisites.value.display
+                  ? `DISPLAY ${prerequisites.value.display}`
+                  : 'Needed for the first-boot macOS console window',
+          },
 ]);
 </script>
 

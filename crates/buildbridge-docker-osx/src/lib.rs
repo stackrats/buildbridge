@@ -21,6 +21,7 @@ mod build_log;
 mod device_run;
 mod disk;
 mod docker;
+mod dockur;
 mod optimizations;
 mod podfile;
 mod process;
@@ -36,6 +37,7 @@ mod xcode;
 pub use archive::*;
 use build_log::*;
 pub use docker::*;
+pub use dockur::DOCKUR_IMAGE;
 pub use optimizations::*;
 pub use podfile::*;
 pub use process::*;
@@ -62,7 +64,7 @@ pub use disk::{
     required_free_bytes, validate_bind_path,
 };
 use qmp::USB_PHONE_CONTROLLER;
-pub use qmp::{QMP_CONTAINER_DIR, QMP_SOCKET_NAME, guest_reset_for_macos};
+pub use qmp::{QMP_CONTAINER_DIR, QMP_SOCKET_NAME, QmpEndpoint, guest_reset_for_macos};
 use ts_rs::TS;
 pub use usb::{
     AttachedUsbDevice, ContainerUsbOptions, HostUsbDevice, HostUsbStatus, MachineUsbStatus,
@@ -130,6 +132,39 @@ const PORTABLE_RUBY_DARWIN_X64_SHA256: &str =
     "99bec6d4440dc4f114754f7b9e18d79258a6dacc4089a9a50638e22a1e8665d0";
 const COCOAPODS_VERSION: &str = "1.16.2";
 
+/// Which image runs a machine. Both run macOS under QEMU with KVM in a container the engine
+/// creates with a fixed argv; they differ in how the disk, the screen and the control socket
+/// are reached. Fixed when a machine is created: its disk directory's layout belongs to the
+/// provider that made it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineProvider {
+    /// sickcodes/Docker-OSX: a window on this host's X display, the disk bound from this host
+    /// as `IMAGE_PATH`, QEMU as uid 1000 with a control socket in a bound directory.
+    #[default]
+    DockerOsx,
+    /// dockur/macos: the screen served as a web page, everything under one storage directory,
+    /// QEMU as root with a control socket reached through `docker exec`.
+    DockurMacos,
+}
+
+impl MachineProvider {
+    pub fn image(self) -> &'static str {
+        match self {
+            Self::DockerOsx => DOCKER_IMAGE,
+            Self::DockurMacos => DOCKUR_IMAGE,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DockerOsx => "Docker-OSX",
+            Self::DockurMacos => "dockur/macos",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "snake_case")]
@@ -172,6 +207,9 @@ pub struct MacBuilderConfig {
     pub memory_gib: u8,
     pub cpu_cores: u8,
     pub ssh_port: u16,
+    /// Which image runs this machine. Fixed once the machine exists.
+    #[serde(default)]
+    pub provider: MachineProvider,
 }
 
 impl Default for MacBuilderConfig {
@@ -182,6 +220,7 @@ impl Default for MacBuilderConfig {
             memory_gib: 8,
             cpu_cores: 4,
             ssh_port: 50_922,
+            provider: MachineProvider::DockerOsx,
         }
     }
 }
@@ -214,7 +253,34 @@ impl MacBuilderConfig {
             ));
         }
 
+        if self.provider == MachineProvider::DockurMacos && self.display_port().is_none() {
+            return Err(ProviderError::InvalidConfig(
+                "a dockur/macos machine serves its screen on the port after its SSH port, so the SSH port must be below 65535".to_string(),
+            ));
+        }
+
         Ok(())
+    }
+
+    /// The loopback port the machine's screen is served on, for a provider that shows it as a
+    /// web page rather than in a window on this host's display: the port after the SSH port.
+    pub fn display_port(&self) -> Option<u16> {
+        match self.provider {
+            MachineProvider::DockerOsx => None,
+            MachineProvider::DockurMacos => self.ssh_port.checked_add(1),
+        }
+    }
+
+    pub fn display_url(&self) -> Option<String> {
+        self.display_port()
+            .map(|port| format!("http://127.0.0.1:{port}/"))
+    }
+
+    /// Every host port the machine's container publishes.
+    pub fn published_ports(&self) -> Vec<u16> {
+        let mut ports = vec![self.ssh_port];
+        ports.extend(self.display_port());
+        ports
     }
 }
 
@@ -227,6 +293,8 @@ pub struct HostPrerequisites {
     pub docker_daemon: bool,
     pub docker_version: Option<String>,
     pub kvm_access: bool,
+    /// The tun device dockur/macos needs for its network; Docker-OSX does not use it.
+    pub tun_access: bool,
     pub display_access: bool,
     pub display: Option<String>,
     pub ready: bool,
@@ -1055,7 +1123,8 @@ mod tests {
                 "macosRelease": "sequoia",
                 "memoryGib": 8,
                 "cpuCores": 4,
-                "sshPort": 50922
+                "sshPort": 50922,
+                "provider": "docker_osx"
             })
         );
     }

@@ -47,7 +47,11 @@ async function save(): Promise<void> {
                 To change them, stop the machine and discard its container from the machine menu;
                 that deletes its macOS disk.
             </Callout>
-            <MachineProfileForm v-model="profile" :hardware-locked="hardwareLocked" />
+            <MachineProfileForm
+                v-model="profile"
+                :hardware-locked="hardwareLocked"
+                provider-locked
+            />
             <Callout v-if="machines.session(view.machineId).error" tone="danger">
                 {{ machines.session(view.machineId).error }}
             </Callout>

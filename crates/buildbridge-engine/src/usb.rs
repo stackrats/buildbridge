@@ -203,7 +203,7 @@ pub async fn attach_usb_device(
     );
     let guard = begin_machine_operation(app, &machine_id, "attaching_usb")?;
     let container_name = paths.container_name.clone();
-    let socket = paths.qmp_socket();
+    let socket = paths.qmp_endpoint(profile.provider);
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
@@ -337,9 +337,12 @@ pub(crate) async fn settle_attached_phone(
 }
 pub async fn detach_usb_device(app: &Engine, machine_id: String) -> Result<MacBuilderView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
-    machines::load_registry(app)?.find(&machine_id)?;
+    let provider = machines::load_registry(app)?
+        .find(&machine_id)?
+        .config
+        .provider;
     let guard = begin_machine_operation(app, &machine_id, "detaching_usb")?;
-    let socket = paths.qmp_socket();
+    let socket = paths.qmp_endpoint(provider);
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {

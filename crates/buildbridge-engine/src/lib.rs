@@ -15,7 +15,8 @@ pub use buildbridge_docker_osx::{
     AppleArchiveArtifact, AppleArchiveProgress, AppleArchiveResult, AppleDeviceRunProgress,
     AppleDeviceRunResult, AppleProjectProgress, AppleSmokeBuildResult, AppleWorkspaceSyncResult,
     ContainerState, GuestDiagnostics, GuestEnvFiles, GuestOptimization, GuestSshStatus,
-    GuestTrustState, HostPrerequisites, MacBuilderConfig, OperationScope, PodfileLockChanges,
+    GuestTrustState, HostPrerequisites, MacBuilderConfig, MachineProvider, OperationScope,
+    PodfileLockChanges,
     RuntimeStatus, SigningProvisioningProgress, SigningProvisioningResult, UnsignedBuildTarget,
     XcodeImportProgress,
 };
@@ -610,6 +611,8 @@ pub struct MacGuestAccessView {
 pub struct MacBuilderView {
     machine_id: String,
     profile: MacBuilderConfig,
+    /// Where the machine's screen is served, when its provider shows it as a web page.
+    display_url: Option<String>,
     busy_operation: Option<String>,
     runtime: RuntimeStatus,
     /// The signing kit this machine will provision, resolved through its attachment.

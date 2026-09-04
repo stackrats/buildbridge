@@ -4,7 +4,7 @@
 
 ### Build and sign iOS apps locally on a macOS virtual machine from Linux.
 
-BuildBridge creates a persistent macOS build machine on your Linux host with Docker, QEMU, and KVM. Its desktop app handles setup, project sync, Xcode builds, signing, and IPA export. An optional control plane queues builds and shows their progress, logs, and artifacts.
+BuildBridge creates a persistent macOS build machine on your Linux host with Docker, QEMU, and KVM, run by Docker-OSX or, experimentally, by dockur/macos. Its desktop app handles setup, project sync, Xcode builds, signing, and IPA export. An optional control plane queues builds and shows their progress, logs, and artifacts.
 
 [Features](#features) · [How it works](#how-it-works) · [Requirements](#requirements) · [Development](#development)
 

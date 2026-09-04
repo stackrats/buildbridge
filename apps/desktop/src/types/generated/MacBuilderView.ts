@@ -12,7 +12,11 @@ import type { SigningKitSummary } from "./SigningKitSummary";
 import type { SigningProvisioningResult } from "./SigningProvisioningResult";
 import type { StoredAppleWorkspace } from "./StoredAppleWorkspace";
 
-export type MacBuilderView = { machineId: string, profile: MacBuilderConfig, busyOperation: string | null, runtime: RuntimeStatus, 
+export type MacBuilderView = { machineId: string, profile: MacBuilderConfig, 
+/**
+ * Where the machine's screen is served, when its provider shows it as a web page.
+ */
+displayUrl: string | null, busyOperation: string | null, runtime: RuntimeStatus, 
 /**
  * The signing kit this machine will provision, resolved through its attachment.
  */

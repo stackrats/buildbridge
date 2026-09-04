@@ -149,7 +149,7 @@ The Rust workspace is split by responsibility:
 
 - `buildbridge-contract` contains versioned wire DTOs and enums shared by clients.
 - `buildbridge-runner` contains control-plane transport and typed, shell-free execution logic without a Tauri dependency.
-- `buildbridge-docker-osx` contains Docker-OSX host probing, lifecycle, guest trust, guest diagnostics, and every build that runs in the guest.
+- `buildbridge-docker-osx` contains both providers' host probing and container lifecycle (Docker-OSX, and dockur/macos since decision 47), guest trust, guest diagnostics, and every build that runs in the guest.
 - `buildbridge-engine` contains everything above them — the machine registry, per-machine records, the vault, the Apple API, templates, the runner — behind one `Engine` value and an event sink.
 - `apps/desktop/src-tauri` adapts the engine to a window and a tray; `apps/cli` adapts it to a terminal.
 
@@ -966,6 +966,28 @@ The following decisions should be treated as settled until this document is deli
     Reverb channel that carries `build.queued`). A change to the wire shape lands in the contract
     crate first, with its tests, and any server follows; a JSON Schema published from the crate
     is the intended way to hold a server written in another language to it.
+47. A machine names its provider, and dockur/macos is the second one. Docker-OSX has been
+    quiet since late 2025 while dockur/macos ships monthly, and its layout matches what
+    BuildBridge bolted onto Docker-OSX by hand: every file of a machine under one storage
+    directory, a QMP socket and extra QEMU arguments through environment variables, a
+    per-machine identity it generates itself, and a screen served as a web page rather than a
+    window on the host's X display, which a headless host and the command line can use. So
+    `MacBuilderConfig` carries a `provider`, fixed at creation because the disk directory's
+    layout belongs to the provider that made it, and the lifecycle branches on it: the
+    `dockur` module of the provider crate builds the container (`/storage` bound from the
+    machine's disk directory, both published ports on loopback, the tun device and
+    `NET_ADMIN` its network needs, `DISK_FMT=qcow2`, the same USB device rule and phone
+    controller), refuses to start when the machine's memory is not actually free on the host
+    because the image would, and reaches QEMU's control socket through `docker exec` and
+    netcat because QEMU is root in that image and its socket is not the host user's to open;
+    `QmpEndpoint` names the two routes and every QMP caller takes one. Everything spoken over
+    SSH to the guest is untouched. Templates, disk migration and the console window stay
+    Docker-OSX only: a dockur/macos clone would share its template's generated identity, and
+    its disk is on the host from the first start. The screen's port is the one after the SSH
+    port, so the port check covers both. The provider crate keeps its name for now; it is the
+    macOS-machine crate, and renaming it is churn without a third provider. Not yet run end to
+    end on this host, whose memory the existing machine holds; the spike stops at the image's
+    memory refusal, which the engine now makes first, with the numbers.
 
 ### Credential loss and recovery
 

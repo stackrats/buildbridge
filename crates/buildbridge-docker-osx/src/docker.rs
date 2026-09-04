@@ -3,6 +3,12 @@
 use super::*;
 
 pub fn probe_host() -> HostPrerequisites {
+    probe_host_for(MachineProvider::DockerOsx)
+}
+
+/// The host checks one provider needs: Docker-OSX shows its screen in a window on this host's
+/// X display, dockur/macos serves it as a web page but needs the tun device for its network.
+pub fn probe_host_for(provider: MachineProvider) -> HostPrerequisites {
     let supported_host = cfg!(target_os = "linux") && std::env::consts::ARCH == "x86_64";
     let docker_cli_output = Command::new("docker").arg("--version").output();
     let docker_cli = docker_cli_output.is_ok();
@@ -24,10 +30,14 @@ pub fn probe_host() -> HostPrerequisites {
         .ok()
         .filter(|value| !value.trim().is_empty());
     let display_access = display.is_some() && std::path::Path::new("/tmp/.X11-unix").is_dir();
+    let tun_access = std::path::Path::new("/dev/net/tun").exists();
     let mut issues = Vec::new();
 
     if !supported_host {
-        issues.push("Docker-OSX currently requires an x86_64 Linux host with KVM.".to_string());
+        issues.push(format!(
+            "{} currently requires an x86_64 Linux host with KVM.",
+            provider.label()
+        ));
     }
     if !docker_cli {
         issues.push("Install the Docker CLI before creating a macOS builder.".to_string());
@@ -37,8 +47,14 @@ pub fn probe_host() -> HostPrerequisites {
     if !kvm_access {
         issues.push("Grant this user read/write access to /dev/kvm.".to_string());
     }
-    if !display_access {
+    if provider == MachineProvider::DockerOsx && !display_access {
         issues.push("An X11 display is required for the first-boot macOS console.".to_string());
+    }
+    if provider == MachineProvider::DockurMacos && !tun_access {
+        issues.push(
+            "dockur/macos needs /dev/net/tun for its network; load the tun module on this host."
+                .to_string(),
+        );
     }
 
     HostPrerequisites {
@@ -47,6 +63,7 @@ pub fn probe_host() -> HostPrerequisites {
         docker_daemon,
         docker_version,
         kvm_access,
+        tun_access,
         display_access,
         display,
         ready: issues.is_empty(),
@@ -56,7 +73,15 @@ pub fn probe_host() -> HostPrerequisites {
 
 /// Reports the host prerequisites and the state of one managed container.
 pub fn status(container_name: &str) -> Result<RuntimeStatus, ProviderError> {
-    let prerequisites = probe_host();
+    status_for(container_name, MachineProvider::DockerOsx)
+}
+
+/// The same, with the host checks of the provider that runs this machine.
+pub fn status_for(
+    container_name: &str,
+    provider: MachineProvider,
+) -> Result<RuntimeStatus, ProviderError> {
+    let prerequisites = probe_host_for(provider);
 
     if !prerequisites.docker_daemon {
         return Ok(RuntimeStatus {
@@ -91,6 +116,9 @@ where
     F: FnMut(LaunchProgress),
 {
     config.validate()?;
+    if config.provider == MachineProvider::DockurMacos {
+        return dockur::launch(container_name, config, options, on_progress);
+    }
     let disk = MachineDisk::for_launch(options)?;
     validate_bind_path(options.qmp_dir, "control socket directory")?;
     let started = Instant::now();
@@ -115,7 +143,7 @@ where
             LaunchPhase::PullingImage,
             "Pulling the Docker-OSX image; the first pull downloads several gigabytes",
         );
-        ensure_image()?;
+        ensure_image(DOCKER_IMAGE)?;
         report(
             LaunchPhase::GeneratingIdentity,
             "Generating a stable machine identity",
@@ -152,7 +180,7 @@ where
     }
 
     report(LaunchPhase::Completed, "The macOS machine is running");
-    status(container_name)
+    status_for(container_name, config.provider)
 }
 
 /// Stops the container gracefully while preserving it and its macOS disk.
@@ -295,9 +323,9 @@ pub(crate) fn is_missing_container_error(message: &str) -> bool {
     normalized.contains("no such object") || normalized.contains("no such container")
 }
 
-pub(crate) fn ensure_image() -> Result<(), ProviderError> {
+pub(crate) fn ensure_image(image: &str) -> Result<(), ProviderError> {
     let exists = Command::new("docker")
-        .args(["image", "inspect", DOCKER_IMAGE])
+        .args(["image", "inspect", image])
         .output()
         .map_err(|error| ProviderError::DockerUnavailable(error.to_string()))?
         .status
@@ -306,7 +334,7 @@ pub(crate) fn ensure_image() -> Result<(), ProviderError> {
     if !exists {
         run_docker(
             "image pull",
-            &["pull".to_string(), DOCKER_IMAGE.to_string()],
+            &["pull".to_string(), image.to_string()],
         )?;
     }
 
@@ -393,6 +421,9 @@ pub(crate) fn create_container(
     options: &LaunchOptions<'_>,
     disk: &MachineDisk,
 ) -> Result<(), ProviderError> {
+    if config.provider == MachineProvider::DockurMacos {
+        return dockur::create_container(container_name, config, options);
+    }
     validate_identity_path(options.identity_path)?;
     let args = create_args(
         container_name,

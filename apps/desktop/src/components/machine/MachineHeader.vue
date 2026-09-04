@@ -70,6 +70,9 @@ const templateName = ref('');
 // A template carries the pinned identity and the access key, so both must exist; a machine
 // keeping its disk inside the container has nothing on this host to copy.
 const templateBlocker = computed(() => {
+    if (view.value.profile.provider === 'dockur_macos') {
+        return 'Templates are saved from Docker-OSX machines for now';
+    }
     if (!view.value.guest.ssh.pinnedFingerprint) {
         return 'Pin the guest identity first';
     }
@@ -151,7 +154,10 @@ const menuItemClass =
                     <Spinner size="h-3 w-3" tone="text-amber-700 dark:text-amber-400" />
                     {{ busyLabel }}
                 </Badge>
-                <Badge v-else :tone="machineStateBadge[view.runtime.state]">
+                <Badge v-if="view.profile.provider === 'dockur_macos'" tone="warn">
+                    dockur/macos · experimental
+                </Badge>
+                <Badge v-if="!busyLabel" :tone="machineStateBadge[view.runtime.state]">
                     {{ machineStateLabel[view.runtime.state] }}
                 </Badge>
             </div>

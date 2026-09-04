@@ -12,6 +12,12 @@ pub async fn create_machine(
     profile.validate().map_err(|error| error.to_string())?;
     let template_id = match template_id.map(|id| id.trim().to_string()) {
         Some(id) if !id.is_empty() => {
+            if profile.provider == MachineProvider::DockurMacos {
+                return Err(
+                    "Templates clone Docker-OSX disks; a dockur/macos machine installs macOS itself."
+                        .to_string(),
+                );
+            }
             let template = load_template(app, &id)?
                 .ok_or_else(|| "That template is no longer stored.".to_string())?;
             let files = buildbridge_docker_osx::MachineTemplateFiles::new(

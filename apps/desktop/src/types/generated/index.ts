@@ -106,6 +106,7 @@ export type { MacGuestAccessView } from './MacGuestAccessView';
 export type { MacOsRelease } from './MacOsRelease';
 export type { MachineChangedEvent } from './MachineChangedEvent';
 export type { MachineListView } from './MachineListView';
+export type { MachineProvider } from './MachineProvider';
 export type { MachineRegistry } from './MachineRegistry';
 export type { MachineReport } from './MachineReport';
 export type { MachineSummary } from './MachineSummary';

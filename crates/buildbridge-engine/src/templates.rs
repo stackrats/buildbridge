@@ -267,6 +267,12 @@ pub async fn save_machine_template(
     let paths = MachinePaths::resolve(app, &machine_id)?;
     let registry = machines::load_registry(app)?;
     let machine = registry.find(&machine_id)?.clone();
+    if machine.config.provider == MachineProvider::DockurMacos {
+        return Err(
+            "Templates are saved from Docker-OSX machines for now; a dockur/macos machine keeps its identity inside its storage directory, which a clone must not share."
+                .to_string(),
+        );
+    }
     if !paths.known_hosts().is_file() {
         return Err(
             "Pin the guest identity first; a template carries it so clones need no comparison."
@@ -317,7 +323,7 @@ pub async fn save_machine_template(
 
     let guard = begin_machine_operation(app, &machine_id, "saving_template")?;
     let container_name = paths.container_name.clone();
-    let qmp_socket = paths.qmp_socket();
+    let qmp_socket = paths.qmp_endpoint(machine.config.provider);
     let files_dir = template_paths.files_dir();
     let event_app = app.clone();
     let event_machine_id = machine_id.clone();

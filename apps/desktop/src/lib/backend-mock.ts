@@ -119,6 +119,7 @@ const hostReady: T.HostPrerequisites = {
     dockerDaemon: true,
     dockerVersion: 'Docker version 28.3.2, build 578ccf6',
     kvmAccess: true,
+    tunAccess: true,
     displayAccess: true,
     display: ':1',
     ready: true,
@@ -174,6 +175,7 @@ function readyMachine(): MockMachine {
             memoryGib: 16,
             cpuCores: 8,
             sshPort: 50922,
+            provider: 'docker_osx',
         },
         createdAt: 1_756_700_000,
         state: 'running',
@@ -290,6 +292,7 @@ function freshMachine(): MockMachine {
             memoryGib: 8,
             cpuCores: 4,
             sshPort: 50923,
+            provider: 'docker_osx',
         },
         createdAt: Math.floor(Date.now() / 1000) - 600,
         state: 'missing',
@@ -534,6 +537,10 @@ export function createMockBackend(): Backend {
                 ? { id: machine.templateId, name: templateFor(machine)?.name ?? machine.templateId }
                 : null,
             profile: { ...machine.config },
+            displayUrl:
+                machine.config.provider === 'dockur_macos'
+                    ? `http://127.0.0.1:${machine.config.sshPort + 1}/`
+                    : null,
             busyOperation: machine.busy,
             runtime: {
                 prerequisites: hostReady,
@@ -1183,6 +1190,9 @@ export function createMockBackend(): Backend {
                     },
                 };
             });
+        },
+        async openMachineScreen(url) {
+            window.open(url, '_blank', 'noopener');
         },
         async openDeveloperTools() {
             // The browser preview already has its own developer tools.
