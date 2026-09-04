@@ -28,7 +28,10 @@ export type StepStatus = 'done' | 'active' | 'running' | 'pending' | 'failed';
 export type StepKind = 'automatic' | 'manual' | 'assisted';
 
 /** The two halves of the journey: prepare a machine once, then build a project on it. */
-export type StepPhase = 'setup' | 'build';
+// A device run is its own section rather than the tail of the build: it is optional, it needs
+// hardware on the desk, and counting it with the required steps made the journey look unfinished
+// on a machine that is doing exactly what was asked of it.
+export type StepPhase = 'setup' | 'build' | 'device';
 
 export interface Step<Id extends string> {
     id: Id;
@@ -76,6 +79,7 @@ export type JourneyStep = Step<JourneyStepId>;
 export const phaseLabel: Record<StepPhase, string> = {
     setup: 'Machine setup',
     build: 'Project build',
+    device: 'On a real device',
 };
 
 export const stepKindLabel: Record<StepKind, string> = {
@@ -488,7 +492,7 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
     const run = view.deviceRun;
     steps.push({
         id: 'run-device',
-        phase: 'build',
+        phase: 'device',
         title: 'Run on the device',
         kind: 'assisted',
         optional: true,
@@ -668,7 +672,7 @@ export function summarizeJourney(
         },
         {
             id: 'run-device',
-            phase: 'build',
+            phase: 'device',
             title: 'Run on the device',
             kind: 'assisted',
             done: summary.deviceRunRetained,
@@ -731,6 +735,15 @@ export function completedCount<Id extends string>(steps: Step<Id>[]): number {
     return steps.filter((step) => step.status === 'done').length;
 }
 
+/**
+ * The steps the headline count is about: the ones a finished machine has to have done. An
+ * optional step left undone is not an unfinished journey, so it is counted in its own section
+ * and nowhere else.
+ */
+export function requiredSteps<Id extends string>(steps: Step<Id>[]): Step<Id>[] {
+    return steps.filter((step) => !step.optional);
+}
+
 export interface PhaseGroup<Id extends string> {
     phase: StepPhase;
     label: string;
@@ -742,7 +755,7 @@ export interface PhaseGroup<Id extends string> {
 
 /** The journey split into its phases, in order, skipping any phase with no steps. */
 export function groupByPhase<Id extends string>(steps: Step<Id>[]): PhaseGroup<Id>[] {
-    const phases: StepPhase[] = ['setup', 'build'];
+    const phases: StepPhase[] = ['setup', 'build', 'device'];
     return phases
         .map((phase) => {
             const own = steps.filter((step) => step.phase === phase);

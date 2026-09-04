@@ -8,6 +8,7 @@ import { computed, nextTick, ref, watch } from 'vue';
 import { formatElapsed } from '../../lib/format';
 import {
     completedCount,
+    requiredSteps,
     focusStep,
     groupByPhase,
     stepKindDescription,
@@ -39,7 +40,9 @@ const {
 }>();
 
 const groups = computed(() => groupByPhase(steps));
-const done = computed(() => completedCount(steps));
+// Optional steps live in their own section and stay out of the headline count.
+const required = computed(() => requiredSteps(steps));
+const done = computed(() => completedCount(required.value));
 const focus = computed(() => focusStep(steps));
 
 /** How many steps in a phase still need the person: said once here, not on every row. */
@@ -51,7 +54,7 @@ function yoursRemaining(phaseSteps: Step<Id>[]): number {
 
 // A finished phase folds to its header so the timeline stays short; it reopens on click, and
 // whenever the step you are looking at is inside it.
-const expanded = ref<Record<StepPhase, boolean>>({ setup: true, build: true });
+const expanded = ref<Record<StepPhase, boolean>>({ setup: true, build: true, device: true });
 function phaseOf(id: Id | null): StepPhase | null {
     return steps.find((step) => step.id === id)?.phase ?? null;
 }
@@ -178,7 +181,7 @@ function meta(step: Step<Id>): string {
     <div @keydown.up.prevent="move(-1)" @keydown.down.prevent="move(1)">
         <header class="flex items-center gap-3 px-2 pb-3">
             <span class="text-xs font-semibold text-zinc-900 dark:text-zinc-50">
-                {{ done }} of {{ steps.length }} done
+                {{ done }} of {{ required.length }} done
             </span>
             <Meter
                 class="max-w-40 flex-1"

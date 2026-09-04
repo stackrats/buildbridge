@@ -8,6 +8,7 @@ import {
     deriveSetupSteps,
     focusStep,
     groupByPhase,
+    requiredSteps,
     journeyHeadline,
     summarizeJourney,
 } from './steps';
@@ -508,12 +509,15 @@ describe('unsigned build target', () => {
 });
 
 describe('deriveJourney', () => {
-    it('is thirteen steps, setup then build, each tagged with its phase', () => {
+    it('is fourteen steps: setup, build, then the optional device run in its own phase', () => {
         const steps = deriveJourney(baseView(), { runningStep: null });
 
         expect(steps).toHaveLength(14);
         expect(steps.slice(0, 7).every((step) => step.phase === 'setup')).toBe(true);
-        expect(steps.slice(7).every((step) => step.phase === 'build')).toBe(true);
+        expect(steps.slice(7, 13).every((step) => step.phase === 'build')).toBe(true);
+        expect(steps[13]?.phase).toBe('device');
+        // The count a machine is measured by leaves the optional step out.
+        expect(requiredSteps(steps)).toHaveLength(13);
     });
 
     it('focuses a setup failure before anything in the build phase', () => {
@@ -532,6 +536,7 @@ describe('deriveJourney', () => {
         expect(groups.map((group) => [group.phase, group.done, group.complete])).toEqual([
             ['setup', 7, true],
             ['build', 0, false],
+            ['device', 0, false],
         ]);
         expect(groups[0]?.focus).toBeNull();
         expect(groups[1]?.focus?.id).toBe('approve');
