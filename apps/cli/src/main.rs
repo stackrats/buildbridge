@@ -157,8 +157,17 @@ enum XcodeCommand {
 
 #[derive(Subcommand)]
 enum ProjectCommand {
-    Approve { machine: String, path: String },
-    Sync { machine: String },
+    Approve {
+        machine: String,
+        path: String,
+    },
+    Sync {
+        machine: String,
+    },
+    /// Copy the Podfile.lock the guest resolved into the project, lifting the archive's block.
+    AdoptLock {
+        machine: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -779,6 +788,36 @@ async fn run(cli: Cli) -> Result<(), String> {
                     "Synchronized snapshot {}",
                     text(&view["appleWorkspace"]["lastSnapshotSha256"])
                 )
+            },
+        ),
+        Command::Project(ProjectCommand::AdoptLock { machine }) => report(
+            json,
+            &on_machine(
+                engine,
+                &machine,
+                e::adopt_guest_podfile_lock(engine, machine.clone()),
+            )
+            .await?,
+            |result| {
+                let changes = &result["changes"];
+                if changes["identical"].as_bool() == Some(true) {
+                    println!(
+                        "The project already held the guest's Podfile.lock; the block is lifted."
+                    );
+                } else {
+                    let pods = changes["pods"].as_array().map_or(0, Vec::len);
+                    println!(
+                        "Adopted the guest's Podfile.lock into the project: {pods} pod(s) repinned. Commit it in the project."
+                    );
+                    for pod in changes["pods"].as_array().into_iter().flatten() {
+                        println!(
+                            "  {} {} → {}",
+                            text(&pod["name"]),
+                            text(&pod["before"]),
+                            text(&pod["after"])
+                        );
+                    }
+                }
             },
         ),
         Command::Build(BuildCommand::Test { machine, target }) => report(
