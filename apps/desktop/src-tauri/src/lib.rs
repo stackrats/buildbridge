@@ -2497,6 +2497,20 @@ fn certificate_csr_args(key_path: &str, common_name: &str) -> Vec<String> {
         .collect()
 }
 
+/// The algorithms macOS's Security framework can read. OpenSSL 3 writes PBES2 with AES and a
+/// SHA-256 MAC by default, and `SecPKCS12Import` on macOS 26 answers that with
+/// `errSecPkcs12VerifyFailure` (-25264, "MAC verification failed"), which reads like a wrong
+/// password and is not. SHA-1 for the MAC and 3DES for the bags is what Keychain Access itself
+/// exports, imports on every macOS, and needs no legacy provider on the host.
+const MACOS_PKCS12_ALGORITHMS: [&str; 6] = [
+    "-keypbe",
+    "PBE-SHA1-3DES",
+    "-certpbe",
+    "PBE-SHA1-3DES",
+    "-macalg",
+    "sha1",
+];
+
 fn certificate_p12_args(key_path: &str, certificate_pem: &str, display_name: &str) -> Vec<String> {
     [
         "pkcs12",
@@ -2511,8 +2525,96 @@ fn certificate_p12_args(key_path: &str, certificate_pem: &str, display_name: &st
         "env:BUILDBRIDGE_P12_PASSWORD",
     ]
     .into_iter()
+    .chain(MACOS_PKCS12_ALGORITHMS)
     .map(str::to_string)
     .collect()
+}
+
+/// Whether a `.p12`, as `openssl pkcs12 -info` describes it, was written with algorithms macOS
+/// cannot read: a SHA-256 MAC or PBES2 bags.
+fn pkcs12_needs_repackaging(info: &str) -> bool {
+    info.lines().any(|line| {
+        let line = line.trim();
+        (line.starts_with("MAC:") && !line.contains("sha1")) || line.contains("PBES2")
+    })
+}
+
+/// A kit file BuildBridge packaged before it knew what macOS reads is rewritten in place with
+/// the same key, certificate and passphrase, so nothing at Apple is touched and the kit keeps
+/// its path. The key crosses only a pipe between two OpenSSL processes; the passphrase rides the
+/// environment, never an argument. Files macOS can already read — every Mac export — are left
+/// exactly as they are.
+fn ensure_macos_importable_pkcs12(path: &str, password: &str) -> Result<String, String> {
+    let env = Some(("BUILDBRIDGE_P12_PASSWORD", password));
+    let info = openssl(
+        &[
+            "pkcs12",
+            "-info",
+            "-noout",
+            "-in",
+            path,
+            "-passin",
+            "env:BUILDBRIDGE_P12_PASSWORD",
+        ],
+        None,
+        env,
+    )
+    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    // `-info` reports on stderr for some versions; either way, an unreadable file is left
+    // for the guest import to name precisely.
+    .unwrap_or_default();
+    if !pkcs12_needs_repackaging(&info) {
+        return Ok(path.to_string());
+    }
+    let pem = openssl(
+        &[
+            "pkcs12",
+            "-in",
+            path,
+            "-nodes",
+            "-passin",
+            "env:BUILDBRIDGE_P12_PASSWORD",
+        ],
+        None,
+        env,
+    )?;
+    let display_name = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("identity")
+        .to_string();
+    let repacked = format!("{path}.repacked");
+    let args: Vec<String> = [
+        "pkcs12",
+        "-export",
+        "-in",
+        "/dev/stdin",
+        "-name",
+        display_name.as_str(),
+        "-passout",
+        "env:BUILDBRIDGE_P12_PASSWORD",
+        "-out",
+        repacked.as_str(),
+    ]
+    .into_iter()
+    .chain(MACOS_PKCS12_ALGORITHMS)
+    .map(str::to_string)
+    .collect();
+    openssl(&args, Some(&pem), env).map_err(|error| {
+        let _ = fs::remove_file(&repacked);
+        format!("The identity at {path} could not be repackaged for macOS: {error}")
+    })?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&repacked, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("The repackaged identity could not be protected: {error}"))?;
+    }
+    fs::rename(&repacked, path).map_err(|error| {
+        let _ = fs::remove_file(&repacked);
+        format!("The repackaged identity could not replace {path}: {error}")
+    })?;
+
+    Ok(path.to_string())
 }
 
 fn openssl(
@@ -3352,7 +3454,10 @@ async fn provision_with_kit(
         secrets.signing_certificate_path,
         secrets.signing_certificate_password,
     ) {
-        (Some(path), Some(password)) => Some((PathBuf::from(path), password)),
+        (Some(path), Some(password)) => Some((
+            PathBuf::from(ensure_macos_importable_pkcs12(&path, &password)?),
+            password,
+        )),
         (Some(_), None) => {
             return Err(
                 "Store the certificate passphrase in the operating-system vault first.".to_string(),
@@ -3364,7 +3469,10 @@ async fn provision_with_kit(
         secrets.development_certificate_path,
         secrets.development_certificate_password,
     ) {
-        (Some(path), Some(password)) => Some((PathBuf::from(path), password)),
+        (Some(path), Some(password)) => Some((
+            PathBuf::from(ensure_macos_importable_pkcs12(&path, &password)?),
+            password,
+        )),
         (Some(_), None) => {
             return Err(
                 "Store the development certificate passphrase in the operating-system vault first."
@@ -6274,6 +6382,27 @@ mod tests {
             development_certificate_path: String::new(),
             development_certificate_password: String::new(),
         }
+    }
+
+    #[test]
+    fn identities_are_packaged_with_the_algorithms_macos_reads() {
+        let args = certificate_p12_args("/k.pem", "/c.pem", "Apple Development: X");
+        for flag in ["-keypbe", "-certpbe", "-macalg"] {
+            assert!(args.iter().any(|arg| arg == flag), "{flag}");
+        }
+        assert!(args.windows(2).any(|w| w[0] == "-macalg" && w[1] == "sha1"));
+        assert!(args.iter().filter(|arg| *arg == "PBE-SHA1-3DES").count() == 2);
+        assert!(args.iter().any(|arg| arg == "env:BUILDBRIDGE_P12_PASSWORD"));
+        assert!(!args.iter().any(|arg| arg.contains("secret")));
+
+        // OpenSSL 3's default is what macOS refuses; a Mac export is what it wrote itself.
+        assert!(pkcs12_needs_repackaging(
+            "MAC: sha256, Iteration 2048\nMAC length: 32, salt length: 8\nPKCS7 Encrypted data: PBES2, PBKDF2, AES-256-CBC, Iteration 2048, PRF hmacWithSHA256\n"
+        ));
+        assert!(!pkcs12_needs_repackaging(
+            "MAC: sha1, Iteration 2048\nMAC length: 20, salt length: 8\nPKCS7 Encrypted data: pbeWithSHA1And3-KeyTripleDES-CBC, Iteration 2048\n"
+        ));
+        assert!(!pkcs12_needs_repackaging(""));
     }
 
     #[test]
