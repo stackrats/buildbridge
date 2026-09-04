@@ -176,16 +176,25 @@ export interface AttachedUsbDevice {
     issue: string | null;
 }
 
-/** A phone placed on QEMU's command line, so macOS finds it as it boots. */
-export interface BootUsbSummary {
-    bus: number;
-    port: string;
+/** Rebuilding the container from its profile so it picks up an option it was created without. */
+export type ContainerRebuildPhase =
+    | 'shutting_down'
+    | 'removing'
+    | 'creating'
+    | 'starting'
+    | 'completed';
+
+export interface ContainerRebuildProgress {
+    phase: ContainerRebuildPhase;
+    elapsedSeconds: number;
+    detail: string;
 }
 
-export type BootUsbPhase = 'shutting_down' | 'removing' | 'creating' | 'starting' | 'completed';
+/** After QEMU holds the phone: macOS enumerating it, then the pairing that raises Trust. */
+export type UsbAttachPhase = 'waiting_for_macos' | 'pairing' | 'completed';
 
-export interface BootUsbProgress {
-    phase: BootUsbPhase;
+export interface UsbAttachProgress {
+    phase: UsbAttachPhase;
     elapsedSeconds: number;
     detail: string;
 }
@@ -198,8 +207,8 @@ export interface MachineUsbStatus {
     containerIssue: string | null;
     qmpReachable: boolean;
     attached: AttachedUsbDevice | null;
-    /** The phone this container was created with; letting it go means recreating it. */
-    bootUsb: BootUsbSummary | null;
+    /** The container carries the USB 2.0 controller phones attach to; older ones need a rebuild. */
+    phoneController: boolean;
 }
 
 export type DeveloperModeState = 'enabled' | 'disabled' | 'unknown';

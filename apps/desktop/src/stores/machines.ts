@@ -10,7 +10,8 @@ import { formatTime } from '../lib/format';
 import type { LogLine } from '../components/ui/LogView.vue';
 import { deriveJourney, summarizeJourney, type JourneyStep } from '../model/steps';
 import type {
-    BootUsbProgress,
+    ContainerRebuildProgress,
+    UsbAttachProgress,
     AdoptPodfileLockResult,
     AppleArchiveProgress,
     AppleDeviceRunProgress,
@@ -57,7 +58,7 @@ export type OperationId =
     | 'usb-migrate'
     | 'usb-attach'
     | 'usb-detach'
-    | 'usb-boot'
+    | 'usb-rebuild'
     | 'device-pair'
     | 'device-signing'
     | 'run-device'
@@ -79,7 +80,8 @@ const busyKeyStep: Record<string, string> = {
     deleting: 'launch',
     discarding: 'launch',
     migrating_usb: 'run-device',
-    rebuilding_usb: 'run-device',
+    rebuilding_container: 'run-device',
+    settling_phone: 'run-device',
     attaching_usb: 'run-device',
     detaching_usb: 'run-device',
     listing_devices: 'run-device',
@@ -103,7 +105,8 @@ export const busyKeyLabel: Record<string, string> = {
     discarding: 'Discarding the container',
     optimizing: 'Applying an optimization',
     migrating_usb: 'Enabling USB on the machine',
-    rebuilding_usb: 'Rebuilding the machine with the iPhone',
+    rebuilding_container: 'Rebuilding the container',
+    settling_phone: 'Waiting for macOS to find the iPhone',
     attaching_usb: 'Attaching the iPhone',
     detaching_usb: 'Detaching the iPhone',
     listing_devices: 'Reading the phones the guest sees',
@@ -127,7 +130,7 @@ const operationStep: Partial<Record<OperationId, string>> = {
     'usb-migrate': 'run-device',
     'usb-attach': 'run-device',
     'usb-detach': 'run-device',
-    'usb-boot': 'run-device',
+    'usb-rebuild': 'run-device',
     'device-pair': 'run-device',
     'device-signing': 'run-device',
     'run-device': 'run-device',
@@ -157,8 +160,10 @@ export interface MachineSession {
     project: AppleProjectProgress | null;
     archive: AppleArchiveProgress | null;
     usbMigration: DiskMigrationProgress | null;
-    /** Rebuilding the container so the phone is there when macOS boots. */
-    bootUsb: BootUsbProgress | null;
+    /** Rebuilding the container from its profile. */
+    rebuild: ContainerRebuildProgress | null;
+    /** After QEMU holds the phone: macOS enumerating it, then pairing. */
+    usbAttach: UsbAttachProgress | null;
     deviceSigning: DeviceSigningProgress | null;
     device: AppleDeviceRunProgress | null;
     buildLog: LogLine[];
@@ -204,7 +209,8 @@ function createSession(id: string): MachineSession {
         project: null,
         archive: null,
         usbMigration: null,
-        bootUsb: null,
+        rebuild: null,
+        usbAttach: null,
         deviceSigning: null,
         device: null,
         buildLog: [],
@@ -402,10 +408,18 @@ async function listenForEvents(): Promise<void> {
                     note(target, event.detail);
                 }
             }),
-            backend.onBootUsbProgress((event) => {
+            backend.onContainerRebuildProgress((event) => {
                 const target = session(event.machineId);
-                const phaseChanged = target.bootUsb?.phase !== event.phase;
-                target.bootUsb = event;
+                const phaseChanged = target.rebuild?.phase !== event.phase;
+                target.rebuild = event;
+                if (phaseChanged) {
+                    note(target, event.detail);
+                }
+            }),
+            backend.onUsbAttachProgress((event) => {
+                const target = session(event.machineId);
+                const phaseChanged = target.usbAttach?.phase !== event.phase;
+                target.usbAttach = event;
                 if (phaseChanged) {
                     note(target, event.detail);
                 }
@@ -784,32 +798,36 @@ export function useMachinesStore() {
                     'USB access enabled. The machine restarted from its disk on this host with its identity and signing intact.',
             });
         },
-        attachUsb: (id: string, bus: number, port: string) =>
-            runOperation(id, 'usb-attach', () => useBackend().attachUsbDevice(id, bus, port), {
-                started: 'Passing the iPhone into the guest',
-                finished: (view) =>
-                    view.usb.attached?.enumerated
-                        ? 'iPhone attached. Unlock it and tap Trust when it asks about this computer.'
-                        : 'The port is handed to the guest, but the phone has not shown up in it yet.',
-            }),
+        attachUsb: (id: string, bus: number, port: string) => {
+            session(id).usbAttach = null;
+            return runOperation(
+                id,
+                'usb-attach',
+                () => useBackend().attachUsbDevice(id, bus, port),
+                {
+                    started: 'Passing the iPhone into the guest',
+                    finished: (view) =>
+                        view.usb.attached?.enumerated
+                            ? 'iPhone attached.'
+                            : 'The port is handed to the guest, but the phone has not shown up in it yet.',
+                },
+            );
+        },
         /**
-         * Puts the phone on QEMU's command line, or takes it off, by rebuilding the container.
-         * macOS restarts; that is what makes the phone visible to it at all.
+         * Rebuilds the container from the machine's profile so it picks up the phone's USB
+         * controller; macOS restarts once and the disk is kept.
          */
-        setBootUsb: async (id: string, device: { bus: number; port: string } | null) => {
-            session(id).bootUsb = null;
-            return runOperation(id, 'usb-boot', () => useBackend().setMachineBootUsb(id, device), {
-                started: device
-                    ? 'Rebuilding the machine with the iPhone on its command line'
-                    : 'Rebuilding the machine without the iPhone',
-                finished: device
-                    ? 'The machine is starting with the iPhone attached. Unlock it and tap Trust when macOS asks.'
-                    : 'The machine is starting without the iPhone.',
+        rebuildContainer: async (id: string) => {
+            session(id).rebuild = null;
+            return runOperation(id, 'usb-rebuild', () => useBackend().rebuildMachineContainer(id), {
+                started: 'Rebuilding the container with the phone controller',
+                finished: 'Rebuilt. The machine is starting; attach the phone once it is up.',
             });
         },
         detachUsb: (id: string) =>
             runOperation(id, 'usb-detach', () => useBackend().detachUsbDevice(id), {
-                finished: 'iPhone returned to this host. The app stays installed on it.',
+                finished:
+                    'iPhone returned to this host. Unplug it and plug it in again before attaching it to this machine again.',
             }),
         /** Runs the CoreDevice pairing; the phone shows Trust if it has not yet, so this waits. */
         pairDevice: (id: string, udid: string) =>

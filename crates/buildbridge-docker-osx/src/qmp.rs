@@ -18,7 +18,6 @@ use crate::ProviderError;
 /// replaces rather than stacks.
 pub(crate) const IPHONE_QMP_DEVICE_ID: &str = "buildbridge-iphone";
 /// Docker-OSX's `Launch.sh` defines `-device qemu-xhci,id=xhci`; USB 3 devices attach there.
-pub(crate) const USB_XHCI_BUS: &str = "xhci.0";
 /// The controller a phone attached at boot is given, separate from the machine's own xHCI.
 pub(crate) const USB_PHONE_CONTROLLER: &str = "buildbridge-phone-usb";
 /// Where the control directory is mounted inside the container.
@@ -215,18 +214,24 @@ pub(crate) fn capabilities_request() -> Value {
 }
 
 /// `hostbus`/`hostport` matching means the port, not the device, is handed to the guest: an
-/// unplug and replug on the same port re-attaches without another command. Guest-initiated
-/// resets are refused because iPhones wedge on them.
+/// unplug and replug on the same port re-attaches without another command.
+///
+/// The phone goes on the machine's dedicated EHCI controller, and the guest is allowed to reset
+/// it. Both were measured on a phone on the desk: on the emulated xHCI macOS never assigns the
+/// phone an address, and with the reset refused it addresses the phone but never configures it.
+/// With both as they are here, macOS selects the phone's NCM configuration within ten seconds
+/// and registers it under a minute later, with nothing restarted. One caveat governs the whole
+/// design: QEMU reads a phone cleanly only the first time it opens it in a process, so a phone
+/// that has been detached must be unplugged and plugged in again before it is attached again.
 pub(crate) fn device_add_request(bus: u8, port: &str) -> Value {
     json!({
         "execute": "device_add",
         "arguments": {
             "driver": "usb-host",
             "id": IPHONE_QMP_DEVICE_ID,
-            "bus": USB_XHCI_BUS,
+            "bus": format!("{USB_PHONE_CONTROLLER}.0"),
             "hostbus": bus,
-            "hostport": port,
-            "guest-reset": false
+            "hostport": port
         }
     })
 }
@@ -377,10 +382,9 @@ mod tests {
                 "arguments": {
                     "driver": "usb-host",
                     "id": "buildbridge-iphone",
-                    "bus": "xhci.0",
+                    "bus": "buildbridge-phone-usb.0",
                     "hostbus": 3,
-                    "hostport": "2.3.1",
-                    "guest-reset": false
+                    "hostport": "2.3.1"
                 }
             })
         );

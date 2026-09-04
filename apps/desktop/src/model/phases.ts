@@ -2,7 +2,8 @@
 // sentence. The backend also sends a `detail` sentence; these labels are the short form.
 
 import type {
-    BootUsbPhase,
+    ContainerRebuildPhase,
+    UsbAttachPhase,
     AppleArchivePhase,
     AppleDeviceRunPhase,
     AppleProjectPhase,
@@ -23,12 +24,18 @@ export const usbMigrationPhaseLabel: Record<DiskMigrationPhase, string> = {
     completed: 'USB enabled',
 };
 
-export const bootUsbPhaseLabel: Record<BootUsbPhase, string> = {
+export const containerRebuildPhaseLabel: Record<ContainerRebuildPhase, string> = {
     shutting_down: 'Shutting macOS down',
     removing: 'Removing the container',
-    creating: 'Creating the container with the iPhone',
+    creating: 'Creating the container',
     starting: 'Starting macOS',
     completed: 'Rebuilt',
+};
+
+export const usbAttachPhaseLabel: Record<UsbAttachPhase, string> = {
+    waiting_for_macos: 'macOS is finding the iPhone',
+    pairing: 'Pairing; tap Trust on the phone',
+    completed: 'Attached',
 };
 
 export const deviceSigningPhaseLabel: Record<DeviceSigningPhase, string> = {

@@ -20,7 +20,6 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::qmp::QmpClient;
-use crate::usb::BootUsbDevice;
 use crate::{
     ContainerState, DOCKER_IMAGE, LaunchOptions, MacBuilderConfig, ProviderError, RuntimeStatus,
     TrackedCommand, clean_output, create_container, inspect_container, probe_host, run_docker,
@@ -89,15 +88,15 @@ pub struct ContainerLayout {
     pub disk_on_host: bool,
     pub usb_access: bool,
     pub control_socket: bool,
-    /// The phone on QEMU's command line, when this container was created with one. Letting it
-    /// go means recreating the container, so the interface has to know it is there.
-    pub boot_usb: Option<BootUsbDevice>,
+    /// The dedicated USB 2.0 controller phones are attached to is on QEMU's command line.
+    pub phone_controller: bool,
 }
 
-/// Recreating the container so QEMU's command line matches the phone attached at boot.
+/// Recreating the container from its current profile: the same disk, identity and options, so
+/// a container created before an option existed picks it up. macOS restarts once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BootUsbPhase {
+pub enum ContainerRebuildPhase {
     ShuttingDown,
     Removing,
     Creating,
@@ -107,8 +106,8 @@ pub enum BootUsbPhase {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BootUsbProgress {
-    pub phase: BootUsbPhase,
+pub struct ContainerRebuildProgress {
+    pub phase: ContainerRebuildPhase,
     pub elapsed_seconds: u64,
     pub detail: String,
 }
@@ -244,22 +243,16 @@ fn restrict_directory(path: &Path) -> Result<(), ProviderError> {
 }
 
 /// Reads the layout back from `docker inspect`'s `HostConfig`.
-/// The phone QEMU was given on its command line, read back out of the container's `EXTRA`.
-/// Anything that does not parse as a bus and a valid port is treated as no phone, because the
-/// only thing this decides is whether letting one go needs a rebuild.
-pub(crate) fn boot_usb_from_env(env: &[String]) -> Option<BootUsbDevice> {
-    let extra = env.iter().find_map(|entry| entry.strip_prefix("EXTRA="))?;
-    let device = extra
-        .split_whitespace()
-        .find(|word| word.starts_with("usb-host,"))?;
-    let field = |name: &str| {
-        device
-            .split(',')
-            .find_map(|part| part.strip_prefix(&format!("{name}=")))
-    };
-    let bus = field("hostbus")?.parse().ok()?;
-
-    BootUsbDevice::new(bus, field("hostport")?).ok()
+/// Whether the container's `EXTRA` carries the phone controller, read back so the interface
+/// knows which containers predate it.
+pub(crate) fn phone_controller_from_env(env: &[String]) -> bool {
+    env.iter()
+        .find_map(|entry| entry.strip_prefix("EXTRA="))
+        .is_some_and(|extra| {
+            extra
+                .split_whitespace()
+                .any(|word| word == format!("usb-ehci,id={}", crate::qmp::USB_PHONE_CONTROLLER))
+        })
 }
 
 pub(crate) fn container_layout(
@@ -292,7 +285,7 @@ pub(crate) fn container_layout(
     let env: Vec<String> = serde_json::from_str(env_json).unwrap_or_default();
 
     Ok(ContainerLayout {
-        boot_usb: boot_usb_from_env(&env),
+        phone_controller: phone_controller_from_env(&env),
         disk_on_host: bound(CONTAINER_DISK_DIR),
         usb_access: rules
             .iter()
@@ -589,32 +582,27 @@ where
 const GUEST_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
 const GUEST_SHUTDOWN_POLL: Duration = Duration::from_secs(2);
 
-/// Recreates the container so that QEMU's command line matches `options.usb.boot_device`:
-/// with the phone to attach it, without it to let it go.
-///
-/// A phone hot-plugged into a running guest is at the mercy of QEMU's reset handling, which is
-/// what makes it unreliable. On the command line the phone is simply there when macOS starts,
-/// and macOS enumerates it during its own USB scan. The cost is that macOS restarts, which is
-/// only affordable because the disk lives on this host — so this refuses outright when it does
-/// not, since removing such a container would take the macOS installation with it.
-///
-/// macOS is asked to shut itself down first; a container that has been power-cut repeatedly is
-/// how a disk gets corrupted.
-pub fn set_boot_usb_device<F>(
+/// Recreates the container around its disk, so that a container created before an option
+/// existed — today the phone's USB controller — picks it up. macOS restarts once. This is
+/// affordable only because the disk lives on this host, so it refuses outright when it does
+/// not, since removing such a container would take the macOS installation with it. macOS is
+/// asked to shut itself down first; a container that has been power-cut repeatedly is how a
+/// disk gets corrupted.
+pub fn rebuild_container<F>(
     container_name: &str,
     config: &MacBuilderConfig,
     options: &LaunchOptions<'_>,
     mut on_progress: F,
 ) -> Result<RuntimeStatus, ProviderError>
 where
-    F: FnMut(BootUsbProgress),
+    F: FnMut(ContainerRebuildProgress),
 {
     config.validate()?;
     let disk = MachineDisk::new(options.disk_dir)?;
     validate_bind_path(options.qmp_dir, "control socket directory")?;
     let started = Instant::now();
-    let mut report = |phase: BootUsbPhase, detail: &str| {
-        on_progress(BootUsbProgress {
+    let mut report = |phase: ContainerRebuildPhase, detail: &str| {
+        on_progress(ContainerRebuildProgress {
             phase,
             elapsed_seconds: started.elapsed().as_secs(),
             detail: detail.to_string(),
@@ -635,17 +623,17 @@ where
 
     if exists {
         report(
-            BootUsbPhase::ShuttingDown,
+            ContainerRebuildPhase::ShuttingDown,
             "Asking macOS to shut down before the machine is rebuilt",
         );
         shut_down_guest(
             container_name,
             &options.qmp_dir.join(crate::QMP_SOCKET_NAME),
-            &mut |detail| report(BootUsbPhase::ShuttingDown, detail),
+            &mut |detail| report(ContainerRebuildPhase::ShuttingDown, detail),
         )?;
 
         report(
-            BootUsbPhase::Removing,
+            ContainerRebuildPhase::Removing,
             "Removing the container; the macOS disk stays on this host",
         );
         run_docker(
@@ -655,15 +643,8 @@ where
     }
 
     report(
-        BootUsbPhase::Creating,
-        match options
-            .usb
-            .as_ref()
-            .and_then(|usb| usb.boot_device.as_ref())
-        {
-            Some(_) => "Creating the container with the iPhone on QEMU's command line",
-            None => "Creating the container without the iPhone",
-        },
+        ContainerRebuildPhase::Creating,
+        "Creating the container with the host disk, the control socket, USB access, and the phone controller",
     );
     ensure_control_dir(options.qmp_dir)?;
     create_container(
@@ -674,12 +655,9 @@ where
         &disk,
     )?;
 
-    report(BootUsbPhase::Starting, "Starting macOS");
+    report(ContainerRebuildPhase::Starting, "Starting macOS");
     run_docker("start", &["start".to_string(), container_name.to_string()])?;
-    report(
-        BootUsbPhase::Completed,
-        "The machine is starting; macOS enumerates the phone as it boots",
-    );
+    report(ContainerRebuildPhase::Completed, "The machine is starting");
 
     status(container_name)
 }
@@ -779,29 +757,18 @@ mod tests {
     }
 
     #[test]
-    fn the_phone_on_qemus_command_line_is_read_back_out_of_the_container() {
-        let env = r#"["DISPLAY=:0","EXTRA=-display gtk,zoom-to-fit=on -qmp unix:/buildbridge-qmp/qmp.sock,server,nowait -device usb-host,id=buildbridge-iphone,bus=xhci.0,hostbus=3,hostport=9"]"#;
-        let parsed: Vec<String> = serde_json::from_str(env).expect("env");
-        let device = boot_usb_from_env(&parsed).expect("a phone");
-        assert_eq!(device.bus(), 3);
-        assert_eq!(device.port(), "9");
-
-        // No phone, no EXTRA at all, and a malformed one all read as no phone, because the
-        // only thing this decides is whether letting one go needs a rebuild.
-        let without: Vec<String> = serde_json::from_str(
-            r#"["EXTRA=-display gtk,zoom-to-fit=on -qmp unix:/buildbridge-qmp/qmp.sock,server,nowait"]"#,
-        )
-        .expect("env");
-        assert!(boot_usb_from_env(&without).is_none());
-        assert!(boot_usb_from_env(&[]).is_none());
-        assert!(
-            boot_usb_from_env(&["EXTRA=-device usb-host,hostbus=x,hostport=9".to_string()])
-                .is_none()
-        );
-        assert!(
-            boot_usb_from_env(&["EXTRA=-device usb-host,hostbus=3,hostport=0".to_string()])
-                .is_none()
-        );
+    fn the_phone_controller_is_read_back_out_of_the_container() {
+        let with: Vec<String> = vec!["DISPLAY=:0".into(), "EXTRA=-display gtk,zoom-to-fit=on -qmp unix:/buildbridge-qmp/qmp.sock,server,nowait -device usb-ehci,id=buildbridge-phone-usb".into()];
+        assert!(phone_controller_from_env(&with));
+        let without: Vec<String> = vec![
+            "EXTRA=-display gtk,zoom-to-fit=on -qmp unix:/buildbridge-qmp/qmp.sock,server,nowait"
+                .into(),
+        ];
+        assert!(!phone_controller_from_env(&without));
+        assert!(!phone_controller_from_env(&[]));
+        assert!(!phone_controller_from_env(&[
+            "EXTRA=-device usb-ehci,id=ehci".to_string()
+        ]));
     }
 
     #[test]
@@ -813,7 +780,7 @@ mod tests {
                 disk_on_host: false,
                 usb_access: false,
                 control_socket: false,
-                boot_usb: None,
+                phone_controller: false,
             }
         );
         let current = r#"{"Binds":["/tmp/.X11-unix:/tmp/.X11-unix:rw","/home/m/disk:/image:rw","/home/m/qmp:/buildbridge-qmp:rw","/dev/bus/usb:/dev/bus/usb"],"DeviceCgroupRules":["c 189:* rwm"]}"#;
@@ -823,7 +790,7 @@ mod tests {
                 disk_on_host: true,
                 usb_access: true,
                 control_socket: true,
-                boot_usb: None,
+                phone_controller: false,
             }
         );
         let rule_without_bind =

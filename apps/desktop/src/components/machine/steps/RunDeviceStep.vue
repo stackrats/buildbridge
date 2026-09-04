@@ -25,7 +25,8 @@ import { deviceReadiness, type DeviceSubstate } from '../../../model/device';
 import {
     devicePhaseLabel,
     deviceSigningPhaseLabel,
-    bootUsbPhaseLabel,
+    containerRebuildPhaseLabel,
+    usbAttachPhaseLabel,
     usbMigrationPhaseLabel,
 } from '../../../model/phases';
 import type { JourneyStep } from '../../../model/steps';
@@ -107,8 +108,7 @@ watch(
 );
 
 const migrateOpen = ref(false);
-const attachOpen = ref(false);
-const detachOpen = ref(false);
+const rebuildOpen = ref(false);
 const signingOpen = ref(false);
 const clearOpen = ref(false);
 
@@ -129,10 +129,24 @@ const strip = computed(() => {
             stopTitle: undefined,
         };
     }
-    if (operation === 'usb-boot' || operation === 'rebuilding_usb') {
-        const progress = session.bootUsb;
+    if (operation === 'usb-attach' || operation === 'settling_phone') {
+        const progress = session.usbAttach;
         return {
-            label: progress ? bootUsbPhaseLabel[progress.phase] : 'Preparing',
+            label: progress ? usbAttachPhaseLabel[progress.phase] : 'Passing the iPhone to QEMU',
+            detail: progress?.detail ?? null,
+            elapsed: progress?.elapsedSeconds ?? null,
+            value: null,
+            completedBytes: null,
+            totalBytes: null,
+            lastLine: null,
+            stoppable: false,
+            stopTitle: undefined,
+        };
+    }
+    if (operation === 'usb-rebuild' || operation === 'rebuilding_container') {
+        const progress = session.rebuild;
+        return {
+            label: progress ? containerRebuildPhaseLabel[progress.phase] : 'Preparing',
             detail: progress?.detail ?? null,
             elapsed: progress?.elapsedSeconds ?? null,
             value: null,
@@ -227,6 +241,16 @@ const primary = computed<Primary | null>(() => {
                     run: () => machines.launch(id),
                 };
             }
+            if (usb.value.diskOnHost && !usb.value.phoneController) {
+                return {
+                    label: 'Rebuild the container',
+                    icon: HardDrive,
+                    outline: false,
+                    operation: 'usb-rebuild',
+                    disabledReason: null,
+                    run: () => (rebuildOpen.value = true),
+                };
+            }
             return {
                 label: 'Enable USB on this machine',
                 icon: HardDrive,
@@ -246,14 +270,14 @@ const primary = computed<Primary | null>(() => {
             };
         case 'attach':
             return {
-                label: 'Attach and restart macOS',
+                label: 'Attach iPhone',
                 icon: Cable,
                 outline: false,
-                operation: 'usb-boot',
-                disabledReason: selectedUsb.value ? null : 'Choose a phone',
+                operation: 'usb-attach',
+                disabledReason: needsLive() ?? (selectedUsb.value ? null : 'Choose a phone'),
                 run: () => {
-                    attachOpen.value = true;
-                    return Promise.resolve();
+                    const [bus, port] = selectedUsb.value.split(':');
+                    return machines.attachUsb(id, Number(bus), port ?? '');
                 },
             };
         case 'unplugged':
@@ -261,9 +285,9 @@ const primary = computed<Primary | null>(() => {
                 label: 'Detach iPhone',
                 icon: Unplug,
                 outline: true,
-                operation: coldAttached.value ? 'usb-boot' : 'usb-detach',
-                disabledReason: coldAttached.value ? null : needsLive(),
-                run: () => detach(),
+                operation: 'usb-detach',
+                disabledReason: needsLive(),
+                run: () => machines.detachUsb(id),
             };
         case 'trust':
             return {
@@ -348,30 +372,9 @@ async function prepareSigning(): Promise<void> {
     }
 }
 
-// The phone is on QEMU's command line, so letting it go rebuilds the container.
-const coldAttached = computed(() => usb.value.bootUsb !== null);
-
-async function attachAtBoot(): Promise<void> {
-    attachOpen.value = false;
-    const [bus, port] = selectedUsb.value.split(':');
-    await machines.setBootUsb(session.id, { bus: Number(bus), port: port ?? '' });
-}
-
-/**
- * A phone on the command line only goes away when the container is rebuilt; a hot-plugged one
- * is handed straight back.
- */
-async function detach(): Promise<void> {
-    if (coldAttached.value) {
-        detachOpen.value = true;
-        return;
-    }
-    await machines.detachUsb(session.id);
-}
-
-async function confirmDetach(): Promise<void> {
-    detachOpen.value = false;
-    await machines.setBootUsb(session.id, null);
+async function rebuild(): Promise<void> {
+    rebuildOpen.value = false;
+    await machines.rebuildContainer(session.id);
 }
 
 async function migrate(): Promise<void> {
@@ -572,16 +575,10 @@ const runFacts = computed(() =>
                 variant="ghost"
                 size="sm"
                 :disabled="busy"
-                :title="
-                    coldAttached
-                        ? 'Rebuilds the machine without the iPhone; macOS restarts'
-                        : 'Returns the phone to this host; the app stays installed on it'
-                "
-                @click="detach"
+                title="Returns the phone to this host; unplug and replug it before attaching it again"
+                @click="machines.detachUsb(session.id)"
             >
-                <Spinner
-                    v-if="session.operation === 'usb-detach' || session.operation === 'usb-boot'"
-                />
+                <Spinner v-if="session.operation === 'usb-detach'" />
                 <Unplug v-else class="h-3.5 w-3.5" />
                 Detach
             </Button>
@@ -776,33 +773,17 @@ const runFacts = computed(() =>
         </div>
 
         <ConfirmDialog
-            v-model:open="attachOpen"
-            title="Attach the iPhone and restart macOS"
-            confirm-label="Attach and restart"
-            @confirm="attachAtBoot"
+            v-model:open="rebuildOpen"
+            title="Rebuild the container"
+            confirm-label="Rebuild and restart"
+            @confirm="rebuild"
         >
             <p>
-                The phone goes on QEMU's command line and the container is rebuilt around it, so
-                macOS finds the phone as it starts rather than being asked to accept it while it
-                runs. That is the difference that makes it work: hot-plugging an iPhone needs a USB
-                reset that either macOS is not allowed to make or the phone does not survive.
-            </p>
-            <p>
-                macOS is asked to shut down first and then starts again, which takes a few minutes.
-                The disk, the pinned identity, Xcode and provisioned signing are all kept, and the
-                phone stays unavailable to this host until it is detached.
-            </p>
-        </ConfirmDialog>
-
-        <ConfirmDialog
-            v-model:open="detachOpen"
-            title="Detach the iPhone and restart macOS"
-            confirm-label="Detach and restart"
-            @confirm="confirmDetach"
-        >
-            <p>
-                This phone is on QEMU's command line, so letting it go rebuilds the container and
-                macOS restarts. The app already installed on the phone stays there.
+                This container was created before phones had their own USB controller in the
+                machine. Rebuilding it from the machine's profile adds the controller; the macOS
+                disk, the pinned identity, Xcode and provisioned signing are all kept. macOS is
+                asked to shut down first and then starts again, which takes a few minutes. Once
+                only.
             </p>
         </ConfirmDialog>
 

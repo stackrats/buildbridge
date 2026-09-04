@@ -154,7 +154,7 @@ interface MockMachine {
     usbContainer: boolean;
     attached: T.AttachedUsbDevice | null;
     /** The phone on QEMU's command line, when the container was built with one. */
-    bootUsb: T.BootUsbSummary | null;
+    phoneController: boolean;
     guestDevices: T.GuestDevice[];
     /** Listings since the phone was attached: the mock pairs on the first, enables Developer Mode on the second. */
     deviceRefreshes: number;
@@ -262,7 +262,7 @@ function readyMachine(): MockMachine {
         busy: null,
         usbContainer: deviceReady || usbReady,
         attached: deviceReady ? { bus: 1, port: '3', enumerated: true, issue: null } : null,
-        bootUsb: deviceReady ? { bus: 1, port: '3' } : null,
+        phoneController: true,
         guestDevices: deviceReady ? [readyPhone()] : [],
         deviceRefreshes: deviceReady ? 2 : 0,
         deviceRun: null,
@@ -310,7 +310,7 @@ function freshMachine(): MockMachine {
         // A new machine's container is created with USB access from the start.
         usbContainer: true,
         attached: null,
-        bootUsb: null,
+        phoneController: true,
         guestDevices: [],
         deviceRefreshes: 0,
         deviceRun: null,
@@ -603,7 +603,7 @@ export function createMockBackend(): Backend {
                     : 'Enable USB on this machine to recreate its container with USB access; the macOS disk is kept.',
                 qmpReachable: machine.usbContainer && running,
                 attached: running && machine.attached ? { ...machine.attached } : null,
-                bootUsb: machine.bootUsb ? { ...machine.bootUsb } : null,
+                phoneController: machine.usbContainer && machine.phoneController,
             },
             deviceRun: machine.deviceRun ? { ...machine.deviceRun } : null,
             deviceRunError: machine.deviceRunError,
@@ -1209,10 +1209,10 @@ export function createMockBackend(): Backend {
                 return view(machine);
             });
         },
-        async setMachineBootUsb(machineId, device) {
+        async rebuildMachineContainer(machineId) {
             const machine = find(machineId);
-            return busy(machine, 'Rebuilding the machine', async () => {
-                const phases: T.BootUsbPhase[] = [
+            return busy(machine, 'Rebuilding the container', async () => {
+                const phases: T.ContainerRebuildPhase[] = [
                     'shutting_down',
                     'removing',
                     'creating',
@@ -1220,20 +1220,13 @@ export function createMockBackend(): Backend {
                     'completed',
                 ];
                 for (const [index, phase] of phases.entries()) {
-                    emitter.emit<T.MachineEvent<T.BootUsbProgress>>('machine-boot-usb-progress', {
-                        machineId,
-                        phase,
-                        elapsedSeconds: index * 6,
-                        detail: phase,
-                    });
+                    emitter.emit<T.MachineEvent<T.ContainerRebuildProgress>>(
+                        'machine-container-rebuild-progress',
+                        { machineId, phase, elapsedSeconds: index * 6, detail: phase },
+                    );
                     await sleep(400);
                 }
-                machine.bootUsb = device ? { ...device } : null;
-                // macOS finds the phone as it boots, so it comes up already enumerated.
-                machine.attached = device ? { ...device, enumerated: true, issue: null } : null;
-                if (device) {
-                    machine.deviceRefreshes = 0;
-                }
+                machine.phoneController = true;
                 return view(machine);
             });
         },
@@ -1773,7 +1766,9 @@ export function createMockBackend(): Backend {
         onArchiveProgress: async (handler) => emitter.on('machine-archive-progress', handler),
         onUsbMigrationProgress: async (handler) =>
             emitter.on('machine-usb-migration-progress', handler),
-        onBootUsbProgress: async (handler) => emitter.on('machine-boot-usb-progress', handler),
+        onContainerRebuildProgress: async (handler) =>
+            emitter.on('machine-container-rebuild-progress', handler),
+        onUsbAttachProgress: async (handler) => emitter.on('machine-usb-attach-progress', handler),
         onDeviceSigningProgress: async (handler) =>
             emitter.on('machine-device-signing-progress', handler),
         onDeviceProgress: async (handler) => emitter.on('machine-device-progress', handler),

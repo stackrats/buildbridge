@@ -29,19 +29,19 @@ pub use device_run::{
     DeveloperModeState, GuestDevice, PairingState, TransportType, TunnelState, list_guest_devices,
 };
 pub use disk::{
-    BootUsbPhase, BootUsbProgress, ContainerLayout, DISK_IMAGE_NAME, DISK_NVRAM_NAME,
-    DiskMigrationPhase, DiskMigrationProgress, MachineDisk, ensure_machine_disk,
-    inspect_container_layout, migrate_disk_to_host, remove_machine_disk, required_free_bytes,
-    set_boot_usb_device, validate_bind_path,
+    ContainerLayout, ContainerRebuildPhase, ContainerRebuildProgress, DISK_IMAGE_NAME,
+    DISK_NVRAM_NAME, DiskMigrationPhase, DiskMigrationProgress, MachineDisk, ensure_machine_disk,
+    inspect_container_layout, migrate_disk_to_host, rebuild_container, remove_machine_disk,
+    required_free_bytes, validate_bind_path,
 };
-use qmp::{IPHONE_QMP_DEVICE_ID, USB_PHONE_CONTROLLER};
+use qmp::USB_PHONE_CONTROLLER;
 pub use qmp::{QMP_CONTAINER_DIR, QMP_SOCKET_NAME};
 pub use usb::{
-    AttachedUsbDevice, BootUsbDevice, BootUsbSummary, ContainerUsbOptions, HostUsbDevice,
-    HostUsbStatus, MachineUsbStatus, USB_UDEV_RULE, USB_UDEV_RULE_PATH, UdevRuleState, UsbHolder,
-    attach_usb_device, attached_usb_device, detach_usb_device, host_usb_status,
-    install_iphone_udev_rule, is_apple_mobile_product, machine_usb_status, remove_iphone_udev_rule,
-    resolve_usb_options, valid_usb_port_path,
+    AttachedUsbDevice, ContainerUsbOptions, HostUsbDevice, HostUsbStatus, MachineUsbStatus,
+    USB_UDEV_RULE, USB_UDEV_RULE_PATH, UdevRuleState, UsbHolder, attach_usb_device,
+    attached_usb_device, detach_usb_device, host_usb_status, install_iphone_udev_rule,
+    is_apple_mobile_product, machine_usb_status, remove_iphone_udev_rule, resolve_usb_options,
+    valid_usb_port_path,
 };
 
 /// Identifier of the builder that existed before BuildBridge kept a machine registry.
@@ -6836,30 +6836,18 @@ fn create_args(
     args
 }
 
-/// QEMU's extra arguments: the console, the control socket, and — when a phone is attached at
-/// boot — the phone itself. The image's launch script word-splits this, so every value here is
-/// either fixed text or already validated to contain no spaces.
-///
-/// `guest-reset=false` is kept at boot as well as for hot-plug. macOS enumerates the phone
-/// without a real reset — QEMU answers the reset itself — and a real one returns the phone to
-/// configuration 0, where it has nothing to describe. With the reset held off, macOS reads the
-/// configured phone, selects the configuration it wants (the NCM one on iOS 17 and later) and
-/// QEMU claims every interface, so no Linux driver gets them. Measured on a phone on the desk.
-///
-/// The phone gets its own USB 2.0 controller rather than sharing the machine's `qemu-xhci`.
-/// An iPhone is a high-speed USB 2.0 device, and macOS never assigned one an address on the
-/// emulated xHCI: QEMU held it and read its descriptors while the guest left it at address
-/// zero. EHCI is the controller a device of that speed would meet on real hardware.
+/// QEMU's extra arguments: the console, the control socket, and — whenever the host can pass
+/// USB through at all — a dedicated USB 2.0 controller for a phone. The controller is there from
+/// the start so that attaching a phone later is a hot-plug over QMP and never a rebuild: on the
+/// machine's own emulated xHCI macOS never assigns an iPhone an address, and adding a controller
+/// to a running guest is PCI hot-plug, which is not worth asking of macOS. It costs nothing when
+/// no phone is attached. The image's launch script word-splits this, so every value is fixed.
 fn qemu_extra_args(usb: Option<&ContainerUsbOptions>) -> String {
     let mut extra = format!(
         "-display gtk,zoom-to-fit=on -qmp unix:{QMP_CONTAINER_DIR}/{QMP_SOCKET_NAME},server,nowait"
     );
-    if let Some(boot) = usb.and_then(|usb| usb.boot_device.as_ref()) {
-        extra.push_str(&format!(
-            " -device usb-ehci,id={USB_PHONE_CONTROLLER} -device usb-host,id={IPHONE_QMP_DEVICE_ID},bus={USB_PHONE_CONTROLLER}.0,hostbus={},hostport={},guest-reset=false",
-            boot.bus(),
-            boot.port()
-        ));
+    if usb.is_some() {
+        extra.push_str(&format!(" -device usb-ehci,id={USB_PHONE_CONTROLLER}"));
     }
 
     extra
@@ -6998,10 +6986,7 @@ mod tests {
             Path::new("/tmp/buildbridge/identity.env"),
             &disk,
             Path::new("/tmp/buildbridge/qmp"),
-            Some(&ContainerUsbOptions {
-                plugdev_gid: 46,
-                boot_device: None,
-            }),
+            Some(&ContainerUsbOptions { plugdev_gid: 46 }),
         );
 
         assert_eq!(args.first().map(String::as_str), Some("create"));
@@ -7013,7 +6998,7 @@ mod tests {
         assert!(args.contains(&"--env=WIDTH=1280".to_string()));
         assert!(args.contains(&"--env=HEIGHT=720".to_string()));
         assert!(args.contains(
-            &"--env=EXTRA=-display gtk,zoom-to-fit=on -qmp unix:/buildbridge-qmp/qmp.sock,server,nowait"
+            &"--env=EXTRA=-display gtk,zoom-to-fit=on -qmp unix:/buildbridge-qmp/qmp.sock,server,nowait -device usb-ehci,id=buildbridge-phone-usb"
                 .to_string()
         ));
         assert!(args.contains(&"--restart=no".to_string()));
@@ -7477,31 +7462,21 @@ mod tests {
     }
 
     #[test]
-    fn a_phone_attached_at_boot_joins_qemus_command_line_and_nothing_else_changes() {
-        let plain = qemu_extra_args(Some(&ContainerUsbOptions {
-            plugdev_gid: 46,
-            boot_device: None,
-        }));
-        assert!(!plain.contains("usb-host"));
-        assert!(plain.contains("-qmp unix:"));
+    fn a_usb_capable_host_always_gets_the_phone_controller_and_never_a_phone_on_the_command_line() {
+        let without_usb = qemu_extra_args(None);
+        assert!(without_usb.contains("-qmp unix:"));
+        assert!(!without_usb.contains("usb-ehci"));
 
-        let attached = qemu_extra_args(Some(&ContainerUsbOptions {
-            plugdev_gid: 46,
-            boot_device: Some(BootUsbDevice::new(3, "9").expect("a port")),
-        }));
+        let with_usb = qemu_extra_args(Some(&ContainerUsbOptions { plugdev_gid: 46 }));
         assert!(
-            attached.starts_with(&plain),
+            with_usb.starts_with(&without_usb),
             "the console and socket are kept"
         );
-        // Its own USB 2.0 controller: macOS never addressed the phone on the emulated xHCI.
-        assert!(attached.contains("-device usb-ehci,id=buildbridge-phone-usb"));
-        assert!(attached.contains(
-            "-device usb-host,id=buildbridge-iphone,bus=buildbridge-phone-usb.0,hostbus=3,hostport=9"
-        ));
-        // A real reset returns the phone to configuration 0; QEMU answers the reset instead.
-        assert!(attached.contains("guest-reset=false"));
+        assert!(with_usb.ends_with(" -device usb-ehci,id=buildbridge-phone-usb"));
+        // Phones are hot-plugged over QMP; nothing about a phone is baked into the container.
+        assert!(!with_usb.contains("usb-host"));
         // The launch script word-splits this, so a stray quote or semicolon would be a hole.
-        assert!(!attached.contains('\'') && !attached.contains(';') && !attached.contains("$("));
+        assert!(!with_usb.contains('\'') && !with_usb.contains(';') && !with_usb.contains("$("));
     }
 
     #[test]

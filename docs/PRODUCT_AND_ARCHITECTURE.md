@@ -838,9 +838,9 @@ The following decisions should be treated as settled until this document is deli
     migrated by copying the disk out, never by `docker commit`, which would double the footprint
     through overlay copy-up.
 39. Running on a physical iPhone is an optional, experimental step over raw QEMU `usb-host`
-    passthrough, with the phone on QEMU's command line at boot on its own EHCI controller and
-    the guest reset held off — never `usbfluxd`, never `--privileged`, never a configuration
-    chosen on the host. The host
+    passthrough: hot-plugged over QMP onto a dedicated EHCI controller every USB-capable
+    container carries, with the guest allowed to reset it — never `usbfluxd`, never
+    `--privileged`, never a configuration chosen on the host, never a restart to attach. The host
     releases the phone through one root-installed udev rule with a fixed argv, the UDID always
     comes from the attached phone, and device registration, development certificate and
     development profile are confirmed, non-revoking mutations at Apple. Trust and Developer Mode
@@ -982,21 +982,23 @@ ladder is shown as a readiness grid and every rung has one primary action:
 2. **Enable USB on this machine** recreates the container with `--device-cgroup-rule=c 189:* rwm`,
    a `/dev/bus/usb` bind and `--group-add=<plugdev gid>`; never `--privileged`. A machine whose
    disk is still inside the container is migrated to the host first (see *Host lifecycle*).
-3. **Attach** puts the phone on QEMU's command line and recreates the container around it, so
-   macOS meets the phone during its own start-up USB scan. Three details decide whether that
-   works, each measured on a phone on the desk. The phone gets its **own `usb-ehci` controller**:
-   on the machine's emulated xHCI macOS never assigned it an address. **`guest-reset=false`** is
-   kept: QEMU answers the guest's reset itself, because a real one returns the phone to
-   configuration 0, where it has nothing to describe. And the host **never selects a USB
-   configuration**: QEMU sets configuration 1 when it opens the phone, macOS then selects the
-   NCM configuration itself about twenty seconds into boot, and QEMU claims every interface so
-   no Linux driver binds — selecting the last configuration on the host hands those interfaces
-   to `cdc_ncm` instead. Recreating a container is affordable only because the disk lives on
-   this host, so this refuses when it does not, and macOS is asked to shut itself down first.
-   Hot-plug over QMP remains in the provider and backs the status probe, but is not offered.
-   **Pair** then runs `devicectl manage pair`: tapping Trust gives the guest the older lockdown
-   pairing only, and the CoreDevice pairing `devicectl` and Xcode use is a second, explicit step
-   that raises the Trust prompt itself when needed.
+3. **Attach** hot-plugs the phone over QMP — `device_add usb-host` by `hostbus`/`hostport` —
+   onto a **dedicated `usb-ehci` controller** that every USB-capable container carries from
+   creation, with the **guest allowed to reset** the device. Each of those was measured on a
+   phone on the desk: on the machine's own emulated xHCI macOS never assigns an iPhone an
+   address; with the reset refused it addresses the phone but never configures it; with both as
+   above macOS selects the phone's NCM configuration within ten seconds and registers it under a
+   minute later, with nothing restarted. The host **never selects a USB configuration**: the
+   phone stays parked in configuration 0 by usbmuxd's own rule, so no Linux driver can bind, and
+   QEMU claims every interface once macOS has chosen — selecting the last configuration on the
+   host hands those interfaces to `cdc_ncm` instead. One caveat governs the design: QEMU reads a
+   phone cleanly only the first time it opens it in a process, so a detached phone must be
+   unplugged and plugged in again before it is attached again, and the step says so. Attaching
+   then waits for macOS to list the phone and runs `devicectl manage pair` itself, because
+   tapping Trust gives the guest only the older lockdown pairing; the CoreDevice pairing
+   `devicectl` and Xcode use is that second step, and it raises the Trust prompt on the phone.
+   Containers created before the controller existed are rebuilt once from the machine's
+   profile, with the disk kept and macOS asked to shut itself down first.
 4. **Trust** and **Developer Mode** are the user's on the phone; the step polls
    `xcrun devicectl list devices` until the guest reports the phone paired over a wired tunnel.
 5. **Prepare signing** registers the phone with the team (its UDID comes from the attached

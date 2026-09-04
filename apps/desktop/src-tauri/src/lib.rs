@@ -40,7 +40,8 @@ const ARCHIVE_PROGRESS_EVENT: &str = "machine-archive-progress";
 const USB_MIGRATION_PROGRESS_EVENT: &str = "machine-usb-migration-progress";
 const DEVICE_SIGNING_PROGRESS_EVENT: &str = "machine-device-signing-progress";
 const DEVICE_RUN_PROGRESS_EVENT: &str = "machine-device-progress";
-const BOOT_USB_PROGRESS_EVENT: &str = "machine-boot-usb-progress";
+const CONTAINER_REBUILD_PROGRESS_EVENT: &str = "machine-container-rebuild-progress";
+const USB_ATTACH_PROGRESS_EVENT: &str = "machine-usb-attach-progress";
 
 const CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop";
 const MAC_BUILDER_CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop.macos-builder";
@@ -759,22 +760,6 @@ struct AttachUsbDeviceInput {
     port: String,
 }
 
-/// The phone to place on QEMU's command line, or nothing to take the current one off. Both
-/// recreate the container, so both are confirmed.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PairGuestDeviceInput {
-    udid: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SetBootUsbInput {
-    #[serde(default)]
-    device: Option<AttachUsbDeviceInput>,
-    confirmed: bool,
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ImportMacXcodeResult {
@@ -799,6 +784,12 @@ struct AdoptPodfileLockResult {
     changes: PodfileLockChanges,
     host_path: String,
     backup_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairGuestDeviceInput {
+    udid: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1568,14 +1559,14 @@ async fn migrate_machine_for_usb(
     build_mac_builder_view(&app, &paths).await
 }
 
-/// Puts a phone on QEMU's command line, or takes it off, by recreating the container. macOS
-/// restarts, which is the price of the phone being present before it boots — the one moment
-/// macOS enumerates USB without the hot-plug reset that a phone does not survive.
+/// Recreates the container from the machine's current profile so it picks up an option it was
+/// created without — the phone's USB controller — with the disk, identity and signing kept.
+/// macOS restarts once, which is the whole cost.
 #[tauri::command]
-async fn set_machine_boot_usb(
+async fn rebuild_machine_container(
     app: AppHandle,
     machine_id: String,
-    input: SetBootUsbInput,
+    input: ConfirmInput,
 ) -> Result<MacBuilderView, String> {
     if !input.confirmed {
         return Err("Confirm the machine restart before continuing.".to_string());
@@ -1585,20 +1576,7 @@ async fn set_machine_boot_usb(
         .find(&machine_id)?
         .config
         .clone();
-    let boot_device = match &input.device {
-        Some(device) => Some(
-            buildbridge_docker_osx::BootUsbDevice::new(device.bus, &device.port)
-                .map_err(|error| error.to_string())?,
-        ),
-        None => None,
-    };
-    let mut usb = buildbridge_docker_osx::resolve_usb_options().ok_or_else(|| {
-        "This host has no plugdev group or no USB devices, so a phone cannot be passed through."
-            .to_string()
-    })?;
-    usb.boot_device = boot_device;
-
-    let guard = begin_machine_operation(&app, &machine_id, "rebuilding_usb")?;
+    let guard = begin_machine_operation(&app, &machine_id, "rebuilding_container")?;
     let identity_path = paths.identity();
     let disk_dir = paths.disk_dir();
     let qmp_dir = paths.qmp_dir();
@@ -1613,21 +1591,16 @@ async fn set_machine_boot_usb(
             identity_path: &identity_path,
             disk_dir: &disk_dir,
             qmp_dir: &qmp_dir,
-            usb: Some(usb),
+            usb: buildbridge_docker_osx::resolve_usb_options(),
         };
-        buildbridge_docker_osx::set_boot_usb_device(
-            &container_name,
-            &profile,
-            &options,
-            |progress| {
-                emit_machine_progress(
-                    &event_app,
-                    BOOT_USB_PROGRESS_EVENT,
-                    &event_machine_id,
-                    progress,
-                );
-            },
-        )
+        buildbridge_docker_osx::rebuild_container(&container_name, &profile, &options, |progress| {
+            emit_machine_progress(
+                &event_app,
+                CONTAINER_REBUILD_PROGRESS_EVENT,
+                &event_machine_id,
+                progress,
+            );
+        })
         .map_err(|error| error.to_string())
     })
     .await
@@ -1656,7 +1629,12 @@ async fn attach_usb_device(
     input: AttachUsbDeviceInput,
 ) -> Result<MacBuilderView, String> {
     let paths = MachinePaths::resolve(&app, &machine_id)?;
-    machines::load_registry(&app)?.find(&machine_id)?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let access = load_mac_guest_access(&paths)?
+        .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
     if !buildbridge_docker_osx::valid_usb_port_path(&input.port) {
         return Err("The USB port is not valid.".to_string());
     }
@@ -1695,8 +1673,111 @@ async fn attach_usb_device(
         }
         _ => clear_usb_attach_issue(&app, &machine_id),
     }
+    if attached.enumerated {
+        settle_attached_phone(
+            &app,
+            &machine_id,
+            &paths,
+            profile.ssh_port,
+            &access.username,
+        )
+        .await?;
+    }
 
     build_mac_builder_view(&app, &paths).await
+}
+
+/// After QEMU holds the phone: wait for macOS to register it, then pair with it, which raises
+/// the Trust prompt on the phone. Attaching is one click from the person's side; the phases are
+/// reported so the wait reads as a wait.
+async fn settle_attached_phone(
+    app: &AppHandle,
+    machine_id: &str,
+    paths: &MachinePaths,
+    ssh_port: u16,
+    username: &str,
+) -> Result<(), String> {
+    let guard = begin_machine_operation(app, machine_id, "settling_phone")?;
+    let identity_path = paths.guest_identity();
+    let known_hosts_path = paths.known_hosts();
+    let event_app = app.clone();
+    let event_machine_id = machine_id.to_string();
+    let username = username.to_string();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        let started = std::time::Instant::now();
+        let report = |phase: &str, detail: &str| {
+            emit_machine_progress(
+                &event_app,
+                USB_ATTACH_PROGRESS_EVENT,
+                &event_machine_id,
+                serde_json::json!({
+                    "phase": phase,
+                    "elapsedSeconds": started.elapsed().as_secs(),
+                    "detail": detail,
+                }),
+            );
+        };
+        report(
+            "waiting_for_macos",
+            "macOS is enumerating the phone; this takes up to a minute",
+        );
+        let mut devices = Vec::new();
+        while started.elapsed() < std::time::Duration::from_secs(90) {
+            devices = buildbridge_docker_osx::list_guest_devices(
+                ssh_port,
+                &username,
+                &identity_path,
+                &known_hosts_path,
+            )
+            .unwrap_or_default();
+            if devices
+                .iter()
+                .any(|device| device.transport_type == buildbridge_docker_osx::TransportType::Wired)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+        let wired = devices
+            .iter()
+            .find(|device| device.transport_type == buildbridge_docker_osx::TransportType::Wired);
+        match wired {
+            Some(device)
+                if device.pairing_state != buildbridge_docker_osx::PairingState::Paired =>
+            {
+                if let Some(udid) = &device.udid {
+                    report(
+                        "pairing",
+                        "Unlock the phone and tap Trust when it asks about this computer",
+                    );
+                    if let Ok(paired) = buildbridge_docker_osx::pair_guest_device(
+                        ssh_port,
+                        &username,
+                        &identity_path,
+                        &known_hosts_path,
+                        udid,
+                    ) {
+                        devices = paired;
+                    }
+                }
+            }
+            _ => {}
+        }
+        report("completed", "Done");
+        Ok::<_, String>(devices)
+    })
+    .await
+    .map_err(|error| error.to_string());
+    drop(guard);
+    let devices = finish_operation(&cancel_probe, joined)?;
+    if let Ok(mut cache) = app.state::<AppState>().guest_devices.lock() {
+        cache.insert(machine_id.to_string(), devices);
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -6115,7 +6196,7 @@ pub fn run() {
             remove_usb_release_rule,
             migrate_machine_for_usb,
             attach_usb_device,
-            set_machine_boot_usb,
+            rebuild_machine_container,
             detach_usb_device,
             list_guest_devices,
             pair_guest_device,

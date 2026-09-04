@@ -85,11 +85,8 @@ export interface Backend {
     migrateMachineForUsb(machineId: string): Promise<T.MacBuilderView>;
     attachUsbDevice(machineId: string, bus: number, port: string): Promise<T.MacBuilderView>;
     detachUsbDevice(machineId: string): Promise<T.MacBuilderView>;
-    /** Recreates the container with the phone on QEMU's command line, or without it. */
-    setMachineBootUsb(
-        machineId: string,
-        device: { bus: number; port: string } | null,
-    ): Promise<T.MacBuilderView>;
+    /** Recreates the container from its profile; macOS restarts once, the disk is kept. */
+    rebuildMachineContainer(machineId: string): Promise<T.MacBuilderView>;
     /** Asks the guest which phones it sees; the returned view carries the fresh list. */
     listGuestDevices(machineId: string): Promise<T.MacBuilderView>;
     /** Pairs the guest with the phone; raises Trust on the phone when needed and waits for it. */
@@ -154,8 +151,11 @@ export interface Backend {
     onUsbMigrationProgress(
         handler: (event: T.MachineEvent<T.DiskMigrationProgress>) => void,
     ): Promise<Unlisten>;
-    onBootUsbProgress(
-        handler: (event: T.MachineEvent<T.BootUsbProgress>) => void,
+    onContainerRebuildProgress(
+        handler: (event: T.MachineEvent<T.ContainerRebuildProgress>) => void,
+    ): Promise<Unlisten>;
+    onUsbAttachProgress(
+        handler: (event: T.MachineEvent<T.UsbAttachProgress>) => void,
     ): Promise<Unlisten>;
     onDeviceSigningProgress(
         handler: (event: T.MachineEvent<T.DeviceSigningProgress>) => void,
@@ -239,8 +239,8 @@ async function createTauriBackend(): Promise<Backend> {
         attachUsbDevice: (machineId, bus, port) =>
             invoke('attach_usb_device', { machineId, input: { bus, port } }),
         detachUsbDevice: (machineId) => invoke('detach_usb_device', { machineId }),
-        setMachineBootUsb: (machineId, device) =>
-            invoke('set_machine_boot_usb', { machineId, input: { device, confirmed: true } }),
+        rebuildMachineContainer: (machineId) =>
+            invoke('rebuild_machine_container', { machineId, input: { confirmed: true } }),
         listGuestDevices: (machineId) => invoke('list_guest_devices', { machineId }),
         pairGuestDevice: (machineId, udid) =>
             invoke('pair_guest_device', { machineId, input: { udid } }),
@@ -301,7 +301,8 @@ async function createTauriBackend(): Promise<Backend> {
         onProjectProgress: subscribe('machine-project-progress'),
         onArchiveProgress: subscribe('machine-archive-progress'),
         onUsbMigrationProgress: subscribe('machine-usb-migration-progress'),
-        onBootUsbProgress: subscribe('machine-boot-usb-progress'),
+        onContainerRebuildProgress: subscribe('machine-container-rebuild-progress'),
+        onUsbAttachProgress: subscribe('machine-usb-attach-progress'),
         onDeviceSigningProgress: subscribe('machine-device-signing-progress'),
         onDeviceProgress: subscribe('machine-device-progress'),
         pickPaths: async (request) => {

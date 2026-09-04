@@ -98,7 +98,9 @@ export function deviceNextSummary(readiness: DeviceReadiness, view: MacBuilderVi
         case 'container':
             return view.runtime.state === 'missing'
                 ? 'Start the machine; a new container is created with USB access'
-                : 'Recreate the container with USB access; the disk and identity are kept';
+                : view.usb.diskOnHost && !view.usb.phoneController
+                  ? 'Rebuild the container once to add the phone controller; the disk is kept'
+                  : 'Recreate the container with USB access; the disk and identity are kept';
         case 'plug-in':
             return 'Plug an iPhone into this host by cable, then attach it';
         case 'attach': {
