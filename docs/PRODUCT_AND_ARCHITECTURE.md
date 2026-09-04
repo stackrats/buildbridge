@@ -690,6 +690,7 @@ and the whole route re-run with certificates and profiles created on demand.
 | Trust appeared on the phone but `devicectl` still reported it unpaired, and Developer Mode read as unknown | Trust gives only the lockdown pairing; CoreDevice needs its own, and Developer Mode is reported only through an open tunnel | The trust rung runs `devicectl manage pair` itself, and the listing runs `device info details` per phone to open the tunnel | Resolved |
 | A detached phone could not be attached again without a restart | QEMU reads a phone cleanly only the first time it opens it in a process; a re-add after `device_del` leaves a stale libusb entry | The step names the state (`replug`) and offers Restart the machine; attach is once per plug by design | Resolved by design; noted in the panel |
 | Provisioning failed with `-25264` importing a `.p12` exported on this host | OpenSSL 3 packages PKCS#12 with algorithms macOS's Security framework does not read | Repackage with SHA1-3DES and a SHA-1 MAC before transfer, in place, when the file needs it | Resolved |
+| Both native crate roots had grown past 7,600 lines each, every feature's code in five or six disjoint ranges of one file, and the machine list and the machine page could name different signing kits | Every command and helper had been appended to the crate root; the list view auto-picked a sole kit while the tested rule for the machine view never does | Split each root into modules by concern with a mechanical item mover (bodies unchanged, `pub(crate)` where a boundary was crossed, `use super::*` in each child), and route the list view through the same kit resolution as the machine view | Done 2026-09-04; every test passes unchanged, both roots are under 2,000 lines |
 | The Debug build was refused because its bundle identifier had no profile | A project's Debug configuration often carries its own suffixed identifier, and Apple profiles are per App ID | Read the identifier the Debug build carries from the guest, register it at Apple with the main App ID's capabilities copied, and make the development profile for it; fall back to signing the app target under the approved identifier when only that has a profile | Resolved; the debug build installs beside the store build |
 
 ### Automation and UI boundary
@@ -889,6 +890,20 @@ The following decisions should be treated as settled until this document is deli
     order — keychain password, then Team key, then files — and ends by saying exactly what the
     kit could do if saved now. BuildBridge still never replaces a live App Store profile it did
     not create; when one exists for another certificate, provisioning says so and stops.
+42. Both native crate roots are split by concern, and stay split. The desktop crate's root
+    holds the wire DTOs, the token keyring and `run()`; every command lives in the module of
+    its feature — `ops` (busy markers, cancellation, progress), `runner`, `machine_lifecycle`,
+    `usb`, `devices`, `signing_kits`, `certificates`, `optimizations`, `env_sets`,
+    `apple_profiles`, `guest_access`, `builds`, `views`, `records` (per-machine files). The
+    provider crate's root holds the configuration model, the DTOs, `ProviderError` and the guest
+    probe; the rest is `process`, `ssh`, `docker`, `xcode`, `workspace`, `podfile`, `signing`,
+    `profiles`, `build_log`, `smoke_build`, `archive`, `optimizations`, beside the earlier
+    `usb`, `qmp`, `disk`, `device_run`. A child module starts with `use super::*`, so shared
+    imports, DTOs and constants are declared once in the root; an item another module calls is
+    `pub(crate)`; the roots glob-import (desktop) or re-export (provider) every module, so the
+    command list, the crate's public API and the root's tests read as before. A new command
+    goes into its feature's module and one line in `generate_handler!`; a new provider
+    operation goes into the module of its concern; nothing new is appended to a root.
 
 ### Credential loss and recovery
 
