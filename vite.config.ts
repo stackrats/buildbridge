@@ -29,10 +29,8 @@ export default defineConfig({
             '.codex/**',
             '**/*.md',
             '**/*.toml',
-            '.mcp.json',
             'apps/desktop/src-tauri/gen/**',
             'apps/desktop/src/types/generated/**',
-            'opencode.json',
         ],
         sortTailwindcss: {
             entryPoint: 'apps/desktop/src/style.css',

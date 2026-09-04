@@ -104,7 +104,7 @@ An executor is a build environment exposed by a runner. A runner may eventually 
 
 ### Web control plane
 
-The control plane owns:
+The control plane is not part of this repository; it consumes the protocol defined in `crates/buildbridge-contract` and nothing else from here (decision 46). It owns:
 
 - human accounts and sessions;
 - runner pairing, token issuance, revocation, and last-seen state;
@@ -721,7 +721,7 @@ The 2026-09-04 repository baseline is:
 - 338 Rust workspace tests pass across the contract, runner, Docker-OSX, engine, and command-line crates; all Rust documentation tests pass;
 - Rust formatting and workspace Clippy pass with warnings denied;
 - 106 desktop unit tests pass over the pure step, device, signing, env-set, operations, path, bounded-number, listbox, control-plane-chip, and realtime-failure helpers;
-- Vite+ formatting/lint, desktop Vue type checking, and production bundling pass;
+- Vite+ formatting/lint, desktop Vue type checking, and production bundling pass; and
 - the live fixture acceptance result above remains recorded separately from automated tests.
 
 Any regression discovered in a later milestone must add a focused automated test where deterministic reproduction is possible and a row in this ledger when it changes workflow or recovery behavior.
@@ -808,7 +808,7 @@ Acceptance test: Windows runners build supported native targets, and eligible Wi
 The following decisions should be treated as settled until this document is deliberately revised:
 
 1. BuildBridge remains a monorepo with separate web, desktop, and shared Rust packages.
-2. The control plane is a web service; Tauri/Rust is the trusted local runner.
+2. The control plane is a web service; the engine on the Linux host is the trusted runner.
 3. Reverb WebSockets are the primary build-notification transport.
 4. Runner tokens scope API and private-channel access; human and runner identities remain distinct.
 5. Build jobs are typed and mapped to fixed argv. The web cannot submit arbitrary shell.
@@ -956,6 +956,16 @@ The following decisions should be treated as settled until this document is deli
     process refuses and names what holds it, and the desktop shows a machine the command line
     is building as busy. A daemon, when one is wanted, serializes the same engine functions
     over a socket; nothing else has to change.
+46. The control plane is outside this repository, and the protocol is the seam. This repository
+    is the engine, the desktop and the command line; the service a runner pairs with — accounts,
+    builds queued from commits, runners people bring — is a separate deliverable that consumes
+    `crates/buildbridge-contract` and nothing else from here. The contract is protocol version
+    1, additive only, with the runner's client in `crates/buildbridge-runner` exercising every
+    route (`api/runner/pair`, `heartbeat`, `realtime`, `builds/claim`, `builds/{id}/logs`,
+    `builds/{id}/lease`, `builds/{id}/complete`, and `api/broadcasting/auth` for the private
+    Reverb channel that carries `build.queued`). A change to the wire shape lands in the contract
+    crate first, with its tests, and any server follows; a JSON Schema published from the crate
+    is the intended way to hold a server written in another language to it.
 
 ### Credential loss and recovery
 

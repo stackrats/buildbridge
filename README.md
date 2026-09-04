@@ -4,7 +4,7 @@
 
 ### Build and sign iOS apps locally on a macOS virtual machine from Linux.
 
-BuildBridge creates a persistent macOS build machine on your Linux host with Docker, QEMU, and KVM. Its desktop app handles setup, project sync, Xcode builds, signing, and IPA export. An optional web control plane queues builds and shows their progress, logs, and artifacts.
+BuildBridge creates a persistent macOS build machine on your Linux host with Docker, QEMU, and KVM. Its desktop app handles setup, project sync, Xcode builds, signing, and IPA export. An optional control plane queues builds and shows their progress, logs, and artifacts.
 
 [Features](#features) · [How it works](#how-it-works) · [Requirements](#requirements) · [Development](#development)
 
@@ -19,19 +19,19 @@ BuildBridge creates a persistent macOS build machine on your Linux host with Doc
 - Store signing certificates and provisioning profiles in the operating system's credential vault.
 - Create signed archives and verified App Store Connect IPAs.
 - Manage multiple local macOS build machines from the Linux desktop app.
-- Pair with the web control plane for queued builds, live status, logs, and artifacts.
+- Pair with a control plane for queued builds, live status, logs, and artifacts.
 
 ## How it works
 
 ```text
-Web control plane ── Reverb + HTTPS ─┐   Tauri desktop ─┐
+Control plane ────── Reverb + HTTPS ─┐   Tauri desktop ─┐
 Approved projects ───────────────────┼─ BuildBridge engine ◄─ buildbridge CLI
 Credential vault ────────────────────┘   trusted Linux host
                                           ├─ Docker-OSX lifecycle ─┐
                                           └─ pinned SSH bridge ─────┴─ macOS / Xcode ── archive / IPA
 ```
 
-The engine is the trusted side, running inside the desktop app or the `buildbridge` command line on your Linux host. It owns the machines, approved project folders, signing credentials, and pinned SSH connection to each guest. The web app only coordinates pairing and builds; it cannot run arbitrary shell commands or access signing secrets.
+The engine is the trusted side, running inside the desktop app or the `buildbridge` command line on your Linux host. It owns the machines, approved project folders, signing credentials, and pinned SSH connection to each guest. The control plane only coordinates pairing and builds over the protocol in the contract crate; it cannot run arbitrary shell commands or access signing secrets.
 
 The desktop guides each machine through two workflows, and the command line drives the same steps:
 
@@ -84,6 +84,8 @@ apps/cli        The buildbridge command line, the other client
 crates/         Rust: protocol contract, runner transport, Docker-OSX provider, and the engine
 ```
 
+The control plane a runner pairs with is a separate service, not part of this repository; the two share only the wire protocol defined in `crates/buildbridge-contract`.
+
 Requirements are Rust, Docker, and the Node.js version managed by Vite+.
 
 ```bash
@@ -93,7 +95,7 @@ vp install
 Run the apps:
 
 ```bash
-pnpm dev:desktop                        # Tauri desktop
+pnpm dev                                # Tauri desktop
 cargo run -p buildbridge-cli -- status  # the command line, on the same machines
 ```
 
@@ -103,10 +105,9 @@ Run the checks:
 
 ```bash
 pnpm check          # format, lint, type check, cargo check
-pnpm test           # Rust tests
-cargo test --workspace
+pnpm test           # Rust workspace tests
 vp test --run       # desktop unit tests, inside apps/desktop
-pnpm types:generate # inside apps/desktop: regenerate the TypeScript contract from the Rust DTOs
+pnpm types:generate # regenerate the TypeScript contract from the Rust DTOs
 pnpm build
 ```
 

@@ -4,14 +4,13 @@
     "private": true,
     "type": "module",
     "scripts": {
+        "dev": "vp run --filter @buildbridge/desktop tauri dev",
         "dev:frontend": "vp dev",
-        "dev:desktop": "vp run --filter @buildbridge/desktop tauri dev",
         "build": "vp run -r build",
-        "build:web": "vp run --filter @buildbridge/web build",
         "build:desktop": "vp run --filter @buildbridge/desktop tauri build",
         "check": "vp check && vp run -r typecheck && cargo check --workspace",
         "test": "cargo test --workspace",
-        "test:rust": "cargo test --workspace",
+        "types:generate": "vp run --filter @buildbridge/desktop types:generate",
         "prepare": "vp config"
     },
     "devDependencies": {
