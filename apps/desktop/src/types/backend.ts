@@ -662,7 +662,10 @@ export type ConsoleEnd = 'stopped' | 'exited' | 'disconnected';
 
 export interface AppleDeviceRunResult {
     device: GuestDevice;
+    /** The identifier the app was signed and installed under. */
     bundleIdentifier: string;
+    /** The project's own Debug identifier, when the build was signed under the approved one instead. */
+    projectBundleIdentifier?: string | null;
     appPath: string;
     marketingVersion: string;
     buildNumber: string;

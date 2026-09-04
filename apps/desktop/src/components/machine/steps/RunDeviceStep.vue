@@ -531,7 +531,13 @@ const runFacts = computed(() =>
                   label: 'Device',
                   value: `${run.value.device.name}${run.value.device.osVersion ? ` · iOS ${run.value.device.osVersion}` : ''}`,
               },
-              { label: 'Bundle identifier', value: run.value.bundleIdentifier, mono: true },
+              {
+                  label: 'Bundle identifier',
+                  value: run.value.projectBundleIdentifier
+                      ? `${run.value.bundleIdentifier} · the project's Debug identifier ${run.value.projectBundleIdentifier} has no development profile`
+                      : run.value.bundleIdentifier,
+                  mono: !run.value.projectBundleIdentifier,
+              },
               {
                   label: 'Version',
                   value: `${run.value.marketingVersion} (${run.value.buildNumber})`,

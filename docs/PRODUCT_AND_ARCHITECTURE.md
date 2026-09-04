@@ -1008,7 +1008,11 @@ ladder is shown as a readiness grid and every rung has one primary action:
    none, finds or creates an `IOS_APP_DEVELOPMENT` profile listing that phone, downloads it into
    the kit, and provisions the machine again so the guest keychain holds both identities.
 6. **Build and run** compiles the App scheme in `Debug` for `generic/platform=iOS` inside the same
-   fixed native helper that archives use, verifies the bundle (signature, embedded profile UUID,
+   fixed native helper that archives use. A project often gives its Debug configuration a
+   suffixed bundle identifier so both builds can sit on one phone; the development profile is
+   made for the approved identifier, and Apple profiles are per App ID, so when the profile does
+   not cover the Debug identifier the app target alone is signed under the approved one and the
+   step says so. Every other target keeps its own identifier, verifies the bundle (signature, embedded profile UUID,
    `get-task-allow`), then a detached guest job runs `devicectl device install app` and
    `devicectl device process launch --console --terminate-existing`. Stop ends the console and
    keeps the run; every line reaches the drawer's **Device console** tab.

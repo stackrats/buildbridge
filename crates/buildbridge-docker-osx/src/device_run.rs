@@ -502,6 +502,42 @@ mod tests {
     }"#;
 
     #[test]
+    fn a_debug_identifier_the_profile_does_not_cover_falls_back_to_the_approved_one() {
+        let profile = "TEAM123456.com.example.app";
+        assert_eq!(
+            device_bundle_identifier("com.example.app", "com.example.app", profile).unwrap(),
+            ("com.example.app".to_string(), None)
+        );
+        assert_eq!(
+            device_bundle_identifier("com.example.app.debug", "com.example.app", profile).unwrap(),
+            (
+                "com.example.app".to_string(),
+                Some("com.example.app.debug".to_string())
+            )
+        );
+        // A wildcard profile covers the Debug identifier and it is kept.
+        assert_eq!(
+            device_bundle_identifier("com.example.app.debug", "com.example.app", "TEAM123456.*")
+                .unwrap(),
+            ("com.example.app.debug".to_string(), None)
+        );
+        let error = device_bundle_identifier("com.other.app.debug", "com.other.app", profile)
+            .expect_err("neither covered");
+        assert!(error.to_string().contains("com.other.app.debug"));
+        assert!(error.to_string().contains("does not cover"));
+
+        let plain = device_signing_xcconfig("App", "TEAM123456", "ABCD", "uuid", None);
+        assert!(!plain.contains("PRODUCT_BUNDLE_IDENTIFIER"));
+        let renamed =
+            device_signing_xcconfig("App", "TEAM123456", "ABCD", "uuid", Some("com.example.app"));
+        assert!(renamed.contains("BUILDBRIDGE_BUNDLE_App = com.example.app"));
+        // Only the app target: every other target inherits its own identifier.
+        assert!(renamed.contains(
+            "PRODUCT_BUNDLE_IDENTIFIER = $(BUILDBRIDGE_BUNDLE_$(TARGET_NAME):default=$(inherited))"
+        ));
+    }
+
+    #[test]
     fn the_listing_script_keeps_python_on_one_line_and_lets_printf_make_the_newlines() {
         let script = device_list_script("john");
         // The Python program is single-quoted for the guest shell, so any newline escape in it
@@ -722,7 +758,12 @@ pub enum ConsoleEnd {
 #[serde(rename_all = "camelCase")]
 pub struct AppleDeviceRunResult {
     pub device: GuestDevice,
+    /// The identifier the app was signed and installed under.
     pub bundle_identifier: String,
+    /// The project's own Debug identifier, when the build was signed under the approved one
+    /// instead because only that one has a development profile.
+    #[serde(default)]
+    pub project_bundle_identifier: Option<String>,
     pub app_path: String,
     pub marketing_version: String,
     pub build_number: String,
@@ -780,6 +821,54 @@ pub(crate) struct DeviceBuildTarget {
     target: String,
     bundle_identifier: String,
     product_path: String,
+}
+
+/// Which identifier the Debug build is signed under. A project often gives its Debug
+/// configuration a suffixed identifier so both builds can sit on one phone, but the development
+/// profile is made for the approved identifier — the one the project was verified and the
+/// archive signs with — and Apple profiles are per App ID. When the profile covers the Debug
+/// identifier it is used as it is; when it covers only the approved one, the build is signed
+/// under that and the project's own identifier is reported back; otherwise the mismatch is
+/// named in full.
+pub(crate) fn device_bundle_identifier(
+    debug_identifier: &str,
+    approved_identifier: &str,
+    profile_application_identifier: &str,
+) -> Result<(String, Option<String>), ProviderError> {
+    if profile_allows_bundle(profile_application_identifier, debug_identifier) {
+        return Ok((debug_identifier.to_string(), None));
+    }
+    if profile_allows_bundle(profile_application_identifier, approved_identifier) {
+        return Ok((
+            approved_identifier.to_string(),
+            Some(debug_identifier.to_string()),
+        ));
+    }
+    Err(ProviderError::GuestBridge(format!(
+        "the Debug configuration builds bundle identifier {debug_identifier}, which the development profile for {approved_identifier} does not cover"
+    )))
+}
+
+/// The archive's target-scoped signing settings, plus — when the Debug build is signed under
+/// the approved identifier — that identifier for the app target alone. Every other target keeps
+/// its own: a bare override would rename every Pod framework too.
+pub(crate) fn device_signing_xcconfig(
+    target: &str,
+    development_team: &str,
+    identity_sha1: &str,
+    profile_uuid: &str,
+    bundle_override: Option<&str>,
+) -> String {
+    let mut xcconfig =
+        apple_archive_signing_xcconfig(target, development_team, identity_sha1, profile_uuid);
+    if let Some(bundle) = bundle_override {
+        xcconfig.push_str(&format!(
+            "BUILDBRIDGE_BUNDLE_{target} = {bundle}\n\
+PRODUCT_BUNDLE_IDENTIFIER = $(BUILDBRIDGE_BUNDLE_$(TARGET_NAME):default=$(inherited))\n"
+        ));
+    }
+
+    xcconfig
 }
 
 pub(crate) fn parse_device_build_target(
@@ -1243,6 +1332,8 @@ where
 {
     validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
     validate_signing_target(signing.development_team, signing.bundle_identifier)?;
+    // Set while the target is resolved; a reattached run does not resolve it again.
+    let mut project_bundle_identifier: Option<String> = None;
     if !valid_apple_scheme(scheme) {
         return Err(ProviderError::GuestBridge(
             "the stored Xcode scheme is missing or invalid".to_string(),
@@ -1378,22 +1469,34 @@ where
                     shell_single_quote(&derived_data),
                 ),
             )?;
-            let target = parse_device_build_target(&settings, &derived_data)?;
-            if !profile_allows_bundle(
-                &signing.profile.application_identifier,
+            let mut target = parse_device_build_target(&settings, &derived_data)?;
+            let (signed_as, project_identifier) = device_bundle_identifier(
                 &target.bundle_identifier,
-            ) {
-                return Err(ProviderError::GuestBridge(format!(
-                    "the Debug configuration builds bundle identifier {}, which the development profile for {} does not cover",
-                    target.bundle_identifier, signing.bundle_identifier
-                )));
+                signing.bundle_identifier,
+                &signing.profile.application_identifier,
+            )?;
+            if let Some(project) = &project_identifier {
+                let note = format!(
+                    "Signing the Debug build as {signed_as}: the project's Debug identifier {project} has no development profile, and the app target alone is renamed for this build."
+                );
+                on_progress(device_progress(
+                    AppleDeviceRunPhase::ResolvingTarget,
+                    started_at,
+                    &note,
+                    vec![note.clone()],
+                ));
             }
+            target.bundle_identifier = signed_as;
+            project_bundle_identifier = project_identifier;
 
-            let xcconfig = apple_archive_signing_xcconfig(
+            let xcconfig = device_signing_xcconfig(
                 &target.target,
                 signing.development_team,
                 signing.identity_sha1,
                 &signing.profile.uuid,
+                project_bundle_identifier
+                    .as_deref()
+                    .map(|_| target.bundle_identifier.as_str()),
             );
             stream_bytes_to_guest(
                 SIGNING_HELPER_SOURCE,
@@ -1685,6 +1788,7 @@ where
     Ok(AppleDeviceRunResult {
         device: device.clone(),
         bundle_identifier: meta.bundle_identifier,
+        project_bundle_identifier,
         app_path: meta.app_path,
         marketing_version: meta.marketing_version,
         build_number: meta.build_number,
