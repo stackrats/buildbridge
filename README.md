@@ -54,6 +54,26 @@ Optional, to run a Debug build on a real iPhone: the phone on USB, polkit (`pkex
 
 Docker-OSX is an experimental, self-hosted route. Apple's licensing ties macOS virtualization to Apple hardware; review it before using BuildBridge for production builds.
 
+## Command line
+
+The same engine as the desktop, in a terminal, on the same machines:
+
+```sh
+cargo run -p buildbridge-cli -- status
+buildbridge machine create "Team Mac" --from-template xcode-26-ready
+buildbridge machine start team-mac
+buildbridge project approve team-mac /path/to/app
+buildbridge project sync team-mac
+buildbridge build test team-mac
+buildbridge signing attach team-mac dist-kit && buildbridge signing provision team-mac
+buildbridge build archive team-mac
+buildbridge device attach team-mac 3 9 && buildbridge device run team-mac <udid>
+```
+
+Progress goes to stderr as it happens and results to stdout; `--json` makes both machine
+readable. A machine the desktop is working on is refused with the reason, and the other way
+round. `buildbridge --help` lists every verb.
+
 ## Development
 
 This is a monorepo:

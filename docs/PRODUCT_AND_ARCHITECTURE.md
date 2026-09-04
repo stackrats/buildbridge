@@ -68,6 +68,13 @@ We should finish this path before broadening Docker-OSX support to Windows or ad
 
 ## System shape
 
+The native side is four crates and two clients. `buildbridge-contract` is the wire contract with
+the control plane; `buildbridge-runner` its HTTP transport; `buildbridge-docker-osx` the provider
+that drives Docker, QEMU and the macOS guest; `buildbridge-engine` everything above them —
+machines, records, vault, Apple, templates — behind one `Engine` value that any client holds.
+The desktop and the `buildbridge` command line are the two clients today, both thin, both on the
+same directories (decision 45).
+
 ```mermaid
 flowchart LR
     Browser[Web browser] --> Control[Control plane]
@@ -928,6 +935,20 @@ The following decisions should be treated as settled until this document is deli
     struct with the derive and one regeneration; a renamed field fails the desktop's type
     check at every place that read it. The first generation found four drifts in the
     hand-written file, which is the reason it exists.
+45. The engine is a crate, and every client is thin. `crates/buildbridge-engine` holds
+    everything BuildBridge does — the registry, the per-machine records, the vault, the Apple
+    API, templates, the runner — behind an `Engine` value built from two directories and an
+    `EventSink`; nothing in it knows whether a window, a terminal or a daemon is listening. The
+    desktop (`apps/desktop/src-tauri`, under nine hundred lines) is one generated wrapper per
+    command that hands its arguments to the engine function of the same name, a sink that
+    forwards events to the webview and refreshes the tray, and Tauri's directories. The command
+    line (`apps/cli`, the `buildbridge` binary) builds the same engine on the same directories
+    under the desktop's identifier, prints progress to stderr and results to stdout, and takes
+    `--json` for both; its verbs follow the journey. Two processes never run one machine at
+    once: an operation leaves a lock file beside its machine with its pid and label, a second
+    process refuses and names what holds it, and the desktop shows a machine the command line
+    is building as busy. A daemon, when one is wanted, serializes the same engine functions
+    over a socket; nothing else has to change.
 
 ### Credential loss and recovery
 
