@@ -185,9 +185,13 @@ function meta(step: Step<Id>): string {
             </span>
             <Meter
                 class="max-w-40 flex-1"
-                :value="steps.length ? done / steps.length : 0"
+                :value="required.length ? done / required.length : 0"
                 :tone="
-                    focus?.status === 'failed' ? 'danger' : done === steps.length ? 'ok' : 'primary'
+                    focus?.status === 'failed'
+                        ? 'danger'
+                        : done === required.length
+                          ? 'ok'
+                          : 'primary'
                 "
             />
             <span

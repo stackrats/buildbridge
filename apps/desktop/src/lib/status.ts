@@ -1,7 +1,7 @@
 // How a machine or guest state is rendered. One map per meaning, so a colour carries the same
 // message everywhere it appears.
 
-import type { ContainerState, GuestTrustState } from '../types/backend';
+import type { ContainerState } from '../types/backend';
 
 export type BadgeTone = 'neutral' | 'ok' | 'warn' | 'danger' | 'info' | 'primary' | 'outline';
 
@@ -45,17 +45,3 @@ export const machineStateDot: Record<ContainerState, string> = {
 export function isLive(state: ContainerState): boolean {
     return state === 'running' || state === 'paused' || state === 'restarting';
 }
-
-export const trustLabel: Record<GuestTrustState, string> = {
-    unavailable: 'not reachable',
-    untrusted: 'not pinned',
-    trusted: 'pinned',
-    mismatch: 'identity changed',
-};
-
-export const trustBadge: Record<GuestTrustState, BadgeTone> = {
-    unavailable: 'neutral',
-    untrusted: 'warn',
-    trusted: 'ok',
-    mismatch: 'danger',
-};

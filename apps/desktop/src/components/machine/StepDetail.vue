@@ -36,5 +36,5 @@ defineProps<{ session: MachineSession; step: JourneyStep }>();
     <SigningKitStep v-else-if="step.id === 'signing-kit'" :session="session" :step="step" />
     <ProvisionStep v-else-if="step.id === 'provision'" :session="session" :step="step" />
     <ArchiveStep v-else-if="step.id === 'archive'" :session="session" :step="step" />
-    <RunDeviceStep v-else :session="session" :step="step" />
+    <RunDeviceStep v-else-if="step.id === 'run-device'" :session="session" :step="step" />
 </template>

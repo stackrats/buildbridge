@@ -66,7 +66,10 @@ export type OperationId =
     | 'clear-device-run'
     | 'adopt-lock';
 
-/** Maps the native busy key (see src-tauri/src/lib.rs) to the step it blocks. */
+/**
+ * Maps the native busy key (see src-tauri/src/ops.rs) to the step it blocks. `optimizing` is
+ * absent on purpose: guest optimizations sit outside the timeline.
+ */
 const busyKeyStep: Record<string, string> = {
     starting: 'launch',
     stopping: 'launch',
