@@ -7,6 +7,7 @@ import RunnerPane from './components/runner/RunnerPane.vue';
 import Sidebar from './components/Sidebar.vue';
 import SigningKitPane from './components/signing/SigningKitPane.vue';
 import EnvSetPane from './components/envs/EnvSetPane.vue';
+import TemplatesPane from './components/templates/TemplatesPane.vue';
 import TooltipLayer from './components/ui/TooltipLayer.vue';
 import TopBar from './components/TopBar.vue';
 import NewMachineDialog from './components/dialogs/NewMachineDialog.vue';
@@ -62,6 +63,7 @@ onBeforeUnmount(() => {
                 <RunnerPane v-else-if="ui.state.route.kind === 'runner'" />
                 <SigningKitPane v-else-if="ui.state.route.kind === 'signing'" />
                 <EnvSetPane v-else-if="ui.state.route.kind === 'envs'" />
+                <TemplatesPane v-else-if="ui.state.route.kind === 'templates'" />
                 <HomePane v-else />
             </main>
         </div>

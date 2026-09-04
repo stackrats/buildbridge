@@ -36,7 +36,17 @@ export interface Backend {
     runOnce(): Promise<T.RunOnceResult>;
 
     listMachines(): Promise<T.MachineListView>;
-    createMachine(profile: T.MacBuilderConfig): Promise<T.MachineListView>;
+    /** `templateId` clones the machine's disk from a saved template instead of a fresh install. */
+    createMachine(
+        profile: T.MacBuilderConfig,
+        templateId: string | null,
+    ): Promise<T.MachineListView>;
+    listMachineTemplates(): Promise<T.MachineTemplateSummary[]>;
+    /** Shuts macOS down and saves the machine's disk as a template; the machine stays stopped. */
+    saveMachineTemplate(machineId: string, name: string): Promise<T.MachineTemplateSummary>;
+    deleteMachineTemplate(templateId: string): Promise<T.MachineTemplateSummary[]>;
+    /** Pins a clone's identity and installs its key through the template it came from. */
+    adoptTemplateGuest(machineId: string): Promise<T.MacBuilderView>;
     deleteMachine(machineId: string): Promise<T.MachineListView>;
     discardMachineContainer(machineId: string): Promise<T.MacBuilderView>;
     /** Stops whatever is running on the machine; the operation returns as stopped. */
@@ -158,6 +168,9 @@ export interface Backend {
     onContainerRebuildProgress(
         handler: (event: T.MachineEvent<T.ContainerRebuildProgress>) => void,
     ): Promise<Unlisten>;
+    onTemplateProgress(
+        handler: (event: T.MachineEvent<T.TemplateSaveProgress>) => void,
+    ): Promise<Unlisten>;
     onUsbAttachProgress(
         handler: (event: T.MachineEvent<T.UsbAttachProgress>) => void,
     ): Promise<Unlisten>;
@@ -200,7 +213,13 @@ async function createTauriBackend(): Promise<Backend> {
         runOnce: () => invoke('run_once'),
 
         listMachines: () => invoke('list_machines'),
-        createMachine: (profile) => invoke('create_machine', { profile }),
+        createMachine: (profile, templateId) => invoke('create_machine', { profile, templateId }),
+        listMachineTemplates: () => invoke('list_machine_templates'),
+        saveMachineTemplate: (machineId, name) =>
+            invoke('save_machine_template', { machineId, input: { name, confirmed: true } }),
+        deleteMachineTemplate: (templateId) =>
+            invoke('delete_machine_template', { templateId, input: { confirmed: true } }),
+        adoptTemplateGuest: (machineId) => invoke('adopt_template_guest', { machineId }),
         deleteMachine: (machineId) =>
             invoke('delete_machine', { machineId, input: { confirmed: true } }),
         discardMachineContainer: (machineId) =>
@@ -308,6 +327,7 @@ async function createTauriBackend(): Promise<Backend> {
         onArchiveProgress: subscribe('machine-archive-progress'),
         onUsbMigrationProgress: subscribe('machine-usb-migration-progress'),
         onContainerRebuildProgress: subscribe('machine-container-rebuild-progress'),
+        onTemplateProgress: subscribe('machine-template-progress'),
         onUsbAttachProgress: subscribe('machine-usb-attach-progress'),
         onDeviceSigningProgress: subscribe('machine-device-signing-progress'),
         onDeviceProgress: subscribe('machine-device-progress'),

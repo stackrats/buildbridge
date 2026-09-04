@@ -161,6 +161,8 @@ interface MockMachine {
     deviceRun: T.AppleDeviceRunResult | null;
     deviceRunError: string | null;
     cancelRequested: boolean;
+    /** The template this machine was cloned from; its first boot needs no console. */
+    templateId: string | null;
 }
 
 function readyMachine(): MockMachine {
@@ -268,6 +270,7 @@ function readyMachine(): MockMachine {
         deviceRun: null,
         deviceRunError: null,
         cancelRequested: false,
+        templateId: null,
         logs: [
             'Docker-OSX: booting OpenCore with generated serial C02X1234ABCD',
             'qemu-system-x86_64: -display gtk,zoom-to-fit=on',
@@ -316,6 +319,7 @@ function freshMachine(): MockMachine {
         deviceRun: null,
         deviceRunError: null,
         cancelRequested: false,
+        templateId: null,
         logs: [],
     };
 }
@@ -432,6 +436,21 @@ export function createMockBackend(): Backend {
         default: 'example-team',
         'team-mac': null,
     };
+    const templates: T.MachineTemplateSummary[] = [
+        {
+            id: 'xcode-26-ready',
+            name: 'Xcode 26 ready',
+            createdAtEpochSeconds: 1_756_800_000,
+            sourceMachineName: 'Local macOS builder',
+            macosVersion: '26.6.2',
+            xcodeVersion: '26.6',
+            sizeBytes: 21_400_000_000,
+            machineNames: [],
+            ready: true,
+        },
+    ];
+    const templateFor = (machine: MockMachine) =>
+        templates.find((template) => template.id === machine.templateId) ?? null;
     const envSets: T.EnvSetSummary[] = [
         {
             id: 'production',
@@ -510,6 +529,9 @@ export function createMockBackend(): Backend {
                   : 'untrusted';
         return {
             machineId: machine.id,
+            template: machine.templateId
+                ? { id: machine.templateId, name: templateFor(machine)?.name ?? machine.templateId }
+                : null,
             profile: { ...machine.config },
             busyOperation: machine.busy,
             runtime: {
@@ -614,6 +636,7 @@ export function createMockBackend(): Backend {
         host: hostReady,
         machines: machines.map((machine) => ({
             id: machine.id,
+            templateName: templateFor(machine)?.name ?? null,
             config: { ...machine.config },
             createdAtEpochSeconds: machine.createdAt,
             state: machine.state,
@@ -686,7 +709,7 @@ export function createMockBackend(): Backend {
             await sleep(120);
             return list();
         },
-        async createMachine(profile) {
+        async createMachine(profile, templateId) {
             await sleep(200);
             if (machines.some((machine) => machine.config.sshPort === profile.sshPort)) {
                 throw new Error(
@@ -697,9 +720,92 @@ export function createMockBackend(): Backend {
             machine.id = slug(profile.name);
             machine.config = { ...profile };
             machine.createdAt = Math.floor(Date.now() / 1000);
+            if (templateId) {
+                const template = templates.find((entry) => entry.id === templateId);
+                if (!template) {
+                    throw new Error('That template is no longer stored.');
+                }
+                machine.templateId = templateId;
+                template.machineNames.push(machine.config.name);
+            }
             machines.push(machine);
             changed(null);
             return list();
+        },
+        async listMachineTemplates() {
+            await sleep(120);
+            return templates.map((template) => ({
+                ...template,
+                machineNames: [...template.machineNames],
+            }));
+        },
+        async saveMachineTemplate(machineId, name) {
+            const machine = find(machineId);
+            return busy(machine, 'Saving the machine as a template', async () => {
+                const phases: Array<[T.TemplateSavePhase, string, number | null]> = [
+                    [
+                        'shutting_down',
+                        'Asking macOS to shut down so the disk is copied at rest',
+                        null,
+                    ],
+                    ['checking_space', 'Checking free space for the compressed copy', null],
+                    ['compressing_disk', 'Compressing the macOS disk into the template', 0],
+                    ['compressing_disk', 'Compressing the macOS disk into the template', 45],
+                    ['compressing_disk', 'Compressing the macOS disk into the template', 90],
+                    ['copying_files', 'Copying the NVRAM and install media', 100],
+                    ['completed', 'Template saved', 100],
+                ];
+                let elapsed = 0;
+                for (const [phase, detail, percent] of phases) {
+                    emitter.emit<T.MachineEvent<T.TemplateSaveProgress>>(
+                        'machine-template-progress',
+                        { machineId, phase, elapsedSeconds: elapsed, detail, percent },
+                    );
+                    await sleep(500);
+                    elapsed += 4;
+                }
+                machine.state = 'exited';
+                machine.startedAt = null;
+                const template: T.MachineTemplateSummary = {
+                    id: slug(name),
+                    name,
+                    createdAtEpochSeconds: Math.floor(Date.now() / 1000),
+                    sourceMachineName: machine.config.name,
+                    macosVersion: machine.macosVersion,
+                    xcodeVersion: machine.xcodeVersion,
+                    sizeBytes: 20_800_000_000,
+                    machineNames: [],
+                    ready: true,
+                };
+                templates.unshift(template);
+                return { ...template };
+            });
+        },
+        async deleteMachineTemplate(templateId) {
+            await sleep(200);
+            const template = templates.find((entry) => entry.id === templateId);
+            if (template?.machineNames.length) {
+                throw new Error(
+                    `Machines still read through this template: ${template.machineNames.join(', ')}. Delete those machines first.`,
+                );
+            }
+            const index = templates.findIndex((entry) => entry.id === templateId);
+            if (index >= 0) {
+                templates.splice(index, 1);
+            }
+            return templates.map((entry) => ({ ...entry }));
+        },
+        async adoptTemplateGuest(machineId) {
+            const machine = find(machineId);
+            return busy(machine, 'Adopting the template', async () => {
+                await sleep(900);
+                machine.pinned = true;
+                machine.username = 'builder';
+                machine.publicKey =
+                    'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBuildBridgeGuestAccess buildbridge-guest';
+                machine.authenticated = true;
+                return view(machine);
+            });
         },
         async deleteMachine(machineId) {
             const machine = find(machineId);
@@ -762,6 +868,16 @@ export function createMockBackend(): Backend {
                 machine.state = 'running';
                 machine.containerId ??= `${machine.id}-${Date.now().toString(16)}`;
                 machine.startedAt = new Date().toISOString();
+                if (machine.templateId) {
+                    // A clone boots the template's macOS: reachable at once, its key still to come.
+                    const template = templateFor(machine);
+                    machine.portOpen = true;
+                    machine.reachable = true;
+                    machine.fingerprint = 'SHA256:Qm9vdFN0cmFwR3Vlc3RGaW5nZXJwcmludEV4YW1wbGU';
+                    machine.macosVersion = template?.macosVersion ?? '26.6.2';
+                    machine.xcodeVersion = template?.xcodeVersion ?? '26.6';
+                    machine.xcodeSelected = true;
+                }
                 machine.logs = [
                     'Docker-OSX: booting OpenCore with generated serial',
                     'qemu-system-x86_64: -display gtk,zoom-to-fit=on',
@@ -1798,6 +1914,7 @@ export function createMockBackend(): Backend {
             emitter.on('machine-usb-migration-progress', handler),
         onContainerRebuildProgress: async (handler) =>
             emitter.on('machine-container-rebuild-progress', handler),
+        onTemplateProgress: async (handler) => emitter.on('machine-template-progress', handler),
         onUsbAttachProgress: async (handler) => emitter.on('machine-usb-attach-progress', handler),
         onDeviceSigningProgress: async (handler) =>
             emitter.on('machine-device-signing-progress', handler),

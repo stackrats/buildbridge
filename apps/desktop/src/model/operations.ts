@@ -36,7 +36,9 @@ export type OperationId =
     | 'device-signing'
     | 'run-device'
     | 'clear-device-run'
-    | 'adopt-lock';
+    | 'adopt-lock'
+    | 'save-template'
+    | 'template-adopt';
 
 /**
  * Maps the native busy key (see src-tauri/src/ops.rs) to the step it blocks. `optimizing` is
@@ -64,6 +66,8 @@ export const busyKeyStep: Record<string, string> = {
     pairing_device: 'run-device',
     preparing_device_signing: 'run-device',
     running_on_device: 'run-device',
+    saving_template: 'launch',
+    adopting_template: 'trust',
 };
 
 export const busyKeyLabel: Record<string, string> = {
@@ -89,6 +93,8 @@ export const busyKeyLabel: Record<string, string> = {
     pairing_device: 'Pairing with the phone',
     preparing_device_signing: 'Preparing device signing',
     running_on_device: 'Running on the device',
+    saving_template: 'Saving the machine as a template',
+    adopting_template: 'Adopting the template',
 };
 
 /** What each operation this client starts is doing, for the header, the drawer bar and rows. */
@@ -127,6 +133,8 @@ export const operationLabel: Record<OperationId, string> = {
     'run-device': 'Running on the device',
     'clear-device-run': 'Clearing the last device run',
     'adopt-lock': 'Adopting the guest Podfile.lock',
+    'save-template': 'Saving the machine as a template',
+    'template-adopt': 'Adopting the template',
 };
 
 /** The label for whatever is running: a native busy key or this client's operation id. */
@@ -157,4 +165,6 @@ export const operationStep: Partial<Record<OperationId, string>> = {
     'device-pair': 'run-device',
     'device-signing': 'run-device',
     'run-device': 'run-device',
+    'save-template': 'launch',
+    'template-adopt': 'trust',
 };

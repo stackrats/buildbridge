@@ -90,6 +90,11 @@ const glossary = [
         word: 'Control plane',
         meaning: 'the optional web dashboard that can queue builds on this machine from anywhere.',
     },
+    {
+        word: 'Template',
+        meaning:
+            'a prepared machine saved on this host; a new machine cloned from it starts in seconds at the project step.',
+    },
 ];
 
 // Probe each machine once so the rows show the exact journey, not the coarse one.

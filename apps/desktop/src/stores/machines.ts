@@ -23,8 +23,10 @@ import type {
     MacBuilderConfig,
     MacBuilderView,
     MachineListView,
+    MachineTemplateSummary,
     SafariInspectorResult,
     SigningProvisioningProgress,
+    TemplateSaveProgress,
     UnsignedBuildTarget,
     UsbAttachProgress,
     XcodeImportProgress,
@@ -78,6 +80,10 @@ export interface MachineSession {
     deviceLog: LogLine[];
     /** The guest's Podfile.lock adopted into the project, until the next test build. */
     lockAdoption: AdoptPodfileLockResult | null;
+    /** Saving this machine as a template, while it runs. */
+    templateSave: TemplateSaveProgress | null;
+    /** A clone's bootstrap was tried once this session; a failure then waits for the person. */
+    templateAdoptTried: boolean;
     activity: LogLine[];
     lastFailure: { operation: OperationId; message: string; at: number } | null;
 }
@@ -89,6 +95,9 @@ const state = reactive({
     sessions: {} as Record<string, MachineSession>,
     dragActive: false,
     lastDrop: null as { paths: string[]; at: number } | null,
+    templates: [] as MachineTemplateSummary[],
+    templatesLoading: false,
+    templatesError: null as string | null,
 });
 
 let unlisteners: Unlisten[] = [];
@@ -123,6 +132,8 @@ function createSession(id: string): MachineSession {
         archiveLog: [],
         deviceLog: [],
         lockAdoption: null,
+        templateSave: null,
+        templateAdoptTried: false,
         activity: [],
         lastFailure: null,
     };
@@ -139,6 +150,52 @@ function note(target: MachineSession, text: string, tone: LogLine['tone'] = 'sys
 
 function applyView(target: MachineSession, view: MacBuilderView): void {
     target.view = view;
+    maybeAdoptTemplate(target);
+}
+
+/**
+ * A clone bootstraps itself: once its macOS answers, the identity the template recorded is
+ * pinned and the clone's own key is installed through the template's. Tried once per session
+ * so a failure is shown on the trust step rather than retried on every probe.
+ */
+function maybeAdoptTemplate(target: MachineSession): void {
+    const view = target.view;
+    if (
+        !view?.template ||
+        target.templateAdoptTried ||
+        target.operation !== null ||
+        view.busyOperation !== null ||
+        !view.guest.ssh.reachable ||
+        view.guest.ssh.trust === 'mismatch'
+    ) {
+        return;
+    }
+    const needsPin = view.guest.ssh.trust === 'untrusted';
+    const needsKey = !view.guest.diagnostics.authenticated;
+    if (!needsPin && !needsKey) {
+        return;
+    }
+    target.templateAdoptTried = true;
+    void adoptTemplate(target.id);
+}
+
+async function loadTemplates(): Promise<void> {
+    state.templatesLoading = true;
+    try {
+        state.templates = await useBackend().listMachineTemplates();
+        state.templatesError = null;
+    } catch (error) {
+        state.templatesError = describeError(error);
+    } finally {
+        state.templatesLoading = false;
+    }
+}
+
+function adoptTemplate(id: string) {
+    return runOperation(id, 'template-adopt', () => useBackend().adoptTemplateGuest(id), {
+        started: 'Pinning the template’s identity and installing this machine’s key',
+        finished: 'Adopted. The clone is reachable with its own key; the template’s is retired.',
+    });
 }
 
 async function loadList(): Promise<void> {
@@ -328,6 +385,14 @@ async function listenForEvents(): Promise<void> {
                     note(target, event.detail);
                 }
             }),
+            backend.onTemplateProgress((event) => {
+                const target = session(event.machineId);
+                const phaseChanged = target.templateSave?.phase !== event.phase;
+                target.templateSave = event;
+                if (phaseChanged) {
+                    note(target, event.detail);
+                }
+            }),
             backend.onUsbAttachProgress((event) => {
                 const target = session(event.machineId);
                 const phaseChanged = target.usbAttach?.phase !== event.phase;
@@ -438,9 +503,15 @@ export function useMachinesStore() {
                 : [];
         },
 
-        async createMachine(profile: MacBuilderConfig): Promise<string | null> {
+        async createMachine(
+            profile: MacBuilderConfig,
+            templateId: string | null = null,
+        ): Promise<string | null> {
             const previous = new Set(state.list?.machines.map((machine) => machine.id));
-            state.list = await useBackend().createMachine(profile);
+            state.list = await useBackend().createMachine(profile, templateId);
+            if (templateId) {
+                void loadTemplates();
+            }
             const created = state.list.machines.find((machine) => !previous.has(machine.id));
             return created?.id ?? null;
         },
@@ -465,6 +536,37 @@ export function useMachinesStore() {
                 started: 'Starting the machine',
                 finished: 'The macOS machine is running. Open its console window to continue.',
             });
+        },
+        loadTemplates,
+        adoptTemplate: (id: string) => {
+            session(id).templateAdoptTried = true;
+            return adoptTemplate(id);
+        },
+        /** Shuts macOS down and saves the disk; the machine is stopped afterwards. */
+        saveTemplate: (id: string, name: string) => {
+            session(id).templateSave = null;
+            return runOperation(
+                id,
+                'save-template',
+                async () => {
+                    const template = await useBackend().saveMachineTemplate(id, name);
+                    state.templates = [
+                        template,
+                        ...state.templates.filter((entry) => entry.id !== template.id),
+                    ];
+                    return undefined;
+                },
+                {
+                    started: `Saving ${name}; macOS shuts down first and the machine stays stopped`,
+                    finished: `Template ${name} saved. Start the machine again when you need it.`,
+                },
+            ).then(async (result) => {
+                await refreshMachine(id, { silent: true });
+                return result;
+            });
+        },
+        async deleteTemplate(templateId: string): Promise<void> {
+            state.templates = await useBackend().deleteMachineTemplate(templateId);
         },
         stop: (id: string) =>
             runOperation(id, 'stop', () => useBackend().stopMachine(id), {

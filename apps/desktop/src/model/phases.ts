@@ -2,15 +2,16 @@
 // sentence. The backend also sends a `detail` sentence; these labels are the short form.
 
 import type {
-    ContainerRebuildPhase,
-    UsbAttachPhase,
     AppleArchivePhase,
     AppleDeviceRunPhase,
     AppleProjectPhase,
+    ContainerRebuildPhase,
     DeviceSigningPhase,
     DiskMigrationPhase,
     LaunchPhase,
     SigningProvisioningPhase,
+    TemplateSavePhase,
+    UsbAttachPhase,
     XcodeImportPhase,
 } from '../types/backend';
 
@@ -114,4 +115,12 @@ export const archivePhaseLabel: Record<AppleArchivePhase, string> = {
     packaging_archive: 'Packaging the archive',
     transferring: 'Transferring artifacts',
     completed: 'Completed',
+};
+
+export const templateSavePhaseLabel: Record<TemplateSavePhase, string> = {
+    shutting_down: 'Shutting macOS down',
+    checking_space: 'Checking free space',
+    compressing_disk: 'Compressing the disk',
+    copying_files: 'Copying the NVRAM and install media',
+    completed: 'Template saved',
 };

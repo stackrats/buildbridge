@@ -19,6 +19,7 @@ export type Route =
     | { kind: 'runner' }
     | { kind: 'signing' }
     | { kind: 'envs' }
+    | { kind: 'templates' }
     | { kind: 'machine'; id: string };
 
 function devParams(): URLSearchParams | null {
@@ -67,13 +68,21 @@ const state = reactive({
     logSource: {} as Record<string, LogSource>,
     logHeight: loadLogHeight(),
     newMachineOpen: initialNewMachineOpen(),
+    /** The template the new machine dialog opens with chosen, from the templates page. */
+    newMachineTemplateId: null as string | null,
 });
 
 function parseSelection(value: string | null): Route {
     if (!value) {
         return { kind: 'home' };
     }
-    if (value === 'runner' || value === 'signing' || value === 'envs' || value === 'home') {
+    if (
+        value === 'runner' ||
+        value === 'signing' ||
+        value === 'envs' ||
+        value === 'templates' ||
+        value === 'home'
+    ) {
         return { kind: value };
     }
     if (value.startsWith('machine:')) {

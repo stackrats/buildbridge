@@ -7,7 +7,9 @@ import { useUi } from '../../stores/ui';
 import type { MacBuilderConfig } from '../../types/backend';
 import Button from '../ui/Button.vue';
 import Callout from '../ui/Callout.vue';
+import Field from '../ui/Field.vue';
 import Modal from '../ui/Modal.vue';
+import Select from '../ui/Select.vue';
 import Spinner from '../ui/Spinner.vue';
 import MachineProfileForm from './MachineProfileForm.vue';
 
@@ -37,11 +39,27 @@ function blank(): MacBuilderConfig {
 const profile = ref<MacBuilderConfig>(blank());
 const saving = ref(false);
 const error = ref<string | null>(null);
+// '' is a fresh install; a template id clones that template's disk.
+const startFrom = ref('');
+
+const readyTemplates = computed(() =>
+    machines.state.templates.filter((template) => template.ready),
+);
+const startOptions = computed(() => [
+    { value: '', label: 'A fresh macOS install (about an hour, in the console)' },
+    ...readyTemplates.value.map((template) => ({
+        value: template.id,
+        label: `${template.name} · macOS ${template.macosVersion ?? '?'} · Xcode ${template.xcodeVersion ?? '?'}`,
+    })),
+]);
 
 watch(open, (value) => {
     if (value) {
         profile.value = blank();
         error.value = null;
+        startFrom.value = ui.state.newMachineTemplateId ?? '';
+        ui.state.newMachineTemplateId = null;
+        void machines.loadTemplates();
     }
 });
 
@@ -51,10 +69,13 @@ async function create(): Promise<void> {
     saving.value = true;
     error.value = null;
     try {
-        const id = await machines.createMachine({
-            ...profile.value,
-            name: profile.value.name.trim(),
-        });
+        const id = await machines.createMachine(
+            {
+                ...profile.value,
+                name: profile.value.name.trim(),
+            },
+            startFrom.value || null,
+        );
         open.value = false;
         if (id) {
             ui.openMachine(id);
@@ -82,6 +103,17 @@ async function create(): Promise<void> {
                 You can still create the machine now; the setup checklist shows what to fix before
                 it can start.
             </Callout>
+            <Field
+                v-if="readyTemplates.length"
+                label="Start from"
+                :hint="
+                    startFrom
+                        ? 'A clone of the template: macOS, Xcode and access are already in place, and the journey starts at the project. The macOS release below is ignored.'
+                        : 'A template skips the install and the Xcode setup; save one from a prepared machine\'s menu.'
+                "
+            >
+                <Select v-model="startFrom" :options="startOptions" />
+            </Field>
             <MachineProfileForm v-model="profile" />
             <Callout v-if="error" tone="danger">{{ error }}</Callout>
             <div class="flex justify-end gap-2">

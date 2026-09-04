@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { House, KeyRound, Variable, Plus, Radio } from '@lucide/vue';
+import { House, KeyRound, Layers, Variable, Plus, Radio } from '@lucide/vue';
 import { computed, onBeforeUnmount } from 'vue';
 
 import { machineStateDot, machineStateLabel } from '../lib/status';
@@ -161,6 +161,19 @@ onBeforeUnmount(() => {
                     v-if="envCount"
                     class="text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
                     >{{ envCount }}</span
+                >
+            </button>
+            <button
+                type="button"
+                :class="[itemBase, ui.state.route.kind === 'templates' ? itemActive : itemIdle]"
+                @click="ui.navigate({ kind: 'templates' })"
+            >
+                <Layers class="h-4 w-4 shrink-0" />
+                <span class="flex-1">Templates</span>
+                <span
+                    v-if="machines.state.templates.length"
+                    class="text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
+                    >{{ machines.state.templates.length }}</span
                 >
             </button>
             <button

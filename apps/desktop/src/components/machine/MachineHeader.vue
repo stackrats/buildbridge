@@ -1,15 +1,26 @@
 <script setup lang="ts">
 // The page header, unboxed: the name, one state pill, one action, and a line of facts. The
 // facts that used to be chips live in the rail now, each on the step that produced it.
-import { EllipsisVertical, Pencil, Play, RefreshCw, Square, Trash2, HardDrive } from '@lucide/vue';
+import {
+    EllipsisVertical,
+    HardDrive,
+    Layers,
+    Pencil,
+    Play,
+    RefreshCw,
+    Square,
+    Trash2,
+} from '@lucide/vue';
 import { computed, onBeforeUnmount, ref } from 'vue';
 
 import { formatElapsed, secondsSince } from '../../lib/format';
+import { templateSavePhaseLabel } from '../../model/phases';
 import { isLive, machineStateBadge, machineStateLabel } from '../../lib/status';
 import { activityLabel, useMachinesStore, type MachineSession } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
 import Badge from '../ui/Badge.vue';
 import Button from '../ui/Button.vue';
+import Input from '../ui/Input.vue';
 import Spinner from '../ui/Spinner.vue';
 import ConfirmDialog from '../dialogs/ConfirmDialog.vue';
 import EditMachineDialog from '../dialogs/EditMachineDialog.vue';
@@ -53,6 +64,42 @@ const editOpen = ref(false);
 const discardOpen = ref(false);
 const deleteOpen = ref(false);
 const deleting = ref(false);
+const templateOpen = ref(false);
+const templateName = ref('');
+
+// A template carries the pinned identity and the access key, so both must exist; a machine
+// keeping its disk inside the container has nothing on this host to copy.
+const templateBlocker = computed(() => {
+    if (!view.value.guest.ssh.pinnedFingerprint) {
+        return 'Pin the guest identity first';
+    }
+    if (!view.value.guest.username) {
+        return 'Authorize the BuildBridge key first';
+    }
+    if (!view.value.usb.diskOnHost) {
+        return 'Enable USB on this machine first; that moves its disk to this host';
+    }
+    return null;
+});
+const savingTemplate = computed(() => session.operation === 'save-template');
+
+function openTemplateDialog(): void {
+    templateName.value = view.value.guest.diagnostics.xcodeVersion
+        ? `Xcode ${view.value.guest.diagnostics.xcodeVersion} ready`
+        : `${view.value.profile.name} template`;
+    templateOpen.value = true;
+}
+
+async function saveTemplate(): Promise<void> {
+    const name = templateName.value.trim();
+    if (!name) {
+        return;
+    }
+    const result = await machines.saveTemplate(session.id, name);
+    if (result !== null || session.lastFailure?.operation !== 'save-template') {
+        templateOpen.value = false;
+    }
+}
 
 function closeMenu(): void {
     menuOpen.value = false;
@@ -162,6 +209,23 @@ const menuItemClass =
                         <Pencil class="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
                         Machine profile
                     </button>
+                    <button
+                        type="button"
+                        :class="menuItemClass"
+                        :disabled="busy || templateBlocker !== null"
+                        class="disabled:opacity-40"
+                        :title="
+                            templateBlocker ??
+                            'Saves this machine\'s disk as a template new machines clone in seconds'
+                        "
+                        @click="
+                            closeMenu();
+                            openTemplateDialog();
+                        "
+                    >
+                        <Layers class="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
+                        Save as template
+                    </button>
                     <div class="my-1 h-px bg-zinc-200 dark:bg-zinc-700" />
                     <button
                         type="button"
@@ -195,6 +259,45 @@ const menuItemClass =
         <EditMachineDialog v-model:open="editOpen" :view="view" />
 
         <ConfirmDialog
+            v-model:open="templateOpen"
+            title="Save this machine as a template"
+            confirm-label="Save template"
+            :destructive="false"
+            :busy="savingTemplate"
+            @confirm="saveTemplate"
+        >
+            <p>
+                macOS is asked to shut down, the disk is compressed into a template on this host (a
+                few gigabytes per ten on the disk, taking some minutes), and the machine stays
+                stopped afterwards. New machines cloned from it start with macOS, Xcode and their
+                access in place, and begin at the first project step.
+            </p>
+            <p>
+                The template carries this machine's access key and pinned identity so a clone needs
+                no console or password; it is stored owner-only and retired from each clone once the
+                clone has its own key. Nothing leaves this host.
+            </p>
+            <Input
+                v-model="templateName"
+                placeholder="Template name"
+                :maxlength="60"
+                :disabled="savingTemplate"
+            />
+            <p
+                v-if="savingTemplate && session.templateSave"
+                class="text-xs text-zinc-600 dark:text-zinc-300"
+            >
+                {{ templateSavePhaseLabel[session.templateSave.phase]
+                }}{{
+                    session.templateSave.percent !== null
+                        ? ` · ${session.templateSave.percent}%`
+                        : ''
+                }}
+                · {{ session.templateSave.detail }}
+            </p>
+        </ConfirmDialog>
+
+        <ConfirmDialog
             v-model:open="discardOpen"
             title="Discard the container and its macOS disk"
             confirm-label="Discard container"
@@ -206,6 +309,11 @@ const menuItemClass =
                 The Docker container for <b>{{ view.profile.name }}</b> is removed together with the
                 macOS disk stored inside it. The next start creates a fresh container, and macOS
                 must be installed again from the console.
+            </p>
+            <p v-if="view.template">
+                This machine was cloned from the template <b>{{ view.template.name }}</b
+                >, so the next start clones it again in seconds instead: this is how a clone is
+                reset.
             </p>
             <p>
                 The pinned SSH identity and the provisioned signing record are cleared because they

@@ -195,6 +195,9 @@ function builtWith(workspace: {
 
 /** Guest setup: everything that prepares one machine to build any project. */
 export function deriveSetupSteps(view: MacBuilderView, context: StepContext): SetupStep[] {
+    // A clone boots the template's macOS and is bootstrapped from the template's key, so
+    // the three steps a person does on a fresh install are BuildBridge's here.
+    const template = view.template;
     const { runtime, guest } = view;
     const { ssh, diagnostics } = guest;
     const running = runtime.state === 'running';
@@ -261,18 +264,20 @@ export function deriveSetupSteps(view: MacBuilderView, context: StepContext): Se
     steps.push({
         id: 'install',
         phase: 'setup',
-        title: 'Install macOS in the console',
-        kind: 'manual',
+        title: template ? 'Boot macOS from the template' : 'Install macOS in the console',
+        kind: template ? 'automatic' : 'manual',
         status: reachable ? 'done' : running ? 'active' : 'pending',
-        expected: '30 to 60 min',
+        expected: template ? undefined : '30 to 60 min',
         summary: reachable
             ? diagnostics.macosVersion
                 ? `macOS ${diagnostics.macosVersion} · Remote Login enabled`
                 : 'Remote Login is reachable'
             : running
-              ? ssh.portOpen
-                  ? `Port ${view.profile.sshPort} is open; waiting for the guest SSH service`
-                  : 'One-time: erase the disk, install macOS, create the account, enable Remote Login'
+              ? template
+                  ? `Starting the macOS saved in ${template.name}; nothing to install`
+                  : ssh.portOpen
+                    ? `Port ${view.profile.sshPort} is open; waiting for the guest SSH service`
+                    : 'One-time: erase the disk, install macOS, create the account, enable Remote Login'
               : unlockedBy.install,
     });
 
@@ -280,7 +285,7 @@ export function deriveSetupSteps(view: MacBuilderView, context: StepContext): Se
         id: 'trust',
         phase: 'setup',
         title: 'Pin the guest identity',
-        kind: 'manual',
+        kind: template ? 'automatic' : 'manual',
         status:
             reachable && ssh.trust === 'mismatch'
                 ? 'failed'
@@ -295,7 +300,9 @@ export function deriveSetupSteps(view: MacBuilderView, context: StepContext): Se
                 : trusted
                   ? (ssh.pinnedFingerprint ?? 'Fingerprint pinned')
                   : reachable
-                    ? 'Compare the fingerprint below with the one macOS reports, then trust it'
+                    ? template
+                        ? `Pinning the identity ${template.name} recorded, as soon as macOS answers`
+                        : 'Compare the fingerprint below with the one macOS reports, then trust it'
                     : unlockedBy.trust,
     });
 
@@ -303,15 +310,18 @@ export function deriveSetupSteps(view: MacBuilderView, context: StepContext): Se
         id: 'access',
         phase: 'setup',
         title: 'Authorize the BuildBridge key',
-        kind: 'assisted',
+        kind: template ? 'automatic' : 'assisted',
         status: authenticated ? 'done' : trusted ? 'active' : 'pending',
         summary: authenticated
             ? `Signed in as ${guest.username ?? 'the macOS user'} with a dedicated Ed25519 key`
             : trusted
-              ? guest.username
+              ? template
                   ? (diagnostics.issue ??
-                    'Enter the macOS password once to install the key, or add it from the guest Terminal')
-                  : 'Enter the macOS short username and password to install the access key'
+                    `Installing this machine's own key through ${template.name}'s`)
+                  : guest.username
+                    ? (diagnostics.issue ??
+                      'Enter the macOS password once to install the key, or add it from the guest Terminal')
+                    : 'Enter the macOS short username and password to install the access key'
               : unlockedBy.access,
     });
 

@@ -93,6 +93,7 @@ function baseView(overrides: Partial<MacBuilderView> = {}): MacBuilderView {
         },
         deviceRun: null,
         deviceRunError: null,
+        template: null,
         ...overrides,
     };
 }
@@ -622,6 +623,7 @@ function summary(overrides: Partial<MachineSummary> = {}): MachineSummary {
         envSetName: null,
         usbReady: false,
         deviceRunRetained: false,
+        templateName: null,
         ...overrides,
     };
 }
@@ -652,6 +654,7 @@ describe('summarizeJourney', () => {
                 signingIdentity: 'iPhone Distribution: Example',
                 archiveRetained: true,
                 deviceRunRetained: true,
+                templateName: null,
             }),
             readyHost,
         );
@@ -845,5 +848,41 @@ describe('run on the device', () => {
         const retained = summarizeJourney(summary({ deviceRunRetained: true }), readyHost).at(-1)!;
         expect(retained.status).toBe('done');
         expect(retained.summary).toBe('Ran on the iPhone');
+    });
+});
+
+describe('a machine cloned from a template', () => {
+    function cloneView(): MacBuilderView {
+        const view = readyView();
+        view.template = { id: 'xcode-26-ready', name: 'Xcode 26 ready' };
+        view.guest.ssh = { ...view.guest.ssh, trust: 'untrusted', pinnedFingerprint: null };
+        view.guest.diagnostics = { ...view.guest.diagnostics, authenticated: false };
+        return view;
+    }
+
+    it('turns the install, trust and access steps into BuildBridge’s own', () => {
+        const steps = deriveSetupSteps(cloneView(), { runningStep: null });
+        const byId = (id: string) => steps.find((step) => step.id === id)!;
+
+        expect(byId('install').kind).toBe('automatic');
+        expect(byId('install').title).toBe('Boot macOS from the template');
+        expect(byId('install').expected).toBeUndefined();
+        expect(byId('trust').kind).toBe('automatic');
+        expect(byId('trust').status).toBe('active');
+        expect(byId('trust').summary).toContain('Xcode 26 ready');
+        expect(byId('access').kind).toBe('automatic');
+    });
+
+    it('names the template while macOS is still booting', () => {
+        const view = cloneView();
+        view.guest.ssh = { ...view.guest.ssh, reachable: false, portOpen: false };
+        const install = deriveSetupSteps(view, { runningStep: null }).find(
+            (step) => step.id === 'install',
+        )!;
+
+        expect(install.status).toBe('active');
+        expect(install.summary).toBe(
+            'Starting the macOS saved in Xcode 26 ready; nothing to install',
+        );
     });
 });

@@ -433,6 +433,42 @@ export interface MacBuilderView {
     deviceRun: AppleDeviceRunResult | null;
     /** The last failed device run, retained like `archiveError` until cleared. */
     deviceRunError: string | null;
+    /** The template this machine was cloned from, if any: it bootstraps from it. */
+    template: MachineTemplateRef | null;
+}
+
+/** A prepared machine saved on this host; new machines are cloned from it in seconds. */
+export interface MachineTemplateSummary {
+    id: string;
+    name: string;
+    createdAtEpochSeconds: number;
+    sourceMachineName: string;
+    macosVersion: string | null;
+    xcodeVersion: string | null;
+    sizeBytes: number;
+    /** Machines cloned from it; while any exists the template cannot be deleted. */
+    machineNames: string[];
+    /** Every file is present; a save that stopped halfway leaves this false. */
+    ready: boolean;
+}
+
+export interface MachineTemplateRef {
+    id: string;
+    name: string;
+}
+
+export type TemplateSavePhase =
+    | 'shutting_down'
+    | 'checking_space'
+    | 'compressing_disk'
+    | 'copying_files'
+    | 'completed';
+
+export interface TemplateSaveProgress {
+    phase: TemplateSavePhase;
+    elapsedSeconds: number;
+    detail: string;
+    percent: number | null;
 }
 
 export interface MachineSummary {
@@ -453,6 +489,8 @@ export interface MachineSummary {
     /** The container keeps its disk on the host and can be handed USB devices. */
     usbReady: boolean;
     deviceRunRetained: boolean;
+    /** The template this machine was cloned from, if any. */
+    templateName: string | null;
 }
 
 export interface MachineListView {
