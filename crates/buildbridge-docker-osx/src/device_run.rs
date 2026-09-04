@@ -12,6 +12,7 @@ use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};
 
+use crate::signing::install_signing_helper;
 use crate::{
     ProviderError, TrackedCommand, clean_output, guest_ssh_command, shell_single_quote,
     valid_device_udid, valid_profile_uuid, validate_guest_operation,
@@ -844,7 +845,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::{
     APPLE_BUILD_DIAGNOSTIC_LINES, APPLE_BUILD_OUTPUT_TAIL_LINES, AppleArchiveProgress,
-    GuestEnvFiles, ProvisioningProfileSummary, SIGNING_HELPER_SOURCE, SIGNING_KEYCHAIN_NAME,
+    GuestEnvFiles, ProvisioningProfileSummary, SIGNING_KEYCHAIN_NAME,
     apple_archive_signing_xcconfig, apple_build_log_is_diagnostic, build_setting_value,
     profile_allows_bundle, rebuild_web_assets_with_env, run_guest_command, sanitize_build_log_line,
     stream_bytes_to_guest, valid_apple_scheme, valid_release_value, validate_signing_target,
@@ -1673,14 +1674,13 @@ where
                     .as_deref()
                     .map(|_| target.bundle_identifier.as_str()),
             );
-            stream_bytes_to_guest(
-                SIGNING_HELPER_SOURCE,
+            install_signing_helper(
                 ssh_port,
                 username,
                 identity_path,
                 known_hosts_path,
                 &helper_source,
-                "signing helper",
+                &helper_binary,
             )?;
             stream_bytes_to_guest(
                 xcconfig.as_bytes(),
@@ -1690,18 +1690,6 @@ where
                 known_hosts_path,
                 &signing_settings,
                 "target-scoped signing settings",
-            )?;
-            run_guest_command(
-                ssh_port,
-                username,
-                identity_path,
-                known_hosts_path,
-                &format!(
-                    "set -eu; /usr/bin/xcrun --sdk macosx clang -std=c11 -O2 -Wno-deprecated-declarations {} -framework Security -framework CoreFoundation -o {}; /bin/chmod 700 {}",
-                    shell_single_quote(&helper_source),
-                    shell_single_quote(&helper_binary),
-                    shell_single_quote(&helper_binary),
-                ),
             )?;
 
             on_progress(device_progress(

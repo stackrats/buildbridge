@@ -161,14 +161,13 @@ where
             &identity.identity_sha1,
             &profile.uuid,
         );
-        stream_bytes_to_guest(
-            SIGNING_HELPER_SOURCE,
+        install_signing_helper(
             ssh_port,
             username,
             identity_path,
             known_hosts_path,
             &helper_source,
-            "signing helper",
+            &helper_binary,
         )?;
         stream_bytes_to_guest(
             signing_settings.as_bytes(),
@@ -187,19 +186,6 @@ where
             known_hosts_path,
             &guest_export_options,
             "App Store export options",
-        )?;
-        let compile = format!(
-            "set -eu; /usr/bin/xcrun --sdk macosx clang -std=c11 -O2 -Wno-deprecated-declarations {} -framework Security -framework CoreFoundation -o {}; /bin/chmod 700 {}",
-            shell_single_quote(&helper_source),
-            shell_single_quote(&helper_binary),
-            shell_single_quote(&helper_binary),
-        );
-        run_guest_command(
-            ssh_port,
-            username,
-            identity_path,
-            known_hosts_path,
-            &compile,
         )?;
 
         let mut output_tail = run_archive_helper(

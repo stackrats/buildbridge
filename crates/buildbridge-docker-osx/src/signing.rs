@@ -2,6 +2,42 @@
 
 use super::*;
 
+/// Streams the fixed native signing helper's source into the guest and compiles it there with
+/// Xcode's own clang, owner-only. Every signing operation runs the helper from the same
+/// recipe; the recipe lives here once.
+pub(crate) fn install_signing_helper(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+    helper_source: &str,
+    helper_binary: &str,
+) -> Result<(), ProviderError> {
+    stream_bytes_to_guest(
+        SIGNING_HELPER_SOURCE,
+        ssh_port,
+        username,
+        identity_path,
+        known_hosts_path,
+        helper_source,
+        "signing helper",
+    )?;
+    let compile = format!(
+        "set -eu; /usr/bin/xcrun --sdk macosx clang -std=c11 -O2 -Wno-deprecated-declarations {} -framework Security -framework CoreFoundation -o {}; /bin/chmod 700 {}",
+        shell_single_quote(helper_source),
+        shell_single_quote(helper_binary),
+        shell_single_quote(helper_binary),
+    );
+    run_guest_command(
+        ssh_port,
+        username,
+        identity_path,
+        known_hosts_path,
+        &compile,
+    )
+    .map(|_| ())
+}
+
 /// What one identity import needs beyond the identity itself: the guest helper, the keychain,
 /// the pinned Apple intermediate, and the bridge to reach them.
 pub(crate) struct IdentityImportContext<'a> {
@@ -232,14 +268,13 @@ where
     )?;
 
     let operation = (|| {
-        stream_bytes_to_guest(
-            SIGNING_HELPER_SOURCE,
+        install_signing_helper(
             ssh_port,
             username,
             identity_path,
             known_hosts_path,
             &helper_source,
-            "signing helper",
+            &helper_binary,
         )?;
         stream_bytes_to_guest(
             APPLE_WWDR_G3_PEM,
@@ -249,19 +284,6 @@ where
             known_hosts_path,
             &guest_wwdr_g3_pem,
             "pinned Apple WWDR G3 intermediate",
-        )?;
-        let compile = format!(
-            "set -eu; /usr/bin/xcrun --sdk macosx clang -std=c11 -O2 -Wno-deprecated-declarations {} -framework Security -framework CoreFoundation -o {}; /bin/chmod 700 {}",
-            shell_single_quote(&helper_source),
-            shell_single_quote(&helper_binary),
-            shell_single_quote(&helper_binary),
-        );
-        run_guest_command(
-            ssh_port,
-            username,
-            identity_path,
-            known_hosts_path,
-            &compile,
         )?;
 
         let mut completed_bytes = 0_u64;

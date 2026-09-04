@@ -294,41 +294,25 @@ read -k 1 "?Press any key to close this window."
         title = item.title,
         apply = item.apply,
     );
-    let quoted = shell_single_quote(&terminal_script);
-    let remote_command = format!(
-        "/bin/mkdir -p '{guest_cache}'; /bin/rm -f '{status_path}' '{script_path}'; /usr/bin/printf '%s' {quoted} > '{script_path}'; /bin/chmod 700 '{script_path}'; if ! /usr/bin/open -a Terminal '{script_path}'; then /usr/bin/printf launch_failed; exit 0; fi; remaining=900; while /bin/test ! -f '{status_path}' && /bin/test \"$remaining\" -gt 0; do /bin/sleep 1; remaining=$((remaining - 1)); done; if /bin/test -f '{status_path}'; then /bin/cat '{status_path}'; /bin/rm -f '{status_path}' '{script_path}'; else /usr/bin/printf timeout; fi"
-    );
-    let started_at = Instant::now();
-    let mut child = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
-        .arg(remote_command)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .tracked_spawn()
-        .map_err(|error| {
-            ProviderError::GuestBridge(format!("could not open the guest Terminal: {error}"))
-        })?;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                on_waiting(started_at.elapsed().as_secs());
-                thread::sleep(Duration::from_secs(1));
-            }
-            Err(error) => {
-                return Err(ProviderError::GuestBridge(format!(
-                    "could not monitor the guest Terminal: {error}"
-                )));
-            }
-        }
-    };
-    let output = child.wait_with_output().map_err(|error| {
-        ProviderError::GuestBridge(format!("could not read the guest Terminal result: {error}"))
-    })?;
-    if !status.success() {
-        return Err(ProviderError::GuestBridge(clean_output(&output.stderr)));
+    let run = run_guest_terminal_script(
+        ssh_port,
+        username,
+        identity_path,
+        known_hosts_path,
+        &GuestTerminalScript {
+            guest_cache: &guest_cache,
+            status_path: &status_path,
+            script_path: &script_path,
+            script: &terminal_script,
+            timeout_seconds: 900,
+            spawn_failure: "could not open the guest Terminal",
+        },
+        &mut |elapsed| on_waiting(elapsed),
+    )?;
+    if !run.status_success {
+        return Err(ProviderError::GuestBridge(clean_output(&run.stderr)));
     }
-    match clean_output(&output.stdout).as_str() {
+    match clean_output(&run.stdout).as_str() {
         "success" => Ok(()),
         "launch_failed" => Err(ProviderError::GuestBridge(
             "macOS could not open a Terminal window; log in on the console and try again"

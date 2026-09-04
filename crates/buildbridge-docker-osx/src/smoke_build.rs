@@ -36,46 +36,8 @@ where
     let node_archive = format!("{tools}/{node_name}.tar.gz");
     let ruby_archive = format!("{tools}/portable-ruby-{PORTABLE_RUBY_VERSION}.tar.gz");
 
-    let script = format!(
-        r#"set -u
-exec 2>&1
-phase() {{ /usr/bin/printf '__BUILDBRIDGE_PHASE__:%s\n' "$1"; }}
-job_root="{tools}/jobs"
-job_state="$job_root/apple-smoke-build"
-/bin/mkdir -p "$job_root"
-
-job_owner=0
-while /usr/bin/true; do
-    if /bin/mkdir "$job_state" 2>/dev/null; then
-        job_owner=1
-        break
-    fi
-    if /bin/test -f "$job_state/status"; then
-        break
-    fi
-    if /bin/test -f "$job_state/pid"; then
-        job_pid=$(/bin/cat "$job_state/pid")
-        if /bin/kill -0 "$job_pid" 2>/dev/null; then
-            break
-        fi
-        /bin/rm -rf "$job_state"
-        continue
-    fi
-    /bin/sleep 1
-done
-
-job_log="$job_state/output.log"
-job_status="$job_state/status"
-if /bin/test "$job_owner" -eq 1; then
-    trap '' HUP
-    (
-        finish_job() {{
-            worker_status=$?
-            /usr/bin/printf '%s\n' "$worker_status" > "$job_status.incoming"
-            /bin/mv "$job_status.incoming" "$job_status"
-        }}
-        trap finish_job EXIT
-        set -eu
+    let body = format!(
+        r#"phase() {{ /usr/bin/printf '__BUILDBRIDGE_PHASE__:%s\n' "$1"; }}
 /bin/test -f "{workspace}/package.json"
 /bin/test -d "{workspace}/ios/App/App.xcworkspace"
 export PATH="{path}"
@@ -196,36 +158,9 @@ if /bin/test "$build_status" -ne 0 && /bin/test "$platform_installed" -eq 1; the
     build_ios || build_status=$?
 fi
 /bin/test "$build_status" -eq 0
-phase completed
-    ) > "$job_log" 2>&1 < /dev/null &
-    job_pid=$!
-    /usr/bin/printf '%s\n' "$job_pid" > "$job_state/pid"
-    trap - HUP
-else
-    /usr/bin/printf '__BUILDBRIDGE_REATTACHED__:yes\n'
-fi
-
-next_line=1
-while ! /bin/test -f "$job_status"; do
-    if /bin/test -f "$job_log"; then
-        line_count=$(/usr/bin/wc -l < "$job_log" | /usr/bin/tr -d ' ')
-        if /bin/test "$line_count" -ge "$next_line"; then
-            /usr/bin/sed -n "$next_line,$line_count p" "$job_log"
-            next_line=$((line_count + 1))
-        fi
-    fi
-    /bin/sleep 1
-done
-if /bin/test -f "$job_log"; then
-    line_count=$(/usr/bin/wc -l < "$job_log" | /usr/bin/tr -d ' ')
-    if /bin/test "$line_count" -ge "$next_line"; then
-        /usr/bin/sed -n "$next_line,$line_count p" "$job_log"
-    fi
-fi
-job_result=$(/bin/cat "$job_status")
-exit "$job_result"
-"#
+phase completed"#
     );
+    let script = crate::device_run::guest_job_script("apple-smoke-build", &tools, "''", &body);
 
     let mut child = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
         .arg(script)

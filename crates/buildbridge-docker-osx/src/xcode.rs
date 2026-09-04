@@ -215,7 +215,6 @@ where
     let installed_path =
         ensure_imported_xcode(ssh_port, username, identity_path, known_hosts_path)?;
 
-    let started_at = Instant::now();
     let detail = "A macOS Terminal window is opening. Enter the local macOS login password there; BuildBridge does not receive or store it.";
     on_progress(XcodeImportProgress {
         phase: XcodeImportPhase::AwaitingAuthorization,
@@ -259,61 +258,33 @@ fi
 read -k 1 "?Press any key to close this window."
 "#
     );
-    let quoted_terminal_script = shell_single_quote(&terminal_script);
-    let remote_command = format!(
-        "/bin/mkdir -p '{guest_cache}'; /bin/rm -f '{status_path}' '{script_path}'; /usr/bin/printf '%s' {quoted_terminal_script} > '{script_path}'; /bin/chmod 700 '{script_path}'; if ! /usr/bin/open -a Terminal '{script_path}'; then /usr/bin/printf launch_failed; exit 0; fi; remaining=1800; while /bin/test ! -f '{status_path}' && /bin/test \"$remaining\" -gt 0; do /bin/sleep 1; remaining=$((remaining - 1)); done; if /bin/test -f '{status_path}'; then /bin/cat '{status_path}'; /bin/rm -f '{status_path}' '{script_path}'; else /usr/bin/printf timeout; fi"
-    );
-    let mut child = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
-        .arg(remote_command)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .tracked_spawn()
-        .map_err(|error| {
-            ProviderError::GuestBridge(format!("could not start macOS Xcode activation: {error}"))
-        })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        ProviderError::GuestBridge("could not capture Xcode activation output".to_string())
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        ProviderError::GuestBridge("could not capture Xcode activation errors".to_string())
-    })?;
-    let stdout_reader = thread::spawn(move || {
-        let mut output = Vec::new();
-        let mut stdout = stdout;
-        let _ = stdout.read_to_end(&mut output);
-        output
-    });
-    let stderr_reader = thread::spawn(move || {
-        let mut output = Vec::new();
-        let mut stderr = stderr;
-        let _ = stderr.read_to_end(&mut output);
-        output
-    });
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                on_progress(XcodeImportProgress {
-                    phase: XcodeImportPhase::AwaitingAuthorization,
-                    transferred_bytes: 0,
-                    total_bytes: 0,
-                    elapsed_seconds: started_at.elapsed().as_secs(),
-                    detail: detail.to_string(),
-                });
-                thread::sleep(Duration::from_secs(1));
-            }
-            Err(error) => {
-                return Err(ProviderError::GuestBridge(format!(
-                    "could not monitor Xcode activation: {error}"
-                )));
-            }
-        }
-    };
-    let stdout = stdout_reader.join().unwrap_or_default();
-    let stderr = stderr_reader.join().unwrap_or_default();
+    let run = run_guest_terminal_script(
+        ssh_port,
+        username,
+        identity_path,
+        known_hosts_path,
+        &GuestTerminalScript {
+            guest_cache: &guest_cache,
+            status_path: &status_path,
+            script_path: &script_path,
+            script: &terminal_script,
+            timeout_seconds: 1800,
+            spawn_failure: "could not start macOS Xcode activation",
+        },
+        &mut |elapsed| {
+            on_progress(XcodeImportProgress {
+                phase: XcodeImportPhase::AwaitingAuthorization,
+                transferred_bytes: 0,
+                total_bytes: 0,
+                elapsed_seconds: elapsed,
+                detail: detail.to_string(),
+            })
+        },
+    )?;
+    let stdout = run.stdout;
+    let stderr = run.stderr;
 
-    if !status.success() {
+    if !run.status_success {
         let stderr = clean_output(&stderr);
         let stdout = clean_output(&stdout);
         let message = if !stderr.is_empty() { stderr } else { stdout };

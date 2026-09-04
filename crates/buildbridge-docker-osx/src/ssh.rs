@@ -310,3 +310,96 @@ pub(crate) fn guest_password_ssh_command(
 
     command
 }
+
+/// What a guest Terminal script left behind: whether the SSH session itself succeeded, and
+/// everything it printed. The one-word status the script writes is in `stdout`.
+pub(crate) struct GuestTerminalRun {
+    pub(crate) status_success: bool,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+}
+
+/// Runs a zsh script in a window of the guest's Terminal, for the things only a macOS TTY can
+/// do — sudo reading a password that never leaves the guest. The script is written to a
+/// short-lived command file, opened with `open -a Terminal`, and its status file polled for
+/// `timeout_seconds`; `launch_failed` and `timeout` are printed as the result when the window
+/// never opened or the script never finished. `on_waiting` is called once a second with the
+/// elapsed time so the caller can say it is waiting.
+/// A script for the guest's Terminal: where its files go, what it says, and how long to wait.
+pub(crate) struct GuestTerminalScript<'a> {
+    pub(crate) guest_cache: &'a str,
+    pub(crate) status_path: &'a str,
+    pub(crate) script_path: &'a str,
+    pub(crate) script: &'a str,
+    pub(crate) timeout_seconds: u64,
+    /// How to describe a session that could not even be spawned.
+    pub(crate) spawn_failure: &'a str,
+}
+
+pub(crate) fn run_guest_terminal_script(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+    terminal: &GuestTerminalScript<'_>,
+    on_waiting: &mut dyn FnMut(u64),
+) -> Result<GuestTerminalRun, ProviderError> {
+    let GuestTerminalScript {
+        guest_cache,
+        status_path,
+        script_path,
+        script,
+        timeout_seconds,
+        spawn_failure,
+    } = *terminal;
+    let quoted = shell_single_quote(script);
+    let remote_command = format!(
+        "/bin/mkdir -p '{guest_cache}'; /bin/rm -f '{status_path}' '{script_path}'; /usr/bin/printf '%s' {quoted} > '{script_path}'; /bin/chmod 700 '{script_path}'; if ! /usr/bin/open -a Terminal '{script_path}'; then /usr/bin/printf launch_failed; exit 0; fi; remaining={timeout_seconds}; while /bin/test ! -f '{status_path}' && /bin/test \"$remaining\" -gt 0; do /bin/sleep 1; remaining=$((remaining - 1)); done; if /bin/test -f '{status_path}'; then /bin/cat '{status_path}'; /bin/rm -f '{status_path}' '{script_path}'; else /usr/bin/printf timeout; fi"
+    );
+    let started_at = Instant::now();
+    let mut child = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
+        .arg(remote_command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .tracked_spawn()
+        .map_err(|error| ProviderError::GuestBridge(format!("{spawn_failure}: {error}")))?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        ProviderError::GuestBridge("could not capture the guest Terminal output".to_string())
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        ProviderError::GuestBridge("could not capture the guest Terminal errors".to_string())
+    })?;
+    let stdout_reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut stdout = stdout;
+        let _ = std::io::Read::read_to_end(&mut stdout, &mut output);
+        output
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut stderr = stderr;
+        let _ = std::io::Read::read_to_end(&mut stderr, &mut output);
+        output
+    });
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                on_waiting(started_at.elapsed().as_secs());
+                thread::sleep(Duration::from_secs(1));
+            }
+            Err(error) => {
+                return Err(ProviderError::GuestBridge(format!(
+                    "could not monitor the guest Terminal: {error}"
+                )));
+            }
+        }
+    };
+
+    Ok(GuestTerminalRun {
+        status_success: status.success(),
+        stdout: stdout_reader.join().unwrap_or_default(),
+        stderr: stderr_reader.join().unwrap_or_default(),
+    })
+}
