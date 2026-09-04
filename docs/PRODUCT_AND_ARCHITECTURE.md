@@ -919,6 +919,15 @@ The following decisions should be treated as settled until this document is deli
     project step. Discarding a clone's container and disk is its reset: the next start clones
     the template again. Saving is offered once a machine has its identity pinned and its key
     authorized and keeps its disk on this host; the natural moment is after Xcode is activated.
+44. The TypeScript contract is generated, never mirrored by hand. Every serde type in the
+    contract, provider and desktop crates derives ts-rs's `TS` with `#[ts(export)]`, 64-bit
+    fields carry `#[ts(type = "number")]` because serde writes them as JSON numbers, and
+    `pnpm types:generate` runs the crates' export tests into `apps/desktop/src/types/generated`
+    (committed, lint-ignored) and writes its index; `types/backend.ts` re-exports it and keeps
+    only the event envelope and the short aliases the interface used. A new DTO is a Rust
+    struct with the derive and one regeneration; a renamed field fails the desktop's type
+    check at every place that read it. The first generation found four drifts in the
+    hand-written file, which is the reason it exists.
 
 ### Credential loss and recovery
 
