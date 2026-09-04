@@ -439,12 +439,35 @@ pub fn attach_usb_device(
     }
 
     let mut client = QmpClient::connect(qmp_socket)?;
+    // QEMU reads a phone cleanly only the first time it opens it in a process, so a phone it
+    // already holds is never released and re-added here: one it can read is left exactly as it
+    // is, and one it could not read needs a replug, which only a person can do.
     if client
         .peripheral_ids()?
         .iter()
         .any(|id| id == IPHONE_QMP_DEVICE_ID)
     {
-        client.delete_device(IPHONE_QMP_DEVICE_ID)?;
+        let held = match client.usb_summary()? {
+            Some(text) => usb_attachment(&text, IPHONE_QMP_DEVICE_ID),
+            None => UsbAttachment::Absent,
+        };
+        match held {
+            UsbAttachment::Live => {
+                return Ok(AttachedUsbDevice {
+                    bus: device.bus,
+                    port: device.port.clone(),
+                    enumerated: true,
+                    issue: None,
+                });
+            }
+            UsbAttachment::Unreadable => {
+                return Err(ProviderError::UsbPassthrough(
+                    "QEMU holds this phone but could not read it, which happens once a phone has been detached and attached again in the same session. Detach it, unplug it, plug it in again, and attach once."
+                        .to_string(),
+                ));
+            }
+            UsbAttachment::Absent => client.delete_device(IPHONE_QMP_DEVICE_ID)?,
+        }
     }
     client.add_usb_host(device.bus, &device.port)?;
 

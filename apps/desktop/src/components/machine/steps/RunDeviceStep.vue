@@ -281,6 +281,7 @@ const primary = computed<Primary | null>(() => {
                 },
             };
         case 'unplugged':
+        case 'replug':
             return {
                 label: 'Detach iPhone',
                 icon: Unplug,
@@ -461,7 +462,7 @@ const checks = computed(() => {
             // during the handover is still listed by QEMU, so this waits for the real thing.
             label: 'Attached',
             ok:
-                rung(['host-rule', 'container', 'plug-in', 'attach', 'unplugged']) &&
+                rung(['host-rule', 'container', 'plug-in', 'attach', 'unplugged', 'replug']) &&
                 (usb.value.attached?.enumerated ?? false),
             detail: !r.hostDevice
                 ? 'plug the phone into this host'
@@ -471,7 +472,15 @@ const checks = computed(() => {
         },
         {
             label: 'Trusted',
-            ok: rung(['host-rule', 'container', 'plug-in', 'attach', 'unplugged', 'trust']),
+            ok: rung([
+                'host-rule',
+                'container',
+                'plug-in',
+                'attach',
+                'unplugged',
+                'replug',
+                'trust',
+            ]),
             detail: r.device
                 ? `${r.device.name}${r.device.osVersion ? ` · iOS ${r.device.osVersion}` : ''}`
                 : 'tap Trust on the phone',
@@ -610,9 +619,15 @@ const runFacts = computed(() =>
                 view.deviceRunError ||
                 failure ||
                 !live ||
-                ['host-rule', 'trust', 'signing', 'developer-mode', 'unplugged', 'attach'].includes(
-                    readiness.substate,
-                )
+                [
+                    'host-rule',
+                    'trust',
+                    'signing',
+                    'developer-mode',
+                    'unplugged',
+                    'replug',
+                    'attach',
+                ].includes(readiness.substate)
             "
             #status
         >
@@ -682,6 +697,15 @@ const runFacts = computed(() =>
             >
                 The guest still holds the port; plug the phone back into the same port and it
                 reappears by itself, or detach to hand the port back.
+            </Callout>
+            <Callout
+                v-if="readiness.substate === 'replug'"
+                tone="warn"
+                title="QEMU holds the phone but could not read it"
+            >
+                This happens once a phone has been detached and attached again in the same session:
+                QEMU reads a phone cleanly only the first time it opens it. Detach, unplug the
+                phone, plug it in again, and attach once. Nothing else needs restarting.
             </Callout>
             <Callout v-if="readiness.substate === 'trust'" tone="neutral" title="On the phone">
                 Press <b>Pair with the phone</b>, then unlock the phone and tap <b>Trust</b> when it

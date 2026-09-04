@@ -15,6 +15,7 @@ export type DeviceSubstate =
     | 'plug-in'
     | 'attach'
     | 'unplugged'
+    | 'replug'
     | 'trust'
     | 'signing'
     | 'developer-mode'
@@ -79,13 +80,15 @@ export function deviceReadiness(view: MacBuilderView): DeviceReadiness {
                     : 'plug-in'
                 : hostDevice === null
                   ? 'unplugged'
-                  : device === null || device.pairingState !== 'paired'
-                    ? 'trust'
-                    : !signingReady
-                      ? 'signing'
-                      : device.developerMode !== 'enabled'
-                        ? 'developer-mode'
-                        : 'ready';
+                  : !attached.enumerated
+                    ? 'replug'
+                    : device === null || device.pairingState !== 'paired'
+                      ? 'trust'
+                      : !signingReady
+                        ? 'signing'
+                        : device.developerMode !== 'enabled'
+                          ? 'developer-mode'
+                          : 'ready';
 
     return { substate, device, hostDevice, signingReady, canPrepareSigning, name };
 }
@@ -109,6 +112,8 @@ export function deviceNextSummary(readiness: DeviceReadiness, view: MacBuilderVi
         }
         case 'unplugged':
             return `${readiness.name} is no longer plugged into this host; reconnect it or detach`;
+        case 'replug':
+            return `QEMU holds ${readiness.name} but could not read it; detach, unplug it, plug it in again, and attach once`;
         case 'trust':
             return `Unlock ${readiness.name} and tap Trust when it asks about this computer`;
         case 'signing':
@@ -132,6 +137,7 @@ export function deviceWorkingSummary(readiness: DeviceReadiness): string {
         case 'plug-in':
         case 'attach':
         case 'unplugged':
+        case 'replug':
             return 'Passing the iPhone into the guest';
         case 'trust':
         case 'developer-mode':
