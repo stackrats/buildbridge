@@ -96,12 +96,10 @@ pub(crate) async fn build_machine_list_view(app: &AppHandle) -> Result<MachineLi
             .find(&summary.id)
             .ok()
             .and_then(|machine| machine.signing_kit_id.clone());
-        let resolved = match attached {
-            Some(id) => kits.iter().find(|kit| kit.id == id),
-            None if kits.len() == 1 => kits.first(),
-            None => None,
-        };
-        summary.signing_kit_name = resolved.map(|kit| kit.name.clone());
+        // The same rule as the machine view: nothing is attached on a machine's behalf, not
+        // even when the host holds exactly one kit, so the row and the page never disagree.
+        summary.signing_kit_name =
+            resolve_signing_kit(&kits, attached.as_deref()).map(|kit| kit.name.clone());
         summary.env_set_name = attachments
             .find(&summary.id)
             .ok()
