@@ -31,7 +31,7 @@ import {
 } from '../../../model/phases';
 import type { JourneyStep } from '../../../model/steps';
 import {
-    busyKeyLabel,
+    activityLabel,
     useMachinesStore,
     type MachineSession,
     type OperationId,
@@ -189,8 +189,11 @@ const strip = computed(() => {
         };
     }
     return {
-        label: (operation && busyKeyLabel[operation]) ?? 'Working',
-        detail: null,
+        label: activityLabel(operation) ?? 'Working',
+        detail:
+            operation === 'device-pair' || operation === 'pairing_device'
+                ? 'unlock the phone and tap Trust when it asks'
+                : null,
         elapsed: null,
         value: null,
         completedBytes: null,
@@ -703,9 +706,10 @@ const runFacts = computed(() =>
                 tone="warn"
                 title="QEMU holds the phone but could not read it"
             >
-                This happens once a phone has been detached and attached again in the same session:
-                QEMU reads a phone cleanly only the first time it opens it. Detach, unplug the
-                phone, plug it in again, and attach once. Nothing else needs restarting.
+                This happens once a phone has been detached and attached again in the same session,
+                or when the phone re-enumerated under QEMU: QEMU reads a phone cleanly only the
+                first time it opens it. Detach, unplug the phone, plug it in again, and attach once.
+                If that repeats, restart the machine and attach once after it is up.
             </Callout>
             <Callout v-if="readiness.substate === 'trust'" tone="neutral" title="On the phone">
                 Press <b>Pair with the phone</b>, then unlock the phone and tap <b>Trust</b> when it
@@ -785,7 +789,8 @@ const runFacts = computed(() =>
                     title="Restores usbmuxd handling of iPhones on this host"
                     @click="machines.removeUsbRule(session.id)"
                 >
-                    <Smartphone class="h-3.5 w-3.5" />
+                    <Spinner v-if="session.operation === 'usb-rule'" />
+                    <Smartphone v-else class="h-3.5 w-3.5" />
                     Remove host rule
                 </Button>
                 <p class="text-xs leading-5 text-zinc-500 dark:text-zinc-400">

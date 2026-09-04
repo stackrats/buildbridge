@@ -424,6 +424,7 @@ pub fn attach_usb_device(
     qmp_socket: &Path,
     container_name: &str,
     device: &HostUsbDevice,
+    guest_reset: bool,
 ) -> Result<AttachedUsbDevice, ProviderError> {
     if !valid_usb_port_path(&device.port)
         || !is_apple_mobile_product(&device.vendor_id, &device.product_id)
@@ -462,14 +463,14 @@ pub fn attach_usb_device(
             }
             UsbAttachment::Unreadable => {
                 return Err(ProviderError::UsbPassthrough(
-                    "QEMU holds this phone but could not read it, which happens once a phone has been detached and attached again in the same session. Detach it, unplug it, plug it in again, and attach once."
+                    "QEMU holds this phone but could not read it, which happens once a phone has been detached and attached again in the same session, or has re-enumerated under QEMU. Detach it, unplug it, plug it in again, and attach once; if that repeats, restart the machine."
                         .to_string(),
                 ));
             }
             UsbAttachment::Absent => client.delete_device(IPHONE_QMP_DEVICE_ID)?,
         }
     }
-    client.add_usb_host(device.bus, &device.port)?;
+    client.add_usb_host(device.bus, &device.port, guest_reset)?;
 
     let started = Instant::now();
     let mut attachment = UsbAttachment::Absent;

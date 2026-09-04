@@ -984,11 +984,13 @@ ladder is shown as a readiness grid and every rung has one primary action:
    disk is still inside the container is migrated to the host first (see *Host lifecycle*).
 3. **Attach** hot-plugs the phone over QMP — `device_add usb-host` by `hostbus`/`hostport` —
    onto a **dedicated `usb-ehci` controller** that every USB-capable container carries from
-   creation, with the **guest allowed to reset** the device. Each of those was measured on a
-   phone on the desk: on the machine's own emulated xHCI macOS never assigns an iPhone an
-   address; with the reset refused it addresses the phone but never configures it; with both as
-   above macOS selects the phone's NCM configuration within ten seconds and registers it under a
-   minute later, with nothing restarted. The host **never selects a USB configuration**: the
+   creation, with the guest's permission to reset the device **chosen by the guest's macOS
+   version**. Each of those was measured on a phone on the desk, twice: on the machine's own
+   emulated xHCI macOS never assigns an iPhone an address; macOS 15.7 configures a phone it may
+   reset within ten seconds and never configures one it may not; macOS 26 resets a phone it may
+   reset into re-enumerating on the host, which leaves QEMU with a dead handle, and configures
+   one it may not reset within two seconds. Nothing is restarted, and no login on the guest is
+   needed: the USB stack, Trust and pairing are system daemons. The host **never selects a USB configuration**: the
    phone stays parked in configuration 0 by usbmuxd's own rule, so no Linux driver can bind, and
    QEMU claims every interface once macOS has chosen — selecting the last configuration on the
    host hands those interfaces to `cdc_ncm` instead. One caveat governs the design: QEMU reads a

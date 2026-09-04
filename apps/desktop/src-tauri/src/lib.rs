@@ -1638,6 +1638,10 @@ async fn attach_usb_device(
     if !buildbridge_docker_osx::valid_usb_port_path(&input.port) {
         return Err("The USB port is not valid.".to_string());
     }
+    let current = build_mac_builder_view(&app, &paths).await?;
+    let guest_reset = buildbridge_docker_osx::guest_reset_for_macos(
+        current.guest.diagnostics.macos_version.as_deref(),
+    );
     let guard = begin_machine_operation(&app, &machine_id, "attaching_usb")?;
     let container_name = paths.container_name.clone();
     let socket = paths.qmp_socket();
@@ -1658,7 +1662,7 @@ async fn attach_usb_device(
                 "No Apple device is plugged into that port. Plug the phone in and refresh."
                     .to_string()
             })?;
-        buildbridge_docker_osx::attach_usb_device(&socket, &container_name, &device)
+        buildbridge_docker_osx::attach_usb_device(&socket, &container_name, &device, guest_reset)
             .map_err(|error| error.to_string())
     })
     .await

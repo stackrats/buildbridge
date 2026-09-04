@@ -141,8 +141,13 @@ impl QmpClient {
         }
     }
 
-    pub fn add_usb_host(&mut self, bus: u8, port: &str) -> Result<(), ProviderError> {
-        self.execute(&device_add_request(bus, port))
+    pub fn add_usb_host(
+        &mut self,
+        bus: u8,
+        port: &str,
+        guest_reset: bool,
+    ) -> Result<(), ProviderError> {
+        self.execute(&device_add_request(bus, port, guest_reset))
             .map(|_| ())
             .map_err(|error| map_qmp_failure("device attach", error))
     }
@@ -216,14 +221,13 @@ pub(crate) fn capabilities_request() -> Value {
 /// `hostbus`/`hostport` matching means the port, not the device, is handed to the guest: an
 /// unplug and replug on the same port re-attaches without another command.
 ///
-/// The phone goes on the machine's dedicated EHCI controller, and the guest is allowed to reset
-/// it. Both were measured on a phone on the desk: on the emulated xHCI macOS never assigns the
-/// phone an address, and with the reset refused it addresses the phone but never configures it.
-/// With both as they are here, macOS selects the phone's NCM configuration within ten seconds
-/// and registers it under a minute later, with nothing restarted. One caveat governs the whole
-/// design: QEMU reads a phone cleanly only the first time it opens it in a process, so a phone
-/// that has been detached must be unplugged and plugged in again before it is attached again.
-pub(crate) fn device_add_request(bus: u8, port: &str) -> Value {
+/// The phone goes on the machine's dedicated EHCI controller — on the emulated xHCI macOS never
+/// assigns an iPhone an address — and whether the guest may reset it depends on the guest, see
+/// [`guest_reset_for_macos`]. One caveat governs the whole design: QEMU reads a phone cleanly
+/// only the first time it opens it in a process, so a phone that has been detached must be
+/// unplugged and plugged in again before it is attached again, and a phone QEMU has lost track
+/// of needs the machine restarted.
+pub(crate) fn device_add_request(bus: u8, port: &str, guest_reset: bool) -> Value {
     json!({
         "execute": "device_add",
         "arguments": {
@@ -231,10 +235,29 @@ pub(crate) fn device_add_request(bus: u8, port: &str) -> Value {
             "id": IPHONE_QMP_DEVICE_ID,
             "bus": format!("{USB_PHONE_CONTROLLER}.0"),
             "hostbus": bus,
-            "hostport": port
+            "hostport": port,
+            "guest-reset": guest_reset
         }
     })
 }
+
+/// Whether the guest may really reset the phone, by the guest's macOS version. Measured twice
+/// each on a phone on the desk: macOS 15.7 addresses a phone it may not reset but never
+/// configures it, and configures one it may reset within ten seconds; macOS 26 resets a phone
+/// it may reset into re-enumerating on the host, which leaves QEMU holding a dead handle, and
+/// configures one it may not reset within two seconds. Unknown versions get the newer
+/// behaviour, since that is what a fresh install is.
+pub fn guest_reset_for_macos(macos_version: Option<&str>) -> bool {
+    let major: u32 = macos_version
+        .and_then(|version| version.split('.').next())
+        .and_then(|major| major.trim().parse().ok())
+        .unwrap_or(GUEST_RESET_CUTOFF_MAJOR);
+
+    major < GUEST_RESET_CUTOFF_MAJOR
+}
+
+/// The first macOS major that must not really reset the phone.
+const GUEST_RESET_CUTOFF_MAJOR: u32 = 26;
 
 pub(crate) fn device_del_request(id: &str) -> Value {
     json!({ "execute": "device_del", "arguments": { "id": id } })
@@ -376,7 +399,7 @@ mod tests {
             json!({ "execute": "qmp_capabilities" })
         );
         assert_eq!(
-            device_add_request(3, "2.3.1"),
+            device_add_request(3, "2.3.1", false),
             json!({
                 "execute": "device_add",
                 "arguments": {
@@ -384,10 +407,19 @@ mod tests {
                     "id": "buildbridge-iphone",
                     "bus": "buildbridge-phone-usb.0",
                     "hostbus": 3,
-                    "hostport": "2.3.1"
+                    "hostport": "2.3.1",
+                    "guest-reset": false
                 }
             })
         );
+        // The guest's macOS version decides the reset: 15 may, 26 may not, unknown is treated
+        // as new.
+        assert!(guest_reset_for_macos(Some("15.7.9")));
+        assert!(guest_reset_for_macos(Some("14.5")));
+        assert!(!guest_reset_for_macos(Some("26.6.2")));
+        assert!(!guest_reset_for_macos(Some("27.0")));
+        assert!(!guest_reset_for_macos(None));
+        assert!(!guest_reset_for_macos(Some("garbage")));
         assert_eq!(
             device_del_request("buildbridge-iphone"),
             json!({ "execute": "device_del", "arguments": { "id": "buildbridge-iphone" } })

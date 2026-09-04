@@ -35,7 +35,7 @@ pub use disk::{
     required_free_bytes, validate_bind_path,
 };
 use qmp::USB_PHONE_CONTROLLER;
-pub use qmp::{QMP_CONTAINER_DIR, QMP_SOCKET_NAME};
+pub use qmp::{QMP_CONTAINER_DIR, QMP_SOCKET_NAME, guest_reset_for_macos};
 pub use usb::{
     AttachedUsbDevice, ContainerUsbOptions, HostUsbDevice, HostUsbStatus, MachineUsbStatus,
     USB_UDEV_RULE, USB_UDEV_RULE_PATH, UdevRuleState, UsbHolder, attach_usb_device,
