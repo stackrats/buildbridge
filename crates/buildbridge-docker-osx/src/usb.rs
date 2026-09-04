@@ -26,12 +26,17 @@ pub const USB_UDEV_RULE_PATH: &str = "/etc/udev/rules.d/40-buildbridge-iphone.ru
 ///
 /// That last part matters. usbmuxd's own rule runs first and parks the phone in configuration 0
 /// (`ATTR{bConfigurationValue}="0"`) so that usbmuxd can choose a configuration itself. With
-/// usbmuxd disabled nothing ever does, and an unconfigured device cannot be enumerated by the
-/// guest at all: QEMU hands it over, and macOS never sees a usable device. Because this file
-/// sorts after `39-usbmuxd.rules`, assigning the attribute here runs last and wins, leaving the
-/// phone on its first configuration the way the kernel would have picked by default.
+/// usbmuxd disabled nothing ever does, and an unconfigured device offers no interfaces at all.
+/// Because this file sorts after `39-usbmuxd.rules`, assigning the attribute here runs last
+/// and wins.
+///
+/// The value is the phone's *highest* configuration, not its first. An iPhone lists its
+/// configurations in increasing capability — on iOS 18 they run PTP, iPod audio, PTP + Apple
+/// Mobile Device, that plus Apple USB Ethernet, and finally that plus NCM — and only the last
+/// carries the USB network interface CoreDevice and `devicectl` speak over. Selecting the first
+/// gets a camera and nothing a build can use.
 pub const USB_UDEV_RULE: &str = "# Written by BuildBridge; remove this file to restore usbmuxd handling of iPhones.\n\
-SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ENV{PRODUCT}==\"5ac/12[9a][0-9a-f]/*\", ENV{USBMUX_SUPPORTED}=\"0\", ENV{SYSTEMD_WANTS}=\"\", TAG-=\"systemd\", GROUP=\"plugdev\", MODE=\"0660\", ATTR{bConfigurationValue}=\"1\"\n";
+SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ENV{PRODUCT}==\"5ac/12[9a][0-9a-f]/*\", ENV{USBMUX_SUPPORTED}=\"0\", ENV{SYSTEMD_WANTS}=\"\", TAG-=\"systemd\", GROUP=\"plugdev\", MODE=\"0660\", ATTR{bConfigurationValue}=\"$attr{bNumConfigurations}\"\n";
 /// The character-device major of `/dev/bus/usb`, for the container's device cgroup rule.
 pub const USB_BUS_MAJOR: u32 = 189;
 pub const APPLE_VENDOR_ID: &str = "05ac";
@@ -811,16 +816,21 @@ mod tests {
             "TAG-=\"systemd\"",
             "GROUP=\"plugdev\"",
             "MODE=\"0660\"",
-            // Undoes usbmuxd's configuration-0 parking; an unconfigured phone never
-            // enumerates in the guest.
-            "ATTR{bConfigurationValue}=\"1\"",
+            // Undoes usbmuxd's configuration-0 parking, and picks the phone's most capable
+            // configuration rather than its first, which is a camera.
+            "ATTR{bConfigurationValue}=\"$attr{bNumConfigurations}\"",
         ] {
             assert!(rule.contains(fragment), "{fragment}");
         }
-        assert!(
-            !rule.contains("ATTR{bConfigurationValue}=\"0\""),
-            "parking the phone unconfigured is what this rule exists to undo"
-        );
+        for wrong in [
+            "ATTR{bConfigurationValue}=\"0\"",
+            "ATTR{bConfigurationValue}=\"1\"",
+        ] {
+            assert!(
+                !rule.contains(wrong),
+                "{wrong}: unconfigured is what this rule undoes, and the first configuration is a camera"
+            );
+        }
         assert!(USB_UDEV_RULE.ends_with('\n'));
     }
 

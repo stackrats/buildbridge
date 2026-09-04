@@ -641,6 +641,7 @@ where
         shut_down_guest(
             container_name,
             &options.qmp_dir.join(crate::QMP_SOCKET_NAME),
+            &mut |detail| report(BootUsbPhase::ShuttingDown, detail),
         )?;
 
         report(
@@ -686,7 +687,11 @@ where
 /// Asks the guest to power down and waits for QEMU to exit, then stops the container whatever
 /// happened: an unreachable socket or a guest that ignores the request must not block the
 /// rebuild, and `stop` is a no-op once the container has already exited.
-fn shut_down_guest(container_name: &str, qmp_socket: &Path) -> Result<(), ProviderError> {
+fn shut_down_guest(
+    container_name: &str,
+    qmp_socket: &Path,
+    on_wait: &mut dyn FnMut(&str),
+) -> Result<(), ProviderError> {
     if let Ok(mut client) = QmpClient::connect(qmp_socket)
         && client.power_down().is_ok()
     {
@@ -699,8 +704,12 @@ fn shut_down_guest(container_name: &str, qmp_socket: &Path) -> Result<(), Provid
             ) {
                 break;
             }
+            // Shutting macOS down takes the better part of a minute, and a row that reports
+            // nothing for that long reads as a hang rather than as waiting.
+            on_wait("Waiting for macOS to finish shutting down");
             thread::sleep(GUEST_SHUTDOWN_POLL);
         }
+        on_wait("macOS has shut down");
     }
     stop(container_name).map(|_| ())
 }

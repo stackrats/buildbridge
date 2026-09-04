@@ -19,6 +19,8 @@ use crate::ProviderError;
 pub(crate) const IPHONE_QMP_DEVICE_ID: &str = "buildbridge-iphone";
 /// Docker-OSX's `Launch.sh` defines `-device qemu-xhci,id=xhci`; USB 3 devices attach there.
 pub(crate) const USB_XHCI_BUS: &str = "xhci.0";
+/// The controller a phone attached at boot is given, separate from the machine's own xHCI.
+pub(crate) const USB_PHONE_CONTROLLER: &str = "buildbridge-phone-usb";
 /// Where the control directory is mounted inside the container.
 pub const QMP_CONTAINER_DIR: &str = "/buildbridge-qmp";
 /// The socket QEMU creates inside that directory.

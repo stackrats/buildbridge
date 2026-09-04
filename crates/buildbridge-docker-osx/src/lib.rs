@@ -34,7 +34,7 @@ pub use disk::{
     inspect_container_layout, migrate_disk_to_host, remove_machine_disk, required_free_bytes,
     set_boot_usb_device, validate_bind_path,
 };
-use qmp::{IPHONE_QMP_DEVICE_ID, USB_XHCI_BUS};
+use qmp::{IPHONE_QMP_DEVICE_ID, USB_PHONE_CONTROLLER};
 pub use qmp::{QMP_CONTAINER_DIR, QMP_SOCKET_NAME};
 pub use usb::{
     AttachedUsbDevice, BootUsbDevice, BootUsbSummary, ContainerUsbOptions, HostUsbDevice,
@@ -6843,13 +6843,18 @@ fn create_args(
 /// The boot device deliberately leaves `guest-reset` at QEMU's default. Hot-plugging sets it
 /// off, because a reset mid-handover leaves the phone unreadable; at boot the opposite is true,
 /// since macOS must reset the port to enumerate the device at all.
+///
+/// The phone gets its own USB 2.0 controller rather than sharing the machine's `qemu-xhci`.
+/// An iPhone is a high-speed USB 2.0 device, and macOS never assigned one an address on the
+/// emulated xHCI: QEMU held it and read its descriptors while the guest left it at address
+/// zero. EHCI is the controller a device of that speed would meet on real hardware.
 fn qemu_extra_args(usb: Option<&ContainerUsbOptions>) -> String {
     let mut extra = format!(
         "-display gtk,zoom-to-fit=on -qmp unix:{QMP_CONTAINER_DIR}/{QMP_SOCKET_NAME},server,nowait"
     );
     if let Some(boot) = usb.and_then(|usb| usb.boot_device.as_ref()) {
         extra.push_str(&format!(
-            " -device usb-host,id={IPHONE_QMP_DEVICE_ID},bus={USB_XHCI_BUS},hostbus={},hostport={}",
+            " -device usb-ehci,id={USB_PHONE_CONTROLLER} -device usb-host,id={IPHONE_QMP_DEVICE_ID},bus={USB_PHONE_CONTROLLER}.0,hostbus={},hostport={}",
             boot.bus(),
             boot.port()
         ));
@@ -7486,10 +7491,11 @@ mod tests {
             attached.starts_with(&plain),
             "the console and socket are kept"
         );
-        assert!(
-            attached
-                .contains("-device usb-host,id=buildbridge-iphone,bus=xhci.0,hostbus=3,hostport=9")
-        );
+        // Its own USB 2.0 controller: macOS never addressed the phone on the emulated xHCI.
+        assert!(attached.contains("-device usb-ehci,id=buildbridge-phone-usb"));
+        assert!(attached.contains(
+            "-device usb-host,id=buildbridge-iphone,bus=buildbridge-phone-usb.0,hostbus=3,hostport=9"
+        ));
         // Hot-plug turns the guest reset off; at boot macOS must be allowed to reset the port.
         assert!(!attached.contains("guest-reset"));
         // The launch script word-splits this, so a stray quote or semicolon would be a hole.
