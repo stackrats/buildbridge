@@ -51,6 +51,9 @@ const facts = computed(() => {
         `${view.value.profile.memoryGib} GiB`,
         `${view.value.profile.cpuCores} cores`,
         `ssh 127.0.0.1:${view.value.profile.sshPort}`,
+        view.value.displayUrl
+            ? `screen ${view.value.displayUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')}`
+            : null,
         uptime === null ? null : `up ${formatElapsed(uptime)}`,
         diagnostics.macosVersion ? `macOS ${diagnostics.macosVersion}` : null,
         diagnostics.xcodeVersion ? `Xcode ${diagnostics.xcodeVersion}` : null,

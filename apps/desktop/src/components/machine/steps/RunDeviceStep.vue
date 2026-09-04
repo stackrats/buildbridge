@@ -752,14 +752,14 @@ const runFacts = computed(() =>
             <FailureBlock
                 v-if="inspectorError"
                 title="Safari could not be opened in the guest"
-                cause="Safari needs the guest's graphical session: log in on the machine's console window, then try again."
+                cause="Safari needs the guest's graphical session: log in on the machine's screen, then try again."
                 :diagnostic="inspectorError"
                 class="mb-3"
             />
             <Callout
                 v-if="inspector"
                 tone="neutral"
-                title="Web Inspector: Safari is open in the guest console window"
+                title="Web Inspector: Safari is open on the guest's screen"
                 class="mb-3"
             >
                 <ol class="list-decimal space-y-1 pl-4">

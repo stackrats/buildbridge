@@ -375,7 +375,7 @@ function meta(step: Step<Id>): string {
                                         tone="outline"
                                         class="ml-2 align-middle"
                                         v-tip="
-                                            'Self-hosted and experimental: USB passthrough into a Docker-OSX guest is not a route Apple supports.'
+                                            'Self-hosted and experimental: USB passthrough into a QEMU guest is not a route Apple supports.'
                                         "
                                         >experimental</Badge
                                     >

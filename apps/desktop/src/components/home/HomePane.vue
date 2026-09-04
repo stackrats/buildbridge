@@ -42,7 +42,7 @@ const kitSummary = computed(() => {
 const phases = [
     {
         title: 'Prepare a macOS machine once',
-        body: 'A persistent Docker-OSX guest. Install macOS and Xcode in it; BuildBridge pins its SSH identity and keeps the disk between starts.',
+        body: 'A persistent macOS guest under Docker-OSX or dockur/macos. Install macOS and Xcode in it; BuildBridge pins its SSH identity and keeps the disk between starts.',
     },
     {
         title: 'Approve a project and test build',

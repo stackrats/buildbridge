@@ -59,7 +59,7 @@ const lines = computed<LogLine[]>(() => {
 const emptyText = computed(() => {
     switch (source.value) {
         case 'console':
-            return 'The last 80 lines of Docker-OSX output appear here once the container exists.';
+            return "The last 80 lines of the container's output appear here once it exists.";
         case 'build':
             return 'Output from the unsigned test build appears here while it runs.';
         case 'archive':

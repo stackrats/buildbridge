@@ -534,7 +534,7 @@ export function useMachinesStore() {
             session(id).launch = null;
             return runOperation(id, 'launch', () => useBackend().launchMachine(id), {
                 started: 'Starting the machine',
-                finished: 'The macOS machine is running. Open its console window to continue.',
+                finished: 'The macOS machine is running; the Install step shows what comes next.',
             });
         },
         loadTemplates,

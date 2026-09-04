@@ -64,7 +64,7 @@ export const devicePhaseLabel: Record<AppleDeviceRunPhase, string> = {
 
 export const launchPhaseLabel: Record<LaunchPhase, string> = {
     preparing: 'Checking the host',
-    pulling_image: 'Pulling the Docker-OSX image',
+    pulling_image: 'Pulling the machine image',
     generating_identity: 'Generating the machine identity',
     preparing_disk: 'Preparing the macOS disk on this host',
     creating_container: 'Creating the container',

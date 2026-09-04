@@ -18,6 +18,7 @@ const machines = useMachinesStore();
 const view = computed(() => session.view!);
 const live = computed(() => isLive(view.value.runtime.state));
 const busy = computed(() => session.operation !== null || view.value.busyOperation !== null);
+const dockur = computed(() => view.value.profile.provider === 'dockur_macos');
 const running = computed(() => step.status === 'running');
 const failure = computed(() =>
     session.lastFailure?.operation === 'launch' ? session.lastFailure : null,
@@ -62,7 +63,7 @@ const strip = computed(() => {
                 size="sm"
                 :title="
                     view.runtime.state === 'missing'
-                        ? 'The first start pulls the Docker-OSX image'
+                        ? `The first start pulls the ${dockur ? 'dockur/macos' : 'Docker-OSX'} image`
                         : undefined
                 "
                 :disabled="busy || !view.runtime.prerequisites.ready"
@@ -111,7 +112,14 @@ const strip = computed(() => {
             />
         </template>
 
-        <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
+        <p v-if="dockur" class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
+            The first start pulls the dockur/macos image and creates the container with fixed,
+            non-privileged arguments; the machine then downloads macOS from Apple into its storage
+            directory on this host and generates its own identity. Its screen is a web page, opened
+            from the Install step. Stopping preserves the container and its disk; only the explicit
+            discard action in the machine menu removes them.
+        </p>
+        <p v-else class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
             The first start pulls the Docker-OSX image, generates a stable machine identity, and
             creates the container with fixed, non-privileged arguments. A compact console window
             opens for the macOS installer. Stopping preserves the container and its disk; only the

@@ -202,6 +202,7 @@ export function deriveSetupSteps(view: MacBuilderView, context: StepContext): Se
     const { ssh, diagnostics } = guest;
     const running = runtime.state === 'running';
     const hostReady = runtime.prerequisites.ready;
+    const dockur = view.profile.provider === 'dockur_macos';
     const reachable = running && ssh.reachable;
     const trusted = reachable && ssh.trust === 'trusted';
     const authenticated = trusted && diagnostics.authenticated;
@@ -222,7 +223,13 @@ export function deriveSetupSteps(view: MacBuilderView, context: StepContext): Se
             ? [
                   runtime.prerequisites.dockerVersion ?? 'Docker',
                   'KVM',
-                  runtime.prerequisites.display ? `display ${runtime.prerequisites.display}` : null,
+                  dockur
+                      ? runtime.prerequisites.tunAccess
+                          ? 'tun'
+                          : null
+                      : runtime.prerequisites.display
+                        ? `display ${runtime.prerequisites.display}`
+                        : null,
               ]
                   .filter(Boolean)
                   .join(' · ')
@@ -252,7 +259,7 @@ export function deriveSetupSteps(view: MacBuilderView, context: StepContext): Se
                   : `Running for ${formatElapsed(uptime)}`
               : runtime.state === 'missing'
                 ? hostReady
-                    ? 'Not created yet; the first start pulls the Docker-OSX image'
+                    ? `Not created yet; the first start pulls the ${dockur ? 'dockur/macos' : 'Docker-OSX'} image`
                     : unlockedBy.launch
                 : runtime.state === 'exited' || runtime.state === 'created'
                   ? 'Stopped; the macOS disk is retained and resumes on start'
