@@ -496,7 +496,7 @@ fn print_machine(view: &Value) {
         ("bundle", text(&view["appleWorkspace"]["bundleIdentifier"])),
         ("kit", text(&view["signingKit"]["name"])),
         ("signing", text(&view["signingHealth"])),
-        ("archive", text(&view["archive"]["ipaPath"])),
+        ("archive", text(&view["archive"]["ipa"]["path"])),
     ];
     for (label, value) in rows {
         println!("{label:<12} {value}");
@@ -848,8 +848,16 @@ async fn run(cli: Cli) -> Result<(), String> {
             )
             .await?,
             |result| {
-                println!("IPA: {}", text(&result["archive"]["ipaPath"]));
-                println!("Archive: {}", text(&result["archive"]["archivePath"]));
+                let archive = &result["archive"];
+                println!(
+                    "{} ({}) · IPA {:.2} MB · archive {:.1} MB",
+                    text(&archive["marketingVersion"]),
+                    text(&archive["buildNumber"]),
+                    archive["ipa"]["bytes"].as_f64().unwrap_or(0.0) / 1_000_000.0,
+                    archive["archive"]["bytes"].as_f64().unwrap_or(0.0) / 1_000_000.0
+                );
+                println!("IPA: {}", text(&archive["ipa"]["path"]));
+                println!("Archive: {}", text(&archive["archive"]["path"]));
             },
         ),
         Command::Signing(SigningCommand::Kits) => {
