@@ -1,10 +1,14 @@
 //! System-tray lifecycle controls for the paired runner and every managed macOS machine.
 
 use buildbridge_docker_osx::ContainerState;
-use tauri::{AppHandle, Emitter, Manager};
+use buildbridge_engine::{Engine, MachineRuntime, machine_runtimes};
+use tauri::{AppHandle, Manager};
 
-use crate::machines::{MachinePaths, StoredMachine};
-use crate::{MACHINE_CHANGED_EVENT, MachineChangedEvent};
+use crate::Desktop;
+
+fn engine(app: &AppHandle) -> Engine {
+    app.state::<Desktop>().engine.clone()
+}
 
 const TRAY_ID: &str = "main";
 const START_PREFIX: &str = "machine-start:";
@@ -43,13 +47,7 @@ pub(crate) fn setup(app: &tauri::App) -> tauri::Result<()> {
             } else {
                 match id {
                     "open" => reveal_window(app),
-                    "refresh" => {
-                        let _ = app.emit(
-                            MACHINE_CHANGED_EVENT,
-                            MachineChangedEvent { machine_id: None },
-                        );
-                        refresh(app);
-                    }
+                    "refresh" => engine(app).notify_machines_changed(),
                     "stop-all-and-quit" => stop_all_and_quit(app.clone()),
                     "quit" => app.exit(0),
                     _ => {}
@@ -71,38 +69,8 @@ pub(crate) fn refresh(app: &AppHandle) {
     let _ = tray.set_tooltip(Some(tooltip(app)));
 }
 
-struct MachineMenuState {
-    machine: StoredMachine,
-    state: ContainerState,
-    host_ready: bool,
-}
-
-fn machine_states(app: &AppHandle) -> Vec<MachineMenuState> {
-    let Ok(registry) = crate::machines::load_registry(app) else {
-        return Vec::new();
-    };
-
-    registry
-        .machines
-        .into_iter()
-        .filter_map(|machine| {
-            let paths = MachinePaths::resolve(app, &machine.id).ok()?;
-            let runtime = buildbridge_docker_osx::status(&paths.container_name).ok();
-            let state = runtime
-                .as_ref()
-                .map(|runtime| runtime.state)
-                .unwrap_or(ContainerState::Unavailable);
-            let host_ready = runtime
-                .as_ref()
-                .is_some_and(|runtime| runtime.prerequisites.ready);
-
-            Some(MachineMenuState {
-                machine,
-                state,
-                host_ready,
-            })
-        })
-        .collect()
+fn machine_states(app: &AppHandle) -> Vec<MachineRuntime> {
+    machine_runtimes(&engine(app))
 }
 
 fn is_live(state: ContainerState) -> bool {
@@ -129,28 +97,23 @@ fn menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     for entry in &states {
         let live = is_live(entry.state);
         let status = MenuItemBuilder::with_id(
-            format!("machine-status:{}", entry.machine.id),
+            format!("machine-status:{}", entry.id),
             format!("Status: {}", state_label(entry.state)),
         )
         .enabled(false)
         .build(app)?;
         let start = MenuItemBuilder::with_id(
-            format!("{START_PREFIX}{}", entry.machine.id),
+            format!("{START_PREFIX}{}", entry.id),
             start_label(entry.state),
         )
         .enabled(entry.host_ready && !live)
         .build(app)?;
-        let stop =
-            MenuItemBuilder::with_id(format!("{STOP_PREFIX}{}", entry.machine.id), "Stop safely")
-                .enabled(live)
-                .build(app)?;
+        let stop = MenuItemBuilder::with_id(format!("{STOP_PREFIX}{}", entry.id), "Stop safely")
+            .enabled(live)
+            .build(app)?;
         let submenu = SubmenuBuilder::new(
             app,
-            format!(
-                "{} — {}",
-                entry.machine.config.name,
-                state_label(entry.state)
-            ),
+            format!("{} — {}", entry.name, state_label(entry.state)),
         )
         .items(&[&status, &start, &stop])
         .build()?;
@@ -210,46 +173,7 @@ fn tooltip(app: &AppHandle) -> String {
 
 fn start_machine(app: AppHandle, machine_id: String) {
     tauri::async_runtime::spawn(async move {
-        let result = async {
-            let paths = MachinePaths::resolve(&app, &machine_id)?;
-            let profile = crate::machines::load_registry(&app)?
-                .find(&machine_id)?
-                .config
-                .clone();
-            let guard = crate::begin_machine_operation(&app, &machine_id, "starting")?;
-            let identity_path = paths.identity();
-            let disk_dir = paths.disk_dir();
-            let qmp_dir = paths.qmp_dir();
-            let template_dir = crate::templates::template_dir_for(&app, &machine_id)?;
-            let container_name = paths.container_name.clone();
-            let event_app = app.clone();
-            let event_machine_id = machine_id.clone();
-            let joined = tauri::async_runtime::spawn_blocking(move || {
-                let options = buildbridge_docker_osx::LaunchOptions {
-                    identity_path: &identity_path,
-                    disk_dir: &disk_dir,
-                    qmp_dir: &qmp_dir,
-                    usb: buildbridge_docker_osx::resolve_usb_options(),
-                    template_dir: template_dir.as_deref(),
-                };
-                buildbridge_docker_osx::launch(&container_name, &profile, &options, |progress| {
-                    crate::emit_machine_progress(
-                        &event_app,
-                        crate::LAUNCH_PROGRESS_EVENT,
-                        &event_machine_id,
-                        progress,
-                    );
-                })
-                .map_err(|error| error.to_string())
-            })
-            .await
-            .map_err(|error| error.to_string());
-            drop(guard);
-            joined??;
-
-            Ok::<_, String>(())
-        }
-        .await;
+        let result = buildbridge_engine::launch_mac_builder(&engine(&app), machine_id).await;
         refresh(&app);
         if result.is_err() {
             reveal_window(&app);
@@ -259,7 +183,7 @@ fn start_machine(app: AppHandle, machine_id: String) {
 
 fn stop_machine(app: AppHandle, machine_id: String, quit_after_stop: bool) {
     tauri::async_runtime::spawn(async move {
-        let result = stop_machine_blocking(&app, &machine_id).await;
+        let result = buildbridge_engine::stop_mac_builder(&engine(&app), machine_id).await;
         refresh(&app);
 
         if result.is_ok() && quit_after_stop {
@@ -270,27 +194,12 @@ fn stop_machine(app: AppHandle, machine_id: String, quit_after_stop: bool) {
     });
 }
 
-async fn stop_machine_blocking(app: &AppHandle, machine_id: &str) -> Result<(), String> {
-    let paths = MachinePaths::resolve(app, machine_id)?;
-    let guard = crate::begin_machine_operation(app, machine_id, "stopping")?;
-    let container_name = paths.container_name.clone();
-    let joined = tauri::async_runtime::spawn_blocking(move || {
-        buildbridge_docker_osx::stop(&container_name).map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string());
-    drop(guard);
-    joined??;
-
-    Ok(())
-}
-
 fn stop_all_and_quit(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut failed = false;
         for entry in machine_states(&app) {
             if is_live(entry.state)
-                && stop_machine_blocking(&app, &entry.machine.id)
+                && buildbridge_engine::stop_mac_builder(&engine(&app), entry.id.clone())
                     .await
                     .is_err()
             {

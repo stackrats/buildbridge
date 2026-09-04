@@ -23,7 +23,7 @@ execFileSync(
         '-p',
         'buildbridge-docker-osx',
         '-p',
-        'buildbridge-desktop',
+        'buildbridge-engine',
         'export_bindings',
     ],
     { cwd: workspace, stdio: 'inherit', env: { ...process.env, TS_RS_EXPORT_DIR: target } },

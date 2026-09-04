@@ -1,0 +1,19 @@
+[package]
+name = "buildbridge-cli"
+version.workspace = true
+description = "BuildBridge from the terminal: the same engine as the desktop"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "buildbridge"
+path = "src/main.rs"
+
+[dependencies]
+buildbridge-engine.workspace = true
+buildbridge-docker-osx.workspace = true
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

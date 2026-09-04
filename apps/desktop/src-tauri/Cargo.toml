@@ -18,16 +18,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-base64 = "0.22"
-buildbridge-contract.workspace = true
 buildbridge-docker-osx.workspace = true
-buildbridge-runner.workspace = true
-jsonwebtoken.workspace = true
-keyring = "4.2"
-reqwest.workspace = true
-tauri = { version = "2", features = ["tray-icon"] }
+buildbridge-engine.workspace = true
 serde.workspace = true
-ts-rs.workspace = true
 serde_json.workspace = true
-time = { version = "0.3", features = ["parsing"] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"

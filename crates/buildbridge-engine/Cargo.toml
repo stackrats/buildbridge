@@ -1,0 +1,20 @@
+[package]
+name = "buildbridge-engine"
+version.workspace = true
+description = "Everything BuildBridge does, as a library any client can drive"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = "0.22"
+buildbridge-contract.workspace = true
+buildbridge-docker-osx.workspace = true
+buildbridge-runner.workspace = true
+jsonwebtoken.workspace = true
+keyring = "4.2"
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time = { version = "0.3", features = ["parsing"] }
+tokio.workspace = true
+ts-rs.workspace = true
