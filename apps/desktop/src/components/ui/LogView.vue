@@ -84,9 +84,11 @@ function toggleWrap(): void {
 </script>
 
 <template>
-    <div class="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
+    <div
+        class="flex flex-col overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800"
+    >
         <div
-            class="flex items-center justify-between gap-2 border-b border-zinc-200 bg-white px-2 py-1.5 dark:border-zinc-800 dark:bg-zinc-900"
+            class="flex shrink-0 items-center justify-between gap-2 border-b border-zinc-200 bg-white px-2 py-1.5 dark:border-zinc-800 dark:bg-zinc-900"
         >
             <span class="text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400">
                 {{ lines.length }} {{ lines.length === 1 ? 'line' : 'lines' }}
@@ -117,7 +119,7 @@ function toggleWrap(): void {
         </div>
         <div
             ref="scroller"
-            class="overflow-y-auto bg-zinc-50 px-3 py-2 font-mono text-[11px] leading-5 dark:bg-zinc-950"
+            class="min-h-0 grow overflow-y-auto bg-zinc-50 px-3 py-2 font-mono text-[11px] leading-5 dark:bg-zinc-950"
             :class="[height, wrap ? '' : 'overflow-x-auto']"
             @scroll="onScroll"
         >

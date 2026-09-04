@@ -215,6 +215,34 @@ describe('deriveSetupSteps', () => {
         expect(steps.find((step) => step.id === 'xcode-activate')?.status).toBe('running');
         expect(focusStep(steps)?.id).toBe('xcode-activate');
     });
+
+    it('describes a stop on the launch step as a stop, not a start', () => {
+        const launch = deriveSetupSteps(readyView(), {
+            runningStep: 'launch',
+            runningOperation: 'stop',
+        }).find((step) => step.id === 'launch');
+
+        expect(launch?.status).toBe('running');
+        expect(launch?.summary).toBe('Stopping safely; the container and its macOS disk are kept');
+    });
+
+    it('reads the native busy key on the launch step the same way', () => {
+        const launch = deriveSetupSteps(readyView(), {
+            runningStep: 'launch',
+            runningOperation: 'discarding',
+        }).find((step) => step.id === 'launch');
+
+        expect(launch?.summary).toBe('Discarding the container and its macOS disk');
+    });
+
+    it('keeps the start summary for the launch step’s own operation', () => {
+        const launch = deriveSetupSteps(baseView(), {
+            runningStep: 'launch',
+            runningOperation: 'launch',
+        }).find((step) => step.id === 'launch');
+
+        expect(launch?.summary).toBe('Creating and starting the container');
+    });
 });
 
 function provisionedView(): MacBuilderView {
@@ -252,6 +280,27 @@ function provisionedView(): MacBuilderView {
 }
 
 describe('deriveBuildSteps', () => {
+    it('names the operation on a step that hosts more than one', () => {
+        const view = provisionedView();
+        const at = (id: string, runningOperation: string) =>
+            deriveBuildSteps(view, { runningStep: id, runningOperation }).find(
+                (step) => step.id === id,
+            );
+
+        expect(at('provision', 'clear-signing')?.summary).toBe(
+            'Removing the guest keychain and installed profiles',
+        );
+        expect(at('provision', 'provision')?.summary).toBe(
+            'Importing the identity into a dedicated guest keychain',
+        );
+        expect(at('test-build', 'adopt-lock')?.summary).toBe(
+            'Adopting the guest’s Podfile.lock into the project',
+        );
+        expect(at('test-build', 'test_building')?.summary).toBe(
+            'Preparing tools, dependencies, and the unsigned build',
+        );
+    });
+
     it('blocks project approval until the machine is prepared', () => {
         const steps = deriveBuildSteps(baseView(), { runningStep: null });
 

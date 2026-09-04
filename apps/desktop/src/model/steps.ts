@@ -133,8 +133,38 @@ const unlockedBy: Record<JourneyStepId, string> = {
 export interface StepContext {
     /** Step whose native operation this client started and is still awaiting. */
     runningStep: string | null;
+    /**
+     * The operation behind `runningStep`: this client's operation id or the native busy key.
+     * A step that hosts more than one operation reads it, so a stop is never described as a
+     * start.
+     */
+    runningOperation?: string | null;
     /** Reference time for elapsed displays; injectable for tests. */
     now?: number;
+}
+
+/**
+ * What a running step says when the operation on it is not the step's own: stopping,
+ * discarding and deleting run on the launch step, removing signing on the provision step,
+ * adopting the lockfile on the test-build step. Keyed by client operation id and native busy
+ * key alike.
+ */
+const runningSummaryByOperation: Record<string, string> = {
+    stop: 'Stopping safely; the container and its macOS disk are kept',
+    stopping: 'Stopping safely; the container and its macOS disk are kept',
+    discard: 'Discarding the container and its macOS disk',
+    discarding: 'Discarding the container and its macOS disk',
+    delete: 'Deleting the machine',
+    deleting: 'Deleting the machine',
+    'clear-signing': 'Removing the guest keychain and installed profiles',
+    clearing_signing: 'Removing the guest keychain and installed profiles',
+    'adopt-lock': 'Adopting the guest’s Podfile.lock into the project',
+    adopting_lock: 'Adopting the guest’s Podfile.lock into the project',
+};
+
+function runningSummary(context: StepContext, own: string): string {
+    const operation = context.runningOperation ?? null;
+    return (operation && runningSummaryByOperation[operation]) || own;
 }
 
 /** The guest reports "Xcode 26.6" or bare "26.6"; name the tool exactly once either way. */
@@ -212,7 +242,7 @@ export function deriveSetupSteps(view: MacBuilderView, context: StepContext): Se
                   ? 'active'
                   : 'pending',
         summary: isRunning('launch')
-            ? 'Creating and starting the container'
+            ? runningSummary(context, 'Creating and starting the container')
             : running
               ? uptime === null
                   ? 'Running'
@@ -392,7 +422,7 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
                 ? 'active'
                 : 'pending',
         summary: isRunning('test-build')
-            ? 'Preparing tools, dependencies, and the unsigned build'
+            ? runningSummary(context, 'Preparing tools, dependencies, and the unsigned build')
             : built
               ? workspace.lastNativeLockUpdated
                   ? `${builtWith(workspace)} · the guest refreshed Podfile.lock`
@@ -442,7 +472,7 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
                 ? 'active'
                 : 'pending',
         summary: isRunning('provision')
-            ? 'Importing the identity into a dedicated guest keychain'
+            ? runningSummary(context, 'Importing the identity into a dedicated guest keychain')
             : provisioned
               ? signing.distributionIdentity
                   ? `${signing.distributionIdentity.identityName} · valid until ${signing.distributionIdentity.certificateExpiresAt.slice(0, 10)}`

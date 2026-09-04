@@ -5,7 +5,7 @@ import { computed, ref, watch } from 'vue';
 import { percent } from '../../../lib/format';
 import { projectPhaseLabel } from '../../../model/phases';
 import type { JourneyStep } from '../../../model/steps';
-import { useMachinesStore, type MachineSession } from '../../../stores/machines';
+import { activityLabel, useMachinesStore, type MachineSession } from '../../../stores/machines';
 import { useUi } from '../../../stores/ui';
 import type { UnsignedBuildTarget } from '../../../types/backend';
 import Button from '../../ui/Button.vue';
@@ -23,9 +23,37 @@ const ui = useUi();
 const workspace = computed(() => session.view!.appleWorkspace);
 const simulatorRuntime = computed(() => session.view!.guest.diagnostics.iosSimulatorRuntime);
 const busy = computed(() => session.operation !== null);
-const building = computed(() => step.status === 'running');
-const progress = computed(() => session.project);
+const running = computed(() => step.status === 'running');
 const lastLine = computed(() => session.buildLog.at(-1)?.text ?? null);
+
+// The build has phases, bytes, a last line and a Stop. Adopting the lockfile runs on this step
+// too and is a plain strip, not the last build's phase with a Stop that cancels nothing.
+const strip = computed(() => {
+    const operation = session.operation ?? session.view!.busyOperation;
+    if (operation === 'test-build' || operation === 'test_building') {
+        const progress = session.project;
+        return {
+            label: progress ? projectPhaseLabel[progress.phase] : 'Preparing',
+            detail: progress?.detail ?? null,
+            elapsed: progress?.elapsedSeconds ?? null,
+            value: progress ? percent(progress.completedBytes, progress.totalBytes) : null,
+            completedBytes: progress?.totalBytes ? progress.completedBytes : null,
+            totalBytes: progress?.totalBytes ?? null,
+            lastLine: lastLine.value,
+            stoppable: true,
+        };
+    }
+    return {
+        label: activityLabel(operation) ?? 'Working',
+        detail: null,
+        elapsed: null,
+        value: null,
+        completedBytes: null,
+        totalBytes: null,
+        lastLine: null,
+        stoppable: false,
+    };
+});
 const failure = computed(() =>
     session.lastFailure?.operation === 'test-build' ? session.lastFailure : null,
 );
@@ -103,7 +131,7 @@ const targetOptions = computed(() => [
 
         <template
             v-if="
-                building ||
+                running ||
                 failure ||
                 workspace?.lastNativeLockUpdated ||
                 session.lockAdoption ||
@@ -112,20 +140,20 @@ const targetOptions = computed(() => [
             #status
         >
             <ProgressRow
-                stoppable
+                v-if="running"
+                :label="strip.label"
+                :detail="strip.detail"
+                :elapsed-seconds="strip.elapsed"
+                :value="strip.value"
+                :completed-bytes="strip.completedBytes"
+                :total-bytes="strip.totalBytes"
+                :last-line="strip.lastLine"
+                :stoppable="strip.stoppable"
                 :stopping="session.cancelling"
                 @stop="machines.cancelOperation(session.id)"
-                v-if="building"
-                :label="progress ? projectPhaseLabel[progress.phase] : 'Preparing'"
-                :detail="progress?.detail"
-                :elapsed-seconds="progress?.elapsedSeconds ?? null"
-                :value="progress ? percent(progress.completedBytes, progress.totalBytes) : null"
-                :completed-bytes="progress?.totalBytes ? progress.completedBytes : null"
-                :total-bytes="progress?.totalBytes ?? null"
-                :last-line="lastLine"
             />
             <FailureBlock
-                v-if="failure && !building"
+                v-if="failure && !running"
                 title="The last test build failed"
                 cause="The diagnostic lines are kept in the log. Fix the project on the host, synchronize again, and run the build again."
                 :diagnostic="failure.message"
@@ -137,7 +165,7 @@ const targetOptions = computed(() => [
                 </template>
             </FailureBlock>
             <Callout
-                v-if="downloadsSimulator && !building"
+                v-if="downloadsSimulator && !running"
                 tone="neutral"
                 title="This target downloads Apple's iOS Simulator platform"
             >

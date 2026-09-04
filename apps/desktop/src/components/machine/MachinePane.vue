@@ -31,8 +31,15 @@ const view = computed(() => session.value.view);
 
 const now = ref(Date.now());
 const runningStep = computed(() => machines.runningStep(machineId));
+const runningOperation = computed(() => machines.runningOperation(machineId));
 const steps = computed<JourneyStep[]>(() =>
-    view.value ? deriveJourney(view.value, { runningStep: runningStep.value, now: now.value }) : [],
+    view.value
+        ? deriveJourney(view.value, {
+              runningStep: runningStep.value,
+              runningOperation: runningOperation.value,
+              now: now.value,
+          })
+        : [],
 );
 
 const focus = computed(() => focusStep(steps.value));

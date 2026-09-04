@@ -8,7 +8,7 @@ import { computed, onBeforeUnmount, watch } from 'vue';
 import { formatElapsed } from '../../lib/format';
 import { LOG_HEIGHT_MAX, LOG_HEIGHT_MIN } from '../../lib/prefs';
 import { clamp } from '../../lib/utils';
-import { busyKeyLabel, useMachinesStore, type MachineSession } from '../../stores/machines';
+import { activityLabel, useMachinesStore, type MachineSession } from '../../stores/machines';
 import { useUi, type LogSource } from '../../stores/ui';
 import type { LogLine } from '../ui/LogView.vue';
 import Chip from '../ui/Chip.vue';
@@ -61,9 +61,9 @@ const emptyText = computed(() => {
         case 'console':
             return 'The last 80 lines of Docker-OSX output appear here once the container exists.';
         case 'build':
-            return 'Diagnostic lines from the unsigned test build appear here while it runs.';
+            return 'Output from the unsigned test build appears here while it runs.';
         case 'archive':
-            return 'Diagnostic lines from the signed archive appear here while it runs.';
+            return 'Output from the signed archive appears here while it runs.';
         case 'device':
             return 'The app’s console appears here while it runs on the iPhone.';
         default:
@@ -98,25 +98,53 @@ watch(
 );
 
 const running = computed(() => runningStep !== null);
-const runningLabel = computed(() => {
-    const busy = session.view?.busyOperation;
-    if (busy && busyKeyLabel[busy]) {
-        return busyKeyLabel[busy];
-    }
-    return session.operation ? 'Working' : null;
-});
-const phaseDetail = computed(
-    () =>
-        session.device?.detail ??
-        session.deviceSigning?.detail ??
-        session.usbMigration?.detail ??
-        session.archive?.detail ??
-        session.project?.detail ??
-        session.signing?.detail ??
-        session.xcode?.detail ??
-        session.launch?.detail ??
-        null,
+const activity = computed(() => session.operation ?? session.view?.busyOperation ?? null);
+const runningLabel = computed(
+    () => activityLabel(activity.value) ?? (activity.value ? 'Working' : null),
 );
+// Only the progress of the operation in flight: every other record is left from an earlier
+// one, and would put a finished build's last phase under a stop.
+const phaseDetail = computed(() => {
+    switch (activity.value) {
+        case 'launch':
+        case 'starting':
+            return session.launch?.detail ?? null;
+        case 'xcode-import':
+        case 'importing_xcode':
+        case 'xcode-activate':
+        case 'activating_xcode':
+            return session.xcode?.detail ?? null;
+        case 'provision':
+        case 'provisioning_signing':
+            return session.signing?.detail ?? null;
+        case 'sync':
+        case 'synchronizing':
+        case 'test-build':
+        case 'test_building':
+            return session.project?.detail ?? null;
+        case 'archive':
+        case 'archiving':
+            return session.archive?.detail ?? null;
+        case 'usb-migrate':
+        case 'migrating_usb':
+            return session.usbMigration?.detail ?? null;
+        case 'usb-rebuild':
+        case 'rebuilding_container':
+            return session.rebuild?.detail ?? null;
+        case 'usb-attach':
+        case 'attaching_usb':
+        case 'settling_phone':
+            return session.usbAttach?.detail ?? null;
+        case 'device-signing':
+        case 'preparing_device_signing':
+            return session.deviceSigning?.detail ?? session.signing?.detail ?? null;
+        case 'run-device':
+        case 'running_on_device':
+            return session.device?.detail ?? null;
+        default:
+            return null;
+    }
+});
 const elapsed = computed(() =>
     session.operationStartedAt ? Math.floor((now - session.operationStartedAt) / 1000) : null,
 );
@@ -259,7 +287,7 @@ onBeforeUnmount(() => {
                     {{
                         source === 'device'
                             ? 'The device console keeps the last 600 lines the app printed. Secret values never appear here.'
-                            : 'Build logs are bounded and filtered to diagnostic lines; the complete Xcode output stays in the guest. Secret values never appear here.'
+                            : 'Build logs keep the last 600 lines the guest printed; the complete Xcode output stays in the guest. Secret values never appear here.'
                     }}
                 </p>
             </div>

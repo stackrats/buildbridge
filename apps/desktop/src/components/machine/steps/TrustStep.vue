@@ -63,6 +63,7 @@ async function forget(): Promise<void> {
             >
                 <template #actions>
                     <Button variant="outline" size="sm" :disabled="busy" @click="forgetOpen = true">
+                        <Spinner v-if="session.operation === 'forget-trust'" />
                         Forget pinned identity
                     </Button>
                 </template>

@@ -78,9 +78,10 @@ async function pair(): Promise<void> {
     }
 }
 
+// The dialog stays up with its button spinning until the token is gone from the vault.
 async function unpair(): Promise<void> {
-    unpairOpen.value = false;
     await runner.unpair();
+    unpairOpen.value = false;
 }
 </script>
 
@@ -249,6 +250,7 @@ async function unpair(): Promise<void> {
             v-model:open="unpairOpen"
             title="Unpair this runner"
             confirm-label="Unpair locally"
+            :busy="runner.state.unpairing"
             @confirm="unpair"
         >
             <p>

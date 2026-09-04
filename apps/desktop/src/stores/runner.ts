@@ -31,6 +31,7 @@ const state = reactive({
     status: null as DesktopStatus | null,
     loading: true,
     pairing: false,
+    unpairing: false,
     checking: false,
     error: null as string | null,
     realtime: 'disconnected' as RealtimeState,
@@ -248,14 +249,17 @@ export function useRunnerStore() {
             }
         },
         async unpair(): Promise<void> {
+            state.unpairing = true;
             disconnectRealtime();
             try {
                 await useBackend().unpairRunner();
                 log('warning', 'Unpaired locally. Revoke the runner in the control plane as well.');
             } catch (error) {
                 state.error = describeError(error);
+            } finally {
+                await refreshStatus();
+                state.unpairing = false;
             }
-            await refreshStatus();
         },
         dispose(): void {
             disconnectRealtime();

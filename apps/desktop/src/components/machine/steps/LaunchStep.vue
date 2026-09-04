@@ -5,7 +5,7 @@ import { computed } from 'vue';
 import type { JourneyStep } from '../../../model/steps';
 import { launchPhaseLabel } from '../../../model/phases';
 import { isLive } from '../../../lib/status';
-import { useMachinesStore, type MachineSession } from '../../../stores/machines';
+import { activityLabel, useMachinesStore, type MachineSession } from '../../../stores/machines';
 import Button from '../../ui/Button.vue';
 import FailureBlock from '../../ui/FailureBlock.vue';
 import ProgressRow from '../../ui/ProgressRow.vue';
@@ -18,10 +18,40 @@ const machines = useMachinesStore();
 const view = computed(() => session.view!);
 const live = computed(() => isLive(view.value.runtime.state));
 const busy = computed(() => session.operation !== null || view.value.busyOperation !== null);
-const launching = computed(() => step.status === 'running');
+const running = computed(() => step.status === 'running');
 const failure = computed(() =>
     session.lastFailure?.operation === 'launch' ? session.lastFailure : null,
 );
+
+// Starting is the step's own operation, with phases and a Stop. A stop, a discard or a delete
+// runs on this step too, and each says so rather than borrowing the start's strip, whose Stop
+// would cancel the stop itself.
+const strip = computed(() => {
+    const operation = session.operation ?? view.value.busyOperation;
+    if (operation === 'launch' || operation === 'starting') {
+        const progress = session.launch;
+        return {
+            label: progress ? launchPhaseLabel[progress.phase] : 'Starting',
+            detail: progress?.detail ?? null,
+            elapsed: progress?.elapsedSeconds ?? null,
+            stoppable: true,
+        };
+    }
+    if (operation === 'stop' || operation === 'stopping') {
+        return {
+            label: 'Stopping the machine safely',
+            detail: 'the container and its macOS disk are kept',
+            elapsed: null,
+            stoppable: false,
+        };
+    }
+    return {
+        label: activityLabel(operation) ?? 'Working',
+        detail: null,
+        elapsed: null,
+        stoppable: false,
+    };
+});
 </script>
 
 <template>
@@ -59,15 +89,15 @@ const failure = computed(() =>
             </Button>
         </template>
 
-        <template v-if="launching || step.status === 'failed' || failure" #status>
+        <template v-if="running || step.status === 'failed' || failure" #status>
             <ProgressRow
-                stoppable
+                v-if="running"
+                :label="strip.label"
+                :detail="strip.detail"
+                :elapsed-seconds="strip.elapsed"
+                :stoppable="strip.stoppable"
                 :stopping="session.cancelling"
                 @stop="machines.cancelOperation(session.id)"
-                v-if="launching"
-                :label="session.launch ? launchPhaseLabel[session.launch.phase] : 'Starting'"
-                :detail="session.launch?.detail"
-                :elapsed-seconds="session.launch?.elapsedSeconds ?? null"
             />
             <FailureBlock
                 v-else-if="step.status === 'failed'"

@@ -6,7 +6,7 @@ import { computed, onBeforeUnmount, ref } from 'vue';
 
 import { formatElapsed, secondsSince } from '../../lib/format';
 import { isLive, machineStateBadge, machineStateLabel } from '../../lib/status';
-import { busyKeyLabel, useMachinesStore, type MachineSession } from '../../stores/machines';
+import { activityLabel, useMachinesStore, type MachineSession } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
 import Badge from '../ui/Badge.vue';
 import Button from '../ui/Button.vue';
@@ -20,10 +20,13 @@ const ui = useUi();
 
 const view = computed(() => session.view!);
 const busy = computed(() => session.operation !== null || view.value.busyOperation !== null);
-const busyLabel = computed(() =>
-    view.value.busyOperation
-        ? (busyKeyLabel[view.value.busyOperation] ?? view.value.busyOperation)
-        : null,
+// The native busy key is the truth once the view refreshes; until then the operation this
+// client started names what is happening, so a machine being stopped never reads as running.
+const busyLabel = computed(
+    () =>
+        activityLabel(view.value.busyOperation) ??
+        view.value.busyOperation ??
+        activityLabel(session.operation),
 );
 const live = computed(() => isLive(view.value.runtime.state));
 const canStart = computed(
@@ -69,9 +72,11 @@ function toggleMenu(event: MouseEvent): void {
 
 onBeforeUnmount(() => window.removeEventListener('click', onWindowClick));
 
+// The dialog stays up with its button spinning until the container is gone: removing it takes
+// a few seconds, and nothing else on the page is open to say so.
 async function discard(): Promise<void> {
-    discardOpen.value = false;
     await machines.discardContainer(session.id);
+    discardOpen.value = false;
 }
 
 async function remove(): Promise<void> {
@@ -194,6 +199,7 @@ const menuItemClass =
             title="Discard the container and its macOS disk"
             confirm-label="Discard container"
             acknowledgement="I understand the macOS installation, Xcode, and everything inside the guest will be deleted"
+            :busy="session.operation === 'discard'"
             @confirm="discard"
         >
             <p>

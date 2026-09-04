@@ -6,7 +6,7 @@ import { formatDate, percent } from '../../../lib/format';
 import type { JourneyStep } from '../../../model/steps';
 import { signingPhaseLabel } from '../../../model/phases';
 import { profileKindLabel } from '../../../model/signing';
-import { useMachinesStore, type MachineSession } from '../../../stores/machines';
+import { activityLabel, useMachinesStore, type MachineSession } from '../../../stores/machines';
 import { useUi } from '../../../stores/ui';
 import Button from '../../ui/Button.vue';
 import Callout from '../../ui/Callout.vue';
@@ -24,9 +24,34 @@ const ui = useUi();
 const view = computed(() => session.view!);
 const signing = computed(() => view.value.signing);
 const busy = computed(() => session.operation !== null);
-const provisioning = computed(() => step.status === 'running');
-const progress = computed(() => session.signing);
+const running = computed(() => step.status === 'running');
 const removeOpen = ref(false);
+
+// Provisioning has phases and a Stop. Removing the guest signing runs on this step too, and
+// says so instead of showing the last provisioning's phase with a Stop.
+const strip = computed(() => {
+    const operation = session.operation ?? view.value.busyOperation;
+    if (operation === 'provision' || operation === 'provisioning_signing') {
+        const progress = session.signing;
+        return {
+            label: progress ? signingPhaseLabel[progress.phase] : 'Preparing',
+            detail: progress?.detail ?? null,
+            elapsed: progress?.elapsedSeconds ?? null,
+            value: progress ? percent(progress.completedBytes, progress.totalBytes) : null,
+            stoppable: true,
+        };
+    }
+    return {
+        label: activityLabel(operation) ?? 'Working',
+        detail:
+            operation === 'clear-signing' || operation === 'clearing_signing'
+                ? 'the guest keychain and its profiles; the host kit is kept'
+                : null,
+        elapsed: null,
+        value: null,
+        stoppable: false,
+    };
+});
 const failure = computed(() =>
     session.lastFailure?.operation === 'provision' ? session.lastFailure : null,
 );
@@ -69,19 +94,19 @@ async function remove(): Promise<void> {
             </Button>
         </template>
 
-        <template v-if="provisioning || failure || orphaned" #status>
+        <template v-if="running || failure || orphaned" #status>
             <ProgressRow
-                stoppable
+                v-if="running"
+                :label="strip.label"
+                :detail="strip.detail"
+                :elapsed-seconds="strip.elapsed"
+                :value="strip.value"
+                :stoppable="strip.stoppable"
                 :stopping="session.cancelling"
                 @stop="machines.cancelOperation(session.id)"
-                v-if="provisioning"
-                :label="progress ? signingPhaseLabel[progress.phase] : 'Preparing'"
-                :detail="progress?.detail"
-                :elapsed-seconds="progress?.elapsedSeconds ?? null"
-                :value="progress ? percent(progress.completedBytes, progress.totalBytes) : null"
             />
             <FailureBlock
-                v-if="failure && !provisioning"
+                v-if="failure && !running"
                 title="Provisioning failed"
                 :cause="
                     expiredCertificate
