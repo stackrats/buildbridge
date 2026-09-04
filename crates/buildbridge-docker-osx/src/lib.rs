@@ -29,6 +29,7 @@ mod qmp;
 mod signing;
 mod smoke_build;
 mod ssh;
+mod templates;
 mod usb;
 mod workspace;
 mod xcode;
@@ -42,6 +43,7 @@ pub use profiles::*;
 pub use signing::*;
 pub use smoke_build::*;
 pub use ssh::*;
+pub use templates::*;
 pub use workspace::*;
 pub use xcode::*;
 
@@ -326,6 +328,9 @@ pub struct LaunchOptions<'a> {
     pub disk_dir: &'a Path,
     pub qmp_dir: &'a Path,
     pub usb: Option<ContainerUsbOptions>,
+    /// The template this machine was cloned from, whose directory every container of the
+    /// machine binds read-only; `None` for a machine installed from scratch.
+    pub template_dir: Option<&'a Path>,
 }
 
 #[derive(Debug, Clone, Serialize)]

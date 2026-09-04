@@ -33,16 +33,18 @@ pub const DISK_BASESYSTEM_NAME: &str = "BaseSystem.img";
 pub const DISK_VIRTUAL_SIZE: &str = "200G";
 const CONTAINER_DISK_DIR: &str = "/image";
 const CONTAINER_OSX_KVM_DIR: &str = "/home/arch/OSX-KVM";
-const THROWAWAY_DISK_DIR: &str = "/buildbridge-disk";
+pub(crate) const THROWAWAY_DISK_DIR: &str = "/buildbridge-disk";
 const COPY_POLL: Duration = Duration::from_millis(500);
 const GIB: u64 = 1024 * 1024 * 1024;
 /// QEMU runs as `arch`, uid 1000, in the image; a control directory it can use has that owner.
 const CONTAINER_QEMU_UID: u32 = 1000;
 
-/// The host directory holding one machine's disk files.
+/// The host directory holding one machine's disk files, and the template directory its disk
+/// is an overlay of, when it was cloned from one.
 #[derive(Debug, Clone)]
 pub struct MachineDisk {
     dir: PathBuf,
+    template_dir: Option<PathBuf>,
 }
 
 impl MachineDisk {
@@ -51,11 +53,37 @@ impl MachineDisk {
 
         Ok(Self {
             dir: dir.to_path_buf(),
+            template_dir: None,
         })
+    }
+
+    /// A disk cloned from a template: its image is a copy-on-write overlay whose backing file
+    /// is the template's image at the path the container binds it to, so the template
+    /// directory is bound read-only into every container that runs the clone.
+    pub fn from_template(dir: &Path, template_dir: &Path) -> Result<Self, ProviderError> {
+        validate_bind_path(dir, "disk directory")?;
+        validate_bind_path(template_dir, "template directory")?;
+
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            template_dir: Some(template_dir.to_path_buf()),
+        })
+    }
+
+    /// The disk a launch describes: an overlay over its template when it has one.
+    pub fn for_launch(options: &LaunchOptions<'_>) -> Result<Self, ProviderError> {
+        match options.template_dir {
+            Some(template_dir) => Self::from_template(options.disk_dir, template_dir),
+            None => Self::new(options.disk_dir),
+        }
     }
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    pub fn template_dir(&self) -> Option<&Path> {
+        self.template_dir.as_deref()
     }
 
     pub fn image(&self) -> PathBuf {
@@ -76,7 +104,7 @@ impl MachineDisk {
     }
 }
 
-fn non_empty_file(path: &Path) -> bool {
+pub(crate) fn non_empty_file(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
 }
 
@@ -90,6 +118,8 @@ pub struct ContainerLayout {
     pub control_socket: bool,
     /// The dedicated USB 2.0 controller phones are attached to is on QEMU's command line.
     pub phone_controller: bool,
+    /// The container binds a template directory, so its disk is an overlay over that template.
+    pub from_template: bool,
 }
 
 /// Recreating the container from its current profile: the same disk, identity and options, so
@@ -175,13 +205,19 @@ pub(crate) fn nvram_copy_args(disk_dir: &Path) -> Vec<String> {
     ]
 }
 
-/// Makes sure a new machine's disk files exist before its container is created.
+/// Makes sure a new machine's disk files exist before its container is created: an empty
+/// disk for a fresh install, or an overlay over the template the machine was cloned from.
 pub fn ensure_machine_disk(disk: &MachineDisk) -> Result<(), ProviderError> {
     fs::create_dir_all(disk.dir()).map_err(|error| ProviderError::Identity(error.to_string()))?;
     restrict_directory(disk.dir())?;
     if !non_empty_file(&disk.image()) {
         let _ = fs::remove_file(disk.image());
-        run_docker("disk creation", &disk_create_args(disk.dir()))?;
+        match disk.template_dir() {
+            Some(template_dir) => {
+                crate::templates::clone_template_files(template_dir, disk)?;
+            }
+            None => run_docker("disk creation", &disk_create_args(disk.dir())).map(|_| ())?,
+        }
     }
     if !non_empty_file(&disk.nvram()) {
         let _ = fs::remove_file(disk.nvram());
@@ -212,6 +248,13 @@ pub(crate) fn disk_bind_args(disk: &MachineDisk) -> Vec<String> {
             disk.basesystem().display()
         ));
     }
+    if let Some(template_dir) = disk.template_dir() {
+        args.push(format!(
+            "--volume={}:{}:ro",
+            template_dir.display(),
+            crate::templates::CONTAINER_TEMPLATE_DIR
+        ));
+    }
 
     args
 }
@@ -237,7 +280,7 @@ pub(crate) fn ensure_control_dir(qmp_dir: &Path) -> Result<(), ProviderError> {
     Ok(())
 }
 
-fn restrict_directory(path: &Path) -> Result<(), ProviderError> {
+pub(crate) fn restrict_directory(path: &Path) -> Result<(), ProviderError> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
         .map_err(|error| ProviderError::Identity(error.to_string()))
 }
@@ -286,6 +329,7 @@ pub(crate) fn container_layout(
 
     Ok(ContainerLayout {
         phone_controller: phone_controller_from_env(&env),
+        from_template: bound(crate::templates::CONTAINER_TEMPLATE_DIR),
         disk_on_host: bound(CONTAINER_DISK_DIR),
         usb_access: rules
             .iter()
@@ -340,7 +384,7 @@ pub(crate) fn parse_df_available(output: &str) -> Option<u64> {
         .and_then(|line| line.parse().ok())
 }
 
-fn available_bytes(path: &Path) -> Result<u64, ProviderError> {
+pub(crate) fn available_bytes(path: &Path) -> Result<u64, ProviderError> {
     let output = Command::new("df")
         .args(["-B1", "--output=avail"])
         .arg(path)
@@ -447,7 +491,7 @@ where
     F: FnMut(DiskMigrationProgress),
 {
     config.validate()?;
-    let disk = MachineDisk::new(options.disk_dir)?;
+    let disk = MachineDisk::for_launch(options)?;
     validate_bind_path(options.qmp_dir, "control socket directory")?;
     let started = Instant::now();
     let mut report = |phase: DiskMigrationPhase, completed: u64, total: u64, detail: &str| {
@@ -598,7 +642,7 @@ where
     F: FnMut(ContainerRebuildProgress),
 {
     config.validate()?;
-    let disk = MachineDisk::new(options.disk_dir)?;
+    let disk = MachineDisk::for_launch(options)?;
     validate_bind_path(options.qmp_dir, "control socket directory")?;
     let started = Instant::now();
     let mut report = |phase: ContainerRebuildPhase, detail: &str| {
@@ -665,7 +709,7 @@ where
 /// Asks the guest to power down and waits for QEMU to exit, then stops the container whatever
 /// happened: an unreachable socket or a guest that ignores the request must not block the
 /// rebuild, and `stop` is a no-op once the container has already exited.
-fn shut_down_guest(
+pub(crate) fn shut_down_guest(
     container_name: &str,
     qmp_socket: &Path,
     on_wait: &mut dyn FnMut(&str),
@@ -781,6 +825,7 @@ mod tests {
                 usb_access: false,
                 control_socket: false,
                 phone_controller: false,
+                from_template: false,
             }
         );
         let current = r#"{"Binds":["/tmp/.X11-unix:/tmp/.X11-unix:rw","/home/m/disk:/image:rw","/home/m/qmp:/buildbridge-qmp:rw","/dev/bus/usb:/dev/bus/usb"],"DeviceCgroupRules":["c 189:* rwm"]}"#;
@@ -791,6 +836,7 @@ mod tests {
                 usb_access: true,
                 control_socket: true,
                 phone_controller: false,
+                from_template: false,
             }
         );
         let rule_without_bind =

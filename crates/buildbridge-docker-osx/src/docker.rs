@@ -91,7 +91,7 @@ where
     F: FnMut(LaunchProgress),
 {
     config.validate()?;
-    let disk = MachineDisk::new(options.disk_dir)?;
+    let disk = MachineDisk::for_launch(options)?;
     validate_bind_path(options.qmp_dir, "control socket directory")?;
     let started = Instant::now();
     let mut report = |phase: LaunchPhase, detail: &str| {

@@ -38,6 +38,7 @@ pub(crate) async fn build_machine_list_view(app: &AppHandle) -> Result<MachineLi
         .lock()
         .map_err(|_| "The machine operation registry is poisoned.".to_string())?
         .clone();
+    let template_app = app.clone();
     let (host, machines) = tauri::async_runtime::spawn_blocking(move || {
         let host = buildbridge_docker_osx::probe_host();
         let mut summaries = Vec::with_capacity(entries.len());
@@ -49,6 +50,10 @@ pub(crate) async fn build_machine_list_view(app: &AppHandle) -> Result<MachineLi
                 .filter(|stored| runtime.container_id.as_deref() == Some(&stored.container_id));
             summaries.push(MachineSummary {
                 id: machine.id.clone(),
+                template_name: machine
+                    .template_id
+                    .as_deref()
+                    .and_then(|id| template_name(&template_app, id)),
                 config: machine.config,
                 created_at_epoch_seconds: machine.created_at_epoch_seconds,
                 state: runtime.state,
@@ -201,6 +206,7 @@ pub(crate) async fn build_mac_builder_view(
 
     Ok(MacBuilderView {
         machine_id: paths.id.clone(),
+        template: template_ref_for(app, &paths.id),
         profile,
         busy_operation,
         runtime,

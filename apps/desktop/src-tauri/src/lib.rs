@@ -40,6 +40,7 @@ mod optimizations;
 mod records;
 mod runner;
 mod signing_kits;
+mod templates;
 mod tray;
 mod usb;
 mod views;
@@ -55,6 +56,7 @@ use optimizations::*;
 use records::*;
 use runner::*;
 use signing_kits::*;
+use templates::*;
 use usb::*;
 use views::*;
 
@@ -70,6 +72,7 @@ const DEVICE_SIGNING_PROGRESS_EVENT: &str = "machine-device-signing-progress";
 const DEVICE_RUN_PROGRESS_EVENT: &str = "machine-device-progress";
 const CONTAINER_REBUILD_PROGRESS_EVENT: &str = "machine-container-rebuild-progress";
 const USB_ATTACH_PROGRESS_EVENT: &str = "machine-usb-attach-progress";
+const TEMPLATE_PROGRESS_EVENT: &str = "machine-template-progress";
 
 const CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop";
 const MAC_BUILDER_CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop.macos-builder";
@@ -141,6 +144,8 @@ struct MachineSummary {
     /// The container keeps its disk on the host and can be handed USB devices.
     usb_ready: bool,
     device_run_retained: bool,
+    /// The template this machine was cloned from, if any.
+    template_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -578,6 +583,8 @@ struct MacBuilderView {
     device_run: Option<AppleDeviceRunResult>,
     /// The last failed device run, retained like `archive_error` until cleared.
     device_run_error: Option<String>,
+    /// The template this machine was cloned from, if any: its clone bootstraps from it.
+    template: Option<MachineTemplateRef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -716,6 +723,10 @@ pub fn run() {
             get_mac_builder_status,
             open_developer_tools,
             open_safari_web_inspector,
+            list_machine_templates,
+            save_machine_template,
+            delete_machine_template,
+            adopt_template_guest,
             configure_mac_builder,
             launch_mac_builder,
             stop_mac_builder,

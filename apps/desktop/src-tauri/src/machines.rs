@@ -36,6 +36,10 @@ pub(crate) struct StoredMachine {
     /// kit there is no implicit fallback: a build gets exactly the variables it was attached to.
     #[serde(default)]
     pub env_set_id: Option<String>,
+    /// The template this machine's disk is an overlay of; its container binds the template
+    /// directory read-only, and the template cannot be deleted while this machine exists.
+    #[serde(default)]
+    pub template_id: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -329,6 +333,7 @@ fn migrate_legacy_builder(app: &AppHandle) -> Result<MachineRegistry, String> {
             created_at_epoch_seconds,
             signing_kit_id: None,
             env_set_id: None,
+            template_id: None,
         }],
     };
     save_registry(app, &registry)?;
@@ -437,6 +442,7 @@ mod tests {
                 created_at_epoch_seconds: 0,
                 signing_kit_id: None,
                 env_set_id: None,
+                template_id: None,
             }],
         };
 

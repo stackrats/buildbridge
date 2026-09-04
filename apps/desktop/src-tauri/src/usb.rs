@@ -61,6 +61,7 @@ pub(crate) async fn migrate_machine_for_usb(
     let identity_path = paths.identity();
     let disk_dir = paths.disk_dir();
     let qmp_dir = paths.qmp_dir();
+    let template_dir = template_dir_for(&app, &machine_id)?;
     let container_name = paths.container_name.clone();
     let event_app = app.clone();
     let event_machine_id = machine_id.clone();
@@ -73,6 +74,7 @@ pub(crate) async fn migrate_machine_for_usb(
             disk_dir: &disk_dir,
             qmp_dir: &qmp_dir,
             usb: buildbridge_docker_osx::resolve_usb_options(),
+            template_dir: template_dir.as_deref(),
         };
         buildbridge_docker_osx::migrate_disk_to_host(
             &container_name,
@@ -125,6 +127,7 @@ pub(crate) async fn rebuild_machine_container(
     let identity_path = paths.identity();
     let disk_dir = paths.disk_dir();
     let qmp_dir = paths.qmp_dir();
+    let template_dir = template_dir_for(&app, &machine_id)?;
     let container_name = paths.container_name.clone();
     let event_app = app.clone();
     let event_machine_id = machine_id.clone();
@@ -137,6 +140,7 @@ pub(crate) async fn rebuild_machine_container(
             disk_dir: &disk_dir,
             qmp_dir: &qmp_dir,
             usb: buildbridge_docker_osx::resolve_usb_options(),
+            template_dir: template_dir.as_deref(),
         };
         buildbridge_docker_osx::rebuild_container(&container_name, &profile, &options, |progress| {
             emit_machine_progress(

@@ -220,6 +220,7 @@ fn start_machine(app: AppHandle, machine_id: String) {
             let identity_path = paths.identity();
             let disk_dir = paths.disk_dir();
             let qmp_dir = paths.qmp_dir();
+            let template_dir = crate::templates::template_dir_for(&app, &machine_id)?;
             let container_name = paths.container_name.clone();
             let event_app = app.clone();
             let event_machine_id = machine_id.clone();
@@ -229,6 +230,7 @@ fn start_machine(app: AppHandle, machine_id: String) {
                     disk_dir: &disk_dir,
                     qmp_dir: &qmp_dir,
                     usb: buildbridge_docker_osx::resolve_usb_options(),
+                    template_dir: template_dir.as_deref(),
                 };
                 buildbridge_docker_osx::launch(&container_name, &profile, &options, |progress| {
                     crate::emit_machine_progress(

@@ -11,8 +11,27 @@ pub(crate) async fn list_machines(app: AppHandle) -> Result<MachineListView, Str
 pub(crate) async fn create_machine(
     app: AppHandle,
     profile: MacBuilderConfig,
+    template_id: Option<String>,
 ) -> Result<MachineListView, String> {
     profile.validate().map_err(|error| error.to_string())?;
+    let template_id = match template_id.map(|id| id.trim().to_string()) {
+        Some(id) if !id.is_empty() => {
+            let template = load_template(&app, &id)?
+                .ok_or_else(|| "That template is no longer stored.".to_string())?;
+            let files = buildbridge_docker_osx::MachineTemplateFiles::new(
+                &TemplatePaths::resolve(&app, &id)?.files_dir(),
+            )
+            .map_err(|error| error.to_string())?;
+            if !files.ready() {
+                return Err(format!(
+                    "The template {} is incomplete; save it again before cloning it.",
+                    template.name
+                ));
+            }
+            Some(id)
+        }
+        _ => None,
+    };
     let mut registry = machines::load_registry(&app)?;
     if registry.machines.len() >= machines::MAX_MACHINES {
         return Err(format!(
@@ -35,6 +54,7 @@ pub(crate) async fn create_machine(
         created_at_epoch_seconds: machines::now_epoch_seconds(),
         signing_kit_id: None,
         env_set_id: None,
+        template_id,
     });
     machines::save_registry(&app, &registry)?;
     tray::refresh(&app);
@@ -163,6 +183,7 @@ pub(crate) async fn launch_mac_builder(
     let identity_path = paths.identity();
     let disk_dir = paths.disk_dir();
     let qmp_dir = paths.qmp_dir();
+    let template_dir = template_dir_for(&app, &machine_id)?;
     let container_name = paths.container_name.clone();
     let event_app = app.clone();
     let event_machine_id = machine_id.clone();
@@ -175,6 +196,7 @@ pub(crate) async fn launch_mac_builder(
             disk_dir: &disk_dir,
             qmp_dir: &qmp_dir,
             usb: buildbridge_docker_osx::resolve_usb_options(),
+            template_dir: template_dir.as_deref(),
         };
         buildbridge_docker_osx::launch(&container_name, &profile, &options, |progress| {
             emit_machine_progress(
