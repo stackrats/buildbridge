@@ -21,6 +21,8 @@ use crate::{
 /// inside a mebibyte, and anything larger is not a device list.
 const DEVICE_LIST_MAX_BYTES: usize = 1024 * 1024;
 const DEVICE_LIST_TIMEOUT_SECONDS: u32 = 10;
+/// Opening a phone's tunnel for its details takes a few seconds the first time.
+const DEVICE_DETAILS_TIMEOUT_SECONDS: u32 = 20;
 /// Long enough to unlock the phone and tap Trust.
 const DEVICE_PAIR_TIMEOUT_SECONDS: u32 = 90;
 const NAME_MAX_CHARS: usize = 128;
@@ -223,10 +225,65 @@ fn device_issue(
     }
 }
 
+/// Separates the listing from the per-phone detail reports that follow it.
+pub(crate) const DEVICE_DETAILS_MARKER: &str = "__BUILDBRIDGE_DEVICE_DETAILS__";
+
+/// One `device info details` report: the same shape as a listing entry, under `result`.
+#[derive(Debug, Deserialize)]
+struct DeviceDetailsEnvelope {
+    #[serde(default)]
+    result: Option<DevicectlDevice>,
+}
+
+/// The listing, with each phone's details merged over it where a report followed. The listing
+/// reports Developer Mode as unknown until something has opened the phone's tunnel; the
+/// details report is what opens it.
+pub(crate) fn parse_devicectl_devices(output: &str) -> Result<Vec<GuestDevice>, ProviderError> {
+    let mut chunks = output.split(DEVICE_DETAILS_MARKER);
+    let listing = chunks.next().unwrap_or_default();
+    let mut devices = parse_devicectl_listing(listing)?;
+    for chunk in chunks {
+        let Ok(envelope) = serde_json::from_str::<DeviceDetailsEnvelope>(chunk.trim()) else {
+            continue;
+        };
+        let Some(details) = envelope.result else {
+            continue;
+        };
+        let Some(device) = devices
+            .iter_mut()
+            .find(|device| device.identifier == details.identifier)
+        else {
+            continue;
+        };
+        let properties = details.device_properties.unwrap_or_default();
+        let connection = details.connection_properties.unwrap_or_default();
+        if properties.developer_mode_status.is_some() {
+            device.developer_mode =
+                DeveloperModeState::from_devicectl(properties.developer_mode_status.as_deref());
+        }
+        if connection.tunnel_state.is_some() {
+            device.tunnel_state = TunnelState::from_devicectl(connection.tunnel_state.as_deref());
+        }
+        if connection.pairing_state.is_some() {
+            device.pairing_state =
+                PairingState::from_devicectl(connection.pairing_state.as_deref());
+        }
+        device.issue = device_issue(
+            device.transport_type,
+            device.pairing_state,
+            device.developer_mode,
+        )
+        .map(str::to_string);
+        device.ready = device.issue.is_none();
+    }
+
+    Ok(devices)
+}
+
 /// Reads `devicectl list devices --json-output` into devices. An empty document is an empty
 /// list — `devicectl` writes nothing when it fails, and a failed listing is not an error the
 /// person can act on beyond refreshing.
-pub(crate) fn parse_devicectl_devices(json: &str) -> Result<Vec<GuestDevice>, ProviderError> {
+fn parse_devicectl_listing(json: &str) -> Result<Vec<GuestDevice>, ProviderError> {
     if json.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -332,11 +389,14 @@ pub(crate) fn run_guest_command_capped(
     Ok(String::from_utf8_lossy(&stdout).into_owned())
 }
 
+/// Lists the phones, then asks for each wired one's details, which is what opens the tunnel
+/// Developer Mode is read over. The identifiers come from devicectl's own JSON and are still
+/// checked for shape before they are handed back to it.
 pub(crate) fn device_list_script(username: &str) -> String {
     let developer_dir = format!("/Users/{username}/Applications/Xcode.app/Contents/Developer");
 
     format!(
-        "set -u; export DEVELOPER_DIR={}; out=$(/usr/bin/mktemp /tmp/buildbridge-devices.XXXXXX) || exit 1; /usr/bin/xcrun devicectl list devices --json-output \"$out\" --timeout {DEVICE_LIST_TIMEOUT_SECONDS} >/dev/null 2>&1 || /usr/bin/true; /bin/cat \"$out\"; /bin/rm -f \"$out\"",
+        "set -u; export DEVELOPER_DIR={}; out=$(/usr/bin/mktemp /tmp/buildbridge-devices.XXXXXX) || exit 1; /usr/bin/xcrun devicectl list devices --json-output \"$out\" --timeout {DEVICE_LIST_TIMEOUT_SECONDS} >/dev/null 2>&1 || /usr/bin/true; /bin/cat \"$out\"; for id in $(/usr/bin/python3 -c 'import json,re,sys\ntry:\n d=json.load(open(sys.argv[1]))\nexcept Exception:\n d={{}}\nfor r in d.get(\"result\",{{}}).get(\"devices\",[]):\n i=str(r.get(\"identifier\",\"\"))\n if r.get(\"connectionProperties\",{{}}).get(\"transportType\")==\"wired\" and re.fullmatch(r\"[0-9A-Fa-f-]{{36}}\",i): print(i)' \"$out\" 2>/dev/null); do det=$(/usr/bin/mktemp /tmp/buildbridge-device.XXXXXX) || continue; /usr/bin/xcrun devicectl device info details --device \"$id\" --json-output \"$det\" --timeout {DEVICE_DETAILS_TIMEOUT_SECONDS} >/dev/null 2>&1 || /usr/bin/true; /usr/bin/printf '\\n{DEVICE_DETAILS_MARKER}\\n'; /bin/cat \"$det\"; /bin/rm -f \"$det\"; done; /bin/rm -f \"$out\"",
         shell_single_quote(&developer_dir)
     )
 }
@@ -439,6 +499,29 @@ mod tests {
         ]
       }
     }"#;
+
+    #[test]
+    fn a_details_report_fills_in_developer_mode_and_the_tunnel_the_listing_left_unknown() {
+        let listing = r#"{"result":{"devices":[{"identifier":"E3F1A2B4-5C6D-4E7F-8A9B-0C1D2E3F4A5B","connectionProperties":{"pairingState":"paired","transportType":"wired","tunnelState":"disconnected"},"deviceProperties":{"name":"Matt’s iPhone","osVersionNumber":"26.5"},"hardwareProperties":{"platform":"iOS","udid":"00008030-000614240A51802E"}}]}}"#;
+        let details = r#"{"result":{"identifier":"E3F1A2B4-5C6D-4E7F-8A9B-0C1D2E3F4A5B","connectionProperties":{"pairingState":"paired","transportType":"wired","tunnelState":"connected"},"deviceProperties":{"name":"Matt’s iPhone","developerModeStatus":"enabled"}}}"#;
+        let before = parse_devicectl_devices(listing).expect("listing");
+        assert_eq!(before[0].developer_mode, DeveloperModeState::Unknown);
+        assert!(!before[0].ready);
+
+        let merged =
+            parse_devicectl_devices(&format!("{listing}\n{DEVICE_DETAILS_MARKER}\n{details}\n"))
+                .expect("merged");
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].developer_mode, DeveloperModeState::Enabled);
+        assert_eq!(merged[0].tunnel_state, TunnelState::Connected);
+        assert!(merged[0].ready, "{:?}", merged[0].issue);
+
+        let stray = parse_devicectl_devices(&format!(
+            "{listing}\n{DEVICE_DETAILS_MARKER}\nnot json\n{DEVICE_DETAILS_MARKER}\n{{\"result\":{{\"identifier\":\"0A1B2C3D-4E5F-4061-8273-8495A6B7C8D9\"}}}}\n"
+        ))
+        .expect("stray");
+        assert_eq!(stray[0].developer_mode, DeveloperModeState::Unknown);
+    }
 
     #[test]
     fn the_pairing_script_is_fixed_text_around_a_quoted_udid() {

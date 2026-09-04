@@ -115,9 +115,56 @@ export const busyKeyLabel: Record<string, string> = {
     running_on_device: 'Running on the device',
 };
 
+/** What each operation this client starts is doing, for the header, the drawer bar and rows. */
+export const operationLabel: Record<OperationId, string> = {
+    refresh: 'Refreshing the machine',
+    launch: 'Starting the machine',
+    stop: 'Stopping the machine',
+    configure: 'Saving the machine profile',
+    'guest-access': 'Generating the access key',
+    'guest-authorize': 'Installing the access key',
+    trust: 'Pinning the guest identity',
+    'forget-trust': 'Forgetting the pinned identity',
+    'xcode-import': 'Importing Xcode',
+    'xcode-activate': 'Activating Xcode',
+    approve: 'Approving the project',
+    'clear-workspace': 'Removing the project approval',
+    sync: 'Synchronizing source',
+    'test-build': 'Running the test build',
+    provision: 'Provisioning signing',
+    'attach-kit': 'Changing the signing kit',
+    'attach-env': 'Changing the env set',
+    'clear-signing': 'Removing guest signing',
+    archive: 'Building the signed archive',
+    reveal: 'Revealing the artifacts',
+    'clear-archive': 'Clearing retained artifacts',
+    discard: 'Discarding the container',
+    delete: 'Deleting the machine',
+    optimize: 'Applying an optimization',
+    'usb-rule': 'Updating the host USB rule',
+    'usb-migrate': 'Enabling USB on the machine',
+    'usb-attach': 'Attaching the iPhone',
+    'usb-detach': 'Detaching the iPhone',
+    'usb-rebuild': 'Rebuilding the container',
+    'device-pair': 'Pairing with the phone',
+    'device-signing': 'Preparing device signing',
+    'run-device': 'Running on the device',
+    'clear-device-run': 'Clearing the last device run',
+    'adopt-lock': 'Adopting the guest Podfile.lock',
+};
+
+/** The label for whatever is running: a native busy key or this client's operation id. */
+export function activityLabel(operation: string | null | undefined): string | null {
+    if (!operation) {
+        return null;
+    }
+    return busyKeyLabel[operation] ?? operationLabel[operation as OperationId] ?? null;
+}
+
 const operationStep: Partial<Record<OperationId, string>> = {
     launch: 'launch',
     stop: 'launch',
+    discard: 'launch',
     'xcode-import': 'xcode-import',
     'xcode-activate': 'xcode-activate',
     sync: 'sync',
@@ -476,6 +523,12 @@ function runningStepFor(id: string): string | null {
     return busy ? (busyKeyStep[busy] ?? null) : null;
 }
 
+/** The operation behind `runningStepFor`, for the summaries and strips that name it. */
+function runningOperationFor(id: string): string | null {
+    const target = state.sessions[id];
+    return target?.operation ?? target?.view?.busyOperation ?? null;
+}
+
 export function useMachinesStore() {
     return {
         state,
@@ -499,6 +552,8 @@ export function useMachinesStore() {
 
         /** The step the in-flight or native operation belongs to, for the step lists. */
         runningStep: runningStepFor,
+        /** The operation itself, so a step that hosts several can say which one. */
+        runningOperation: runningOperationFor,
 
         /**
          * The machine's journey: exact once its view has been probed, coarse from the list
@@ -507,7 +562,10 @@ export function useMachinesStore() {
         journey(id: string): JourneyStep[] {
             const view = state.sessions[id]?.view;
             if (view) {
-                return deriveJourney(view, { runningStep: runningStepFor(id) });
+                return deriveJourney(view, {
+                    runningStep: runningStepFor(id),
+                    runningOperation: runningOperationFor(id),
+                });
             }
             const summary = state.list?.machines.find((machine) => machine.id === id);
             return summary
@@ -535,16 +593,36 @@ export function useMachinesStore() {
             }
         },
 
-        launch: (id: string) =>
-            runOperation(id, 'launch', () => useBackend().launchMachine(id), {
+        launch: (id: string) => {
+            // Progress kept from an earlier start would label this one until its first event.
+            session(id).launch = null;
+            return runOperation(id, 'launch', () => useBackend().launchMachine(id), {
                 started: 'Starting the machine',
                 finished: 'The macOS machine is running. Open its console window to continue.',
-            }),
+            });
+        },
         stop: (id: string) =>
             runOperation(id, 'stop', () => useBackend().stopMachine(id), {
                 started: 'Stopping the machine safely',
                 finished: 'Stopped. The macOS disk is retained and resumes on the next start.',
             }),
+        /**
+         * A stop and a start, for the one thing only a fresh QEMU fixes: a phone it has already
+         * opened once in this session and can no longer read.
+         */
+        restartMachine: async (id: string) => {
+            const stopped = await runOperation(id, 'stop', () => useBackend().stopMachine(id), {
+                started: 'Stopping the machine safely',
+            });
+            if (!stopped) {
+                return null;
+            }
+            session(id).launch = null;
+            return runOperation(id, 'launch', () => useBackend().launchMachine(id), {
+                started: 'Starting the machine again',
+                finished: 'The machine is running again. Attach the phone once it is up.',
+            });
+        },
         configure: (id: string, profile: MacBuilderConfig) =>
             runOperation(id, 'configure', () => useBackend().configureMachine(id, profile), {
                 finished: 'Machine profile saved.',

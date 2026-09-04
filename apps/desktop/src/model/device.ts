@@ -113,7 +113,7 @@ export function deviceNextSummary(readiness: DeviceReadiness, view: MacBuilderVi
         case 'unplugged':
             return `${readiness.name} is no longer plugged into this host; reconnect it or detach`;
         case 'replug':
-            return `QEMU holds ${readiness.name} but could not read it; detach, replug it and attach once, or restart the machine`;
+            return `QEMU holds ${readiness.name} but could not read it; restart the machine, then attach once`;
         case 'trust':
             return `Unlock ${readiness.name} and tap Trust when it asks about this computer`;
         case 'signing':

@@ -115,6 +115,11 @@ const clearOpen = ref(false);
 /** The live strip reads whichever progress belongs to the operation in flight. */
 const strip = computed(() => {
     const operation = session.operation ?? view.value.busyOperation;
+    // The background poll of the guest's device list is a probe, not an operation: a row that
+    // appears for its two seconds and vanishes every five is a page that jumps.
+    if (!operation || operation === 'listing_devices' || operation === 'refresh') {
+        return null;
+    }
     if (operation === 'usb-migrate' || operation === 'migrating_usb') {
         const progress = session.usbMigration;
         return {
@@ -284,7 +289,6 @@ const primary = computed<Primary | null>(() => {
                 },
             };
         case 'unplugged':
-        case 'replug':
             return {
                 label: 'Detach iPhone',
                 icon: Unplug,
@@ -292,6 +296,15 @@ const primary = computed<Primary | null>(() => {
                 operation: 'usb-detach',
                 disabledReason: needsLive(),
                 run: () => machines.detachUsb(id),
+            };
+        case 'replug':
+            return {
+                label: 'Restart the machine',
+                icon: RefreshCw,
+                outline: false,
+                operation: 'launch',
+                disabledReason: null,
+                run: () => machines.restartMachine(id),
             };
         case 'trust':
             return {
@@ -345,18 +358,25 @@ const primary = computed<Primary | null>(() => {
             };
     }
 });
+// A refresh is a probe rather than an operation: it sets `refreshing`, not `operation`, so
+// the button that asks for one has to watch that flag to spin and to stay disabled.
+const primaryRefreshing = computed(
+    () => primary.value?.operation === 'refresh' && session.refreshing,
+);
 const primaryDisabled = computed(
     () =>
         busy.value ||
+        primaryRefreshing.value ||
         step.status === 'pending' ||
         primary.value === null ||
         primary.value.disabledReason !== null,
 );
 const primarySpinning = computed(
     () =>
-        primary.value !== null &&
-        primary.value.operation !== null &&
-        session.operation === primary.value.operation,
+        primaryRefreshing.value ||
+        (primary.value !== null &&
+            primary.value.operation !== null &&
+            session.operation === primary.value.operation),
 );
 
 const showDetach = computed(() =>
@@ -587,7 +607,7 @@ const runFacts = computed(() =>
                 variant="ghost"
                 size="sm"
                 :disabled="busy"
-                title="Returns the phone to this host; unplug and replug it before attaching it again"
+                title="Returns the phone to this host. Attaching it to this machine again needs the machine restarted first."
                 @click="machines.detachUsb(session.id)"
             >
                 <Spinner v-if="session.operation === 'usb-detach'" />
@@ -635,7 +655,7 @@ const runFacts = computed(() =>
             #status
         >
             <ProgressRow
-                v-if="running"
+                v-if="strip"
                 :label="strip.label"
                 :detail="strip.detail"
                 :elapsed-seconds="strip.elapsed"
@@ -706,10 +726,10 @@ const runFacts = computed(() =>
                 tone="warn"
                 title="QEMU holds the phone but could not read it"
             >
-                This happens once a phone has been detached and attached again in the same session,
-                or when the phone re-enumerated under QEMU: QEMU reads a phone cleanly only the
-                first time it opens it. Detach, unplug the phone, plug it in again, and attach once.
-                If that repeats, restart the machine and attach once after it is up.
+                QEMU reads a phone cleanly only the first time it opens it in a session, and this
+                phone has been opened before: a detach and re-attach, or the phone re-enumerating
+                under QEMU, both leave it here. Restart the machine, then attach once after it is
+                up. The phone can stay plugged in; nothing on it changes.
             </Callout>
             <Callout v-if="readiness.substate === 'trust'" tone="neutral" title="On the phone">
                 Press <b>Pair with the phone</b>, then unlock the phone and tap <b>Trust</b> when it

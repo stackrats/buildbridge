@@ -190,7 +190,7 @@ describe('deviceReadiness', () => {
             attached,
         });
         expect(deviceReadiness(host).substate).toBe('replug');
-        expect(deviceNextSummary(deviceReadiness(host), host)).toContain('replug it');
+        expect(deviceNextSummary(deviceReadiness(host), host)).toContain('restart the machine');
     });
 });
 
