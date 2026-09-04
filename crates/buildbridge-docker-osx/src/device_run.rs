@@ -389,14 +389,15 @@ pub(crate) fn run_guest_command_capped(
     Ok(String::from_utf8_lossy(&stdout).into_owned())
 }
 
-/// Lists the phones, then asks for each wired one's details, which is what opens the tunnel
+/// Lists the phones, then asks for each one's details, which is what opens the tunnel
 /// Developer Mode is read over. The identifiers come from devicectl's own JSON and are still
-/// checked for shape before they are handed back to it.
+/// checked for shape before they are handed back to it. The Python is one line on purpose:
+/// a newline cannot survive the quoting between here and the guest.
 pub(crate) fn device_list_script(username: &str) -> String {
     let developer_dir = format!("/Users/{username}/Applications/Xcode.app/Contents/Developer");
 
     format!(
-        "set -u; export DEVELOPER_DIR={}; out=$(/usr/bin/mktemp /tmp/buildbridge-devices.XXXXXX) || exit 1; /usr/bin/xcrun devicectl list devices --json-output \"$out\" --timeout {DEVICE_LIST_TIMEOUT_SECONDS} >/dev/null 2>&1 || /usr/bin/true; /bin/cat \"$out\"; for id in $(/usr/bin/python3 -c 'import json,re,sys\ntry:\n d=json.load(open(sys.argv[1]))\nexcept Exception:\n d={{}}\nfor r in d.get(\"result\",{{}}).get(\"devices\",[]):\n i=str(r.get(\"identifier\",\"\"))\n if r.get(\"connectionProperties\",{{}}).get(\"transportType\")==\"wired\" and re.fullmatch(r\"[0-9A-Fa-f-]{{36}}\",i): print(i)' \"$out\" 2>/dev/null); do det=$(/usr/bin/mktemp /tmp/buildbridge-device.XXXXXX) || continue; /usr/bin/xcrun devicectl device info details --device \"$id\" --json-output \"$det\" --timeout {DEVICE_DETAILS_TIMEOUT_SECONDS} >/dev/null 2>&1 || /usr/bin/true; /usr/bin/printf '\\n{DEVICE_DETAILS_MARKER}\\n'; /bin/cat \"$det\"; /bin/rm -f \"$det\"; done; /bin/rm -f \"$out\"",
+        "set -u; export DEVELOPER_DIR={}; out=$(/usr/bin/mktemp /tmp/buildbridge-devices.XXXXXX) || exit 1; /usr/bin/xcrun devicectl list devices --json-output \"$out\" --timeout {DEVICE_LIST_TIMEOUT_SECONDS} >/dev/null 2>&1 || /usr/bin/true; /bin/cat \"$out\"; for id in $(/usr/bin/python3 -c 'import json,re,sys; d=json.load(open(sys.argv[1])); [print(i) for i in (str(r.get(\"identifier\",\"\")) for r in d.get(\"result\",{{}}).get(\"devices\",[])) if re.fullmatch(r\"[0-9A-Fa-f-]{{36}}\", i)]' \"$out\" 2>/dev/null); do det=$(/usr/bin/mktemp /tmp/buildbridge-device.XXXXXX) || continue; /usr/bin/xcrun devicectl device info details --device \"$id\" --json-output \"$det\" --timeout {DEVICE_DETAILS_TIMEOUT_SECONDS} >/dev/null 2>&1 || /usr/bin/true; /usr/bin/printf '\\n%s\\n' {DEVICE_DETAILS_MARKER}; /bin/cat \"$det\"; /bin/rm -f \"$det\"; done; /bin/rm -f \"$out\"",
         shell_single_quote(&developer_dir)
     )
 }
@@ -499,6 +500,27 @@ mod tests {
         ]
       }
     }"#;
+
+    #[test]
+    fn the_listing_script_keeps_python_on_one_line_and_lets_printf_make_the_newlines() {
+        let script = device_list_script("john");
+        // The Python program is single-quoted for the guest shell, so any newline escape in it
+        // would reach Python as two characters and be a syntax error.
+        let program_start = script.find("python3 -c '").expect("python") + "python3 -c '".len();
+        let program_end =
+            script[program_start..].find('\'').expect("closing quote") + program_start;
+        let program = &script[program_start..program_end];
+        assert!(
+            !program.contains('\\'),
+            "no escapes inside the Python: {program}"
+        );
+        assert!(program.contains("json.load(open(sys.argv[1]))"));
+        assert!(program.contains("re.fullmatch"));
+        // printf turns its own \n escapes into newlines around the marker; that is the one
+        // place a backslash-n belongs.
+        assert!(script.contains("/usr/bin/printf '\\n%s\\n' __BUILDBRIDGE_DEVICE_DETAILS__"));
+        assert!(script.contains("devicectl device info details --device \"$id\""));
+    }
 
     #[test]
     fn a_details_report_fills_in_developer_mode_and_the_tunnel_the_listing_left_unknown() {
