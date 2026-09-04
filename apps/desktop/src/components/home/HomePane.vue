@@ -58,6 +58,40 @@ const phases = [
     },
 ];
 
+const glossary = [
+    {
+        word: 'Machine',
+        meaning: 'a macOS virtual machine BuildBridge runs on this Linux host through Docker.',
+    },
+    {
+        word: 'Guest',
+        meaning: 'the macOS inside that machine; the console is its screen, in its own window.',
+    },
+    {
+        word: 'Pinned identity',
+        meaning: "the guest's SSH fingerprint, checked once and refused if it ever changes.",
+    },
+    {
+        word: 'Signing kit',
+        meaning:
+            "your Apple signing credentials, stored once in this host's OS vault and shared by every machine.",
+    },
+    {
+        word: 'Team key',
+        meaning:
+            'an App Store Connect API key; with one, BuildBridge creates certificates and profiles for you.',
+    },
+    { word: 'Provision', meaning: "import a kit into a machine's own keychain, ready to sign." },
+    {
+        word: 'Env set',
+        meaning: 'variables and secrets written into the project at every sync, for the web build.',
+    },
+    {
+        word: 'Control plane',
+        meaning: 'the optional web dashboard that can queue builds on this machine from anywhere.',
+    },
+];
+
 // Probe each machine once so the rows show the exact journey, not the coarse one.
 function probeAll(): void {
     for (const machine of machines.machines.value) {
@@ -142,6 +176,15 @@ const wellClass =
                     </span>
                 </li>
             </ol>
+            <!-- The words the steps use, defined once, before the steps use them. -->
+            <dl class="mt-4 grid gap-x-6 gap-y-1.5 text-xs leading-5 sm:grid-cols-2">
+                <div v-for="term in glossary" :key="term.word" class="flex gap-2">
+                    <dt class="shrink-0 font-medium text-zinc-900 dark:text-zinc-50">
+                        {{ term.word }}
+                    </dt>
+                    <dd class="text-zinc-500 dark:text-zinc-400">{{ term.meaning }}</dd>
+                </div>
+            </dl>
             <div class="mt-5">
                 <Button size="sm" @click="ui.state.newMachineOpen = true">
                     <Plus class="h-3.5 w-3.5" />
