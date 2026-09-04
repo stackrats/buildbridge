@@ -5,7 +5,6 @@
 // the same pure model as the row summary.
 import {
     Cable,
-    ChevronRight,
     Circle,
     CircleCheck,
     Globe,
@@ -871,43 +870,36 @@ const runFacts = computed(() =>
                 to QEMU by USB bus and port, so it disappears from this host while attached.
             </p>
             <KeyValue :items="recipe" :columns="3" />
-            <!-- The ladder above already says what to do next; the full list is for seeing
-                 where the run stands, so it stays folded. -->
-            <details class="group">
-                <summary
-                    class="flex cursor-pointer list-none items-center gap-1 text-[11px] text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+            <!-- Every rung at once: the ladder says what to do next, this says where it stands. -->
+            <p class="text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400">
+                Every check, in order · {{ passedChecks }} of {{ checks.length }} passed
+            </p>
+            <ul class="grid gap-2 sm:grid-cols-2">
+                <li
+                    v-for="check in checks"
+                    :key="check.label"
+                    class="flex items-start gap-2 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950"
                 >
-                    <ChevronRight class="h-3 w-3 transition-transform group-open:rotate-90" />
-                    Every check, in order · {{ passedChecks }} of {{ checks.length }} passed
-                </summary>
-                <ul class="mt-2 grid gap-2 sm:grid-cols-2">
-                    <li
-                        v-for="check in checks"
-                        :key="check.label"
-                        class="flex items-start gap-2 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950"
-                    >
-                        <CircleCheck
-                            v-if="check.ok"
-                            class="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-700 dark:text-emerald-400"
-                        />
-                        <Circle
-                            v-else
-                            class="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500"
-                        />
-                        <span class="min-w-0">
-                            <span
-                                class="block text-xs font-medium text-zinc-700 dark:text-zinc-200"
-                                >{{ check.label }}</span
-                            >
-                            <span
-                                class="block truncate text-xs text-zinc-500 dark:text-zinc-400"
-                                :title="check.detail"
-                                >{{ check.detail }}</span
-                            >
-                        </span>
-                    </li>
-                </ul>
-            </details>
+                    <CircleCheck
+                        v-if="check.ok"
+                        class="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-700 dark:text-emerald-400"
+                    />
+                    <Circle
+                        v-else
+                        class="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500"
+                    />
+                    <span class="min-w-0">
+                        <span class="block text-xs font-medium text-zinc-700 dark:text-zinc-200">{{
+                            check.label
+                        }}</span>
+                        <span
+                            class="block truncate text-xs text-zinc-500 dark:text-zinc-400"
+                            :title="check.detail"
+                            >{{ check.detail }}</span
+                        >
+                    </span>
+                </li>
+            </ul>
             <div class="flex flex-wrap items-center gap-2">
                 <Button
                     v-if="usb.host.rule === 'installed'"
