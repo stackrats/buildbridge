@@ -172,14 +172,25 @@ describe('deviceReadiness', () => {
     });
 
     it('names the phone from the host until the guest names it', () => {
-        const attached = { bus: 1, port: '3', enumerated: false, issue: null };
+        const attached = { bus: 1, port: '3', enumerated: true, issue: null };
         const host = usbView({
             host: { ...usbView({}).usb.host, devices: [hostDevice()] },
             attached,
         });
+        expect(deviceReadiness(host).substate).toBe('trust');
         expect(deviceReadiness(host).name).toBe('iPhone');
         expect(deviceNextSummary(deviceReadiness(host), host)).toContain('Unlock iPhone');
         expect(deviceWorkingSummary(deviceReadiness(host))).toContain('state');
+    });
+
+    it('is a replug, not a trust, when QEMU holds a phone it could not read', () => {
+        const attached = { bus: 1, port: '3', enumerated: false, issue: 'unreadable' };
+        const host = usbView({
+            host: { ...usbView({}).usb.host, devices: [hostDevice()] },
+            attached,
+        });
+        expect(deviceReadiness(host).substate).toBe('replug');
+        expect(deviceNextSummary(deviceReadiness(host), host)).toContain('plug it in again');
     });
 });
 
