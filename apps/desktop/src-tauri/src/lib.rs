@@ -2546,7 +2546,9 @@ fn pkcs12_needs_repackaging(info: &str) -> bool {
 /// exactly as they are.
 fn ensure_macos_importable_pkcs12(path: &str, password: &str) -> Result<String, String> {
     let env = Some(("BUILDBRIDGE_P12_PASSWORD", password));
-    let info = openssl(
+    // `pkcs12 -info` writes its report to stderr, so it is read from there. A file OpenSSL
+    // cannot describe at all is left for the guest import to name precisely.
+    let info = openssl_report(
         &[
             "pkcs12",
             "-info",
@@ -2556,12 +2558,8 @@ fn ensure_macos_importable_pkcs12(path: &str, password: &str) -> Result<String, 
             "-passin",
             "env:BUILDBRIDGE_P12_PASSWORD",
         ],
-        None,
         env,
     )
-    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-    // `-info` reports on stderr for some versions; either way, an unreadable file is left
-    // for the guest import to name precisely.
     .unwrap_or_default();
     if !pkcs12_needs_repackaging(&info) {
         return Ok(path.to_string());
@@ -2578,6 +2576,11 @@ fn ensure_macos_importable_pkcs12(path: &str, password: &str) -> Result<String, 
         None,
         env,
     )?;
+    // `pkcs12 -export` reads its input twice, once for certificates and once for the key, so
+    // a pipe cannot serve it. The unencrypted PEM exists for the length of that one command,
+    // owner-only, beside the file it came from in the kit's owner-only directory.
+    let pem_path = format!("{path}.repack.pem");
+    write_owner_only(&pem_path, &pem)?;
     let display_name = std::path::Path::new(path)
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -2588,7 +2591,7 @@ fn ensure_macos_importable_pkcs12(path: &str, password: &str) -> Result<String, 
         "pkcs12",
         "-export",
         "-in",
-        "/dev/stdin",
+        pem_path.as_str(),
         "-name",
         display_name.as_str(),
         "-passout",
@@ -2600,7 +2603,9 @@ fn ensure_macos_importable_pkcs12(path: &str, password: &str) -> Result<String, 
     .chain(MACOS_PKCS12_ALGORITHMS)
     .map(str::to_string)
     .collect();
-    openssl(&args, Some(&pem), env).map_err(|error| {
+    let exported = openssl(&args, None, env);
+    let _ = fs::remove_file(&pem_path);
+    exported.map_err(|error| {
         let _ = fs::remove_file(&repacked);
         format!("The identity at {path} could not be repackaged for macOS: {error}")
     })?;
@@ -2615,6 +2620,42 @@ fn ensure_macos_importable_pkcs12(path: &str, password: &str) -> Result<String, 
     })?;
 
     Ok(path.to_string())
+}
+
+/// Runs OpenSSL for what it says rather than what it outputs: `pkcs12 -info` reports on
+/// stderr. Both streams, as text, on success.
+fn openssl_report(args: &[impl AsRef<str>], env: Option<(&str, &str)>) -> Result<String, String> {
+    let mut command = Command::new("openssl");
+    command.args(args.iter().map(AsRef::as_ref));
+    command.stdin(std::process::Stdio::null());
+    if let Some((name, value)) = env {
+        command.env(name, value);
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("Could not run openssl: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    Ok(text)
+}
+
+/// A file only this user can read, from the first byte: created with the mode, not chmodded
+/// after the write.
+fn write_owner_only(path: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| format!("Could not create {path}: {error}"))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("Could not write {path}: {error}"))
 }
 
 fn openssl(
