@@ -420,7 +420,7 @@ describe('deriveBuildSteps', () => {
         const kitStep = steps.find((step) => step.id === 'signing-kit');
 
         expect(kitStep?.status).toBe('failed');
-        expect(kitStep?.summary).toContain('no kit remains in the vault');
+        expect(kitStep?.summary).toContain('no longer stored');
         expect(focusStep(steps)?.id).toBe('signing-kit');
     });
 

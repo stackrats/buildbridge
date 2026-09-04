@@ -98,6 +98,8 @@ watch(
 );
 
 const running = computed(() => runningStep !== null);
+// The tab the running step writes to carries a live dot, so the five tabs say which one moves.
+const liveSource = computed(() => (runningStep !== null ? sourceFor(runningStep) : null));
 const activity = computed(() => session.operation ?? session.view?.busyOperation ?? null);
 const runningLabel = computed(
     () => activityLabel(activity.value) ?? (activity.value ? 'Working' : null),
@@ -251,6 +253,7 @@ onBeforeUnmount(() => {
                     v-for="option in sources"
                     :key="option.value"
                     :active="source === option.value"
+                    :dot="option.value === liveSource ? 'bg-emerald-500 animate-pulse' : undefined"
                     @click="source = option.value"
                 >
                     {{ option.label }}

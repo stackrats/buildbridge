@@ -93,7 +93,11 @@ async function clear(): Promise<void> {
 <template>
     <StepPanel :step="step">
         <template #action>
-            <span v-if="envs.sets.value.length" class="w-56 max-w-full">
+            <span
+                v-if="envs.sets.value.length"
+                class="w-56 max-w-full"
+                title="The env set the web assets are rebuilt with for this archive; the set attached at the sync step is the default"
+            >
                 <Select
                     v-model="envSetId"
                     :options="envOptions"
@@ -275,7 +279,7 @@ async function clear(): Promise<void> {
         <ConfirmDialog
             v-model:open="clearOpen"
             title="Clear retained artifacts"
-            confirm-label="Delete artifacts"
+            confirm-label="Clear artifacts"
             @confirm="clear"
         >
             <p>

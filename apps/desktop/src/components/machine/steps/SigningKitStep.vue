@@ -146,7 +146,7 @@ async function attach(): Promise<void> {
             </FailureBlock>
             <FailureBlock
                 v-else-if="view.signingHealth === 'kit_missing'"
-                title="This machine's signing kit is no longer in the vault"
+                title="The kit this machine was provisioned from is no longer stored"
                 cause="Signing was provisioned here before, so the guest still holds a BuildBridge keychain, but the kit that created it is gone from this host's keyring. That happens when the operating-system keyring is reset or recreated; nothing inside the machine was touched."
             >
                 Store the kit again, attach it here, then run

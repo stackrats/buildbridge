@@ -45,9 +45,9 @@ const realtimeBadge = computed(() => {
         case 'connecting':
             return { tone: 'warn' as const, label: 'connecting…' };
         case 'unavailable':
-            return { tone: 'danger' as const, label: 'unavailable' };
+            return { tone: 'danger' as const, label: 'control plane unreachable' };
         default:
-            return { tone: 'neutral' as const, label: 'disconnected' };
+            return { tone: 'neutral' as const, label: 'not connected' };
     }
 });
 
@@ -159,7 +159,7 @@ async function unpair(): Promise<void> {
             </Card>
 
             <Card v-else>
-                <template #title>Pair this runner</template>
+                <template #title>Pair this host with the control plane</template>
                 <template #description>
                     Nothing here is needed to build locally. Pair when you want to queue a signed
                     archive from another device, or keep build history somewhere the desktop is not.

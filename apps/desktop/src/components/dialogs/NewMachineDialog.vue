@@ -100,8 +100,8 @@ async function create(): Promise<void> {
                 tone="warn"
                 title="This host is not ready for Docker-OSX yet"
             >
-                You can still create the machine now; the setup checklist shows what to fix before
-                it can start.
+                You can still create the machine now; its timeline shows what to fix before it can
+                start.
             </Callout>
             <Field
                 v-if="readyTemplates.length"

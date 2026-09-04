@@ -14,7 +14,9 @@ import { describeRealtimeFailure } from '../lib/realtime';
 import { describeError } from '../lib/utils';
 import type { DesktopStatus, PairInput } from '../types/backend';
 
-export type RealtimeState = 'disconnected' | 'connecting' | 'connected' | 'unavailable';
+import { normalizeRealtimeState, type RealtimeState } from '../model/runner';
+
+export type { RealtimeState };
 
 export interface ActivityEntry {
     id: number;
@@ -48,21 +50,6 @@ function log(tone: ActivityEntry['tone'], message: string, buildId: string | nul
     state.activity.unshift({ id: activityId, at: Date.now(), tone, message, buildId });
     if (state.activity.length > ACTIVITY_LIMIT) {
         state.activity.length = ACTIVITY_LIMIT;
-    }
-}
-
-function normalizeRealtimeState(value: string): RealtimeState {
-    switch (value) {
-        case 'connected':
-            return 'connected';
-        case 'connecting':
-        case 'initialized':
-            return 'connecting';
-        case 'unavailable':
-        case 'failed':
-            return 'unavailable';
-        default:
-            return 'disconnected';
     }
 }
 

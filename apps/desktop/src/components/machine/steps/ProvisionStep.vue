@@ -121,7 +121,11 @@ async function remove(): Promise<void> {
                     </Button>
                 </template>
             </FailureBlock>
-            <Callout v-if="orphaned" tone="warn" title="Provisioned here, but the kit is gone">
+            <Callout
+                v-if="orphaned"
+                tone="warn"
+                title="The kit this machine was provisioned from is no longer stored"
+            >
                 The guest keychain from the earlier provisioning still exists, and this record still
                 describes it. Its password lived only in the host vault, so a signed build cannot
                 unlock it. Store the kit again and provision once more; that recreates the keychain
@@ -143,10 +147,8 @@ async function remove(): Promise<void> {
                 tone="warn"
                 title="Development identity only"
             >
-                The guest keychain holds a development identity and no distribution identity, so
-                this machine can run Debug builds on a registered iPhone but cannot sign an App
-                Store archive. Add a distribution identity and an App Store profile to the kit, then
-                provision again.
+                The guest keychain holds a development identity and no distribution identity, so the
+                signed archive step stays locked; the signing kit step says what the kit needs.
             </Callout>
 
             <KeyValue
@@ -196,7 +198,7 @@ async function remove(): Promise<void> {
         <ConfirmDialog
             v-model:open="removeOpen"
             title="Remove provisioned signing from the guest"
-            confirm-label="Remove from guest"
+            confirm-label="Remove provisioned signing"
             @confirm="remove"
         >
             <p>

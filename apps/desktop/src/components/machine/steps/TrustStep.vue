@@ -42,7 +42,7 @@ async function forget(): Promise<void> {
                     tone="text-white dark:text-zinc-950"
                 />
                 <ShieldCheck v-else class="h-3.5 w-3.5" />
-                Trust this fingerprint
+                Pin this fingerprint
             </Button>
             <Button
                 v-if="ssh.trust === 'trusted' && ssh.pinnedFingerprint"

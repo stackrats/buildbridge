@@ -232,6 +232,13 @@ const menuItemClass =
                         :class="menuItemClass"
                         :disabled="live || view.runtime.state === 'missing'"
                         class="disabled:opacity-40"
+                        :title="
+                            live
+                                ? 'Stop the machine first'
+                                : view.runtime.state === 'missing'
+                                  ? 'There is no container to discard yet'
+                                  : 'Removes the container and its macOS disk; the machine profile stays'
+                        "
                         @click="
                             closeMenu();
                             discardOpen = true;
@@ -245,6 +252,11 @@ const menuItemClass =
                         :class="menuItemClass"
                         :disabled="live"
                         class="disabled:opacity-40"
+                        :title="
+                            live
+                                ? 'Stop the machine first'
+                                : 'Removes the machine and everything it owns on this host'
+                        "
                         @click="
                             closeMenu();
                             deleteOpen = true;

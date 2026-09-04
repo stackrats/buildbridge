@@ -183,7 +183,7 @@ const orphaned = computed(() =>
         <Callout
             v-if="orphaned.length"
             tone="danger"
-            title="Signing was provisioned from a kit that is no longer stored"
+            title="The kit these machines were provisioned from is no longer stored"
         >
             <p>
                 {{ orphaned.map((machine) => machine.config.name).join(', ') }}

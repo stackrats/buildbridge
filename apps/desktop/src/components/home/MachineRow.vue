@@ -68,19 +68,26 @@ const primary = computed(() => {
         return null;
     }
     if (focus.value?.id === 'launch' && canStart.value) {
-        return { label: 'Start and continue', ink: true, action: startAndOpen };
+        return {
+            label: machine.state === 'missing' ? 'Create and start' : 'Start and continue',
+            ink: true,
+            start: true,
+            action: startAndOpen,
+        };
     }
     if (focus.value) {
         const step = focus.value;
         return {
             label: step.status === 'failed' ? 'Resolve' : step.title,
             ink: step.kind !== 'automatic' || step.status === 'failed',
+            start: false,
             action: () => ui.openMachine(machine.id, step.id),
         };
     }
     return {
         label: 'Build again',
         ink: false,
+        start: false,
         action: () => ui.openMachine(machine.id, 'archive'),
     };
 });
@@ -146,7 +153,7 @@ async function startAndOpen(): Promise<void> {
                     size="sm"
                     @click="primary.action()"
                 >
-                    <Play v-if="primary.label === 'Start and continue'" class="h-3.5 w-3.5" />
+                    <Play v-if="primary.start" class="h-3.5 w-3.5" />
                     {{ primary.label }}
                 </Button>
                 <Button variant="ghost" size="sm" @click="ui.openMachine(machine.id)">

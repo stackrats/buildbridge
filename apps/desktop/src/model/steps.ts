@@ -457,7 +457,7 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
             view.signingHealth === 'vault_unavailable'
                 ? `The credential vault could not be read: ${view.vaultIssue ?? 'unknown error'}`
                 : view.signingHealth === 'kit_missing'
-                  ? 'This machine has provisioned signing, but no kit remains in the vault. Store the kit again, then provision to rebuild the guest keychain.'
+                  ? 'The kit this machine was provisioned from is no longer stored. Store it again, then provision to rebuild the guest keychain.'
                   : kitReady
                     ? signingKit.signingCertificateConfigured
                         ? `${signingKit.name} · ${signingKit.signingCertificateName ?? 'certificate'} · ${profileCount} profile${profileCount === 1 ? '' : 's'}`

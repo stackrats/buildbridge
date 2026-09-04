@@ -4,8 +4,25 @@
 // paired" is a neutral fact, not a fault, and only a pairing that exists but is not working gets
 // warning or failure colour.
 
-import type { RealtimeState } from '../stores/runner';
 import type { DesktopStatus } from '../types/backend';
+
+export type RealtimeState = 'disconnected' | 'connecting' | 'connected' | 'unavailable';
+
+/** The library's connection state names, folded into the four the interface distinguishes. */
+export function normalizeRealtimeState(value: string): RealtimeState {
+    switch (value) {
+        case 'connected':
+            return 'connected';
+        case 'connecting':
+        case 'initialized':
+            return 'connecting';
+        case 'unavailable':
+        case 'failed':
+            return 'unavailable';
+        default:
+            return 'disconnected';
+    }
+}
 
 export interface ControlPlaneChip {
     /** Stock Tailwind classes for the status dot. */
