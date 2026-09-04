@@ -470,12 +470,14 @@ where
         None,
     ));
     let root = format!("{guest_home}/BuildBridge/workspaces/active");
+    let toolchain = guest_toolchain(guest_home);
+    let prepare_tools = guest_tools_preparation(&toolchain);
     let GuestToolchain {
         gem_home,
         developer_dir,
         path,
         ..
-    } = guest_toolchain(guest_home);
+    } = &toolchain;
 
     run_guest_command(
         ssh_port,
@@ -517,6 +519,7 @@ export GEM_PATH="{gem_home}"
 export DEVELOPER_DIR="{developer_dir}"
 export LANG="en_US.UTF-8"
 export CYPRESS_INSTALL_BINARY=0
+{prepare_tools}
 /bin/test -f "{root}/package.json"
 /bin/test -x "{root}/node_modules/.bin/vp"
 /bin/test -x "{root}/node_modules/.bin/cap"

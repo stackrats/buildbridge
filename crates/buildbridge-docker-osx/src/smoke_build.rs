@@ -22,19 +22,17 @@ where
     let build_destination = unsigned_build_destination_args(target);
     let guest_home = format!("/Users/{username}");
     let workspace = format!("{guest_home}/BuildBridge/workspaces/active");
+    let toolchain = guest_toolchain(&guest_home);
+    let prepare_tools = guest_tools_preparation(&toolchain);
     let GuestToolchain {
         tools,
-        node_root,
         pnpm,
-        ruby_root,
         gem_home,
         pod,
         developer_dir,
         path,
-    } = guest_toolchain(&guest_home);
-    let node_name = format!("node-v{NODE_VERSION}-darwin-x64");
-    let node_archive = format!("{tools}/{node_name}.tar.gz");
-    let ruby_archive = format!("{tools}/portable-ruby-{PORTABLE_RUBY_VERSION}.tar.gz");
+        ..
+    } = &toolchain;
 
     let body = format!(
         r#"phase() {{ /usr/bin/printf '__BUILDBRIDGE_PHASE__:%s\n' "$1"; }}
@@ -51,30 +49,7 @@ if /bin/test -f "{workspace}/.buildbridge/env.sh"; then
 fi
 
 phase preparing_tools
-/bin/mkdir -p "{tools}"
-if /bin/test ! -x "{node_root}/bin/node"; then
-    /bin/rm -rf "{node_root}" "{node_archive}"
-    /usr/bin/curl --fail --location --show-error --silent "https://nodejs.org/dist/v{NODE_VERSION}/{node_name}.tar.gz" --output "{node_archive}"
-    /usr/bin/shasum -a 256 "{node_archive}" | /usr/bin/grep -q "^{NODE_DARWIN_X64_SHA256}  "
-    /usr/bin/tar -xzf "{node_archive}" -C "{tools}"
-    /bin/rm -f "{node_archive}"
-fi
-if /bin/test ! -x "{pnpm}"; then
-    "{node_root}/bin/npm" install --prefix "{tools}/pnpm" "pnpm@{PNPM_VERSION}" --no-audit --no-fund
-fi
-if /bin/test ! -x "{ruby_root}/bin/ruby"; then
-    /bin/rm -rf "{ruby_root}" "{ruby_archive}"
-    /usr/bin/curl --fail --location --show-error --silent "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/{PORTABLE_RUBY_VERSION}/portable-ruby-{PORTABLE_RUBY_VERSION}.el_capitan.bottle.tar.gz" --output "{ruby_archive}"
-    /usr/bin/shasum -a 256 "{ruby_archive}" | /usr/bin/grep -q "^{PORTABLE_RUBY_DARWIN_X64_SHA256}  "
-    /usr/bin/tar -xzf "{ruby_archive}" -C "{tools}"
-    /bin/rm -f "{ruby_archive}"
-    /bin/test -x "{ruby_root}/bin/ruby"
-fi
-if /bin/test ! -x "{pod}"; then
-    /bin/rm -rf "{gem_home}" "{tools}/gems"
-    "{ruby_root}/bin/gem" install cocoapods --version "{COCOAPODS_VERSION}" --no-document
-    /bin/test -x "{pod}"
-fi
+{prepare_tools}
 platform_installed=0
 if /bin/test "{needs_simulator}" -eq 1 && ! /usr/bin/xcrun simctl list runtimes 2>/dev/null | /usr/bin/grep -q '^iOS '; then
     phase preparing_platform
@@ -160,7 +135,7 @@ fi
 /bin/test "$build_status" -eq 0
 phase completed"#
     );
-    let script = crate::device_run::guest_job_script("apple-smoke-build", &tools, "''", &body);
+    let script = crate::device_run::guest_job_script("apple-smoke-build", tools, "''", &body);
 
     let mut child = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
         .arg(script)
