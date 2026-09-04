@@ -1902,6 +1902,22 @@ async fn list_guest_devices(app: AppHandle, machine_id: String) -> Result<MacBui
     build_mac_builder_view(&app, &paths).await
 }
 
+/// Opens the webview's own inspector — console, network, elements — which a development build
+/// of Tauri carries. A release build does not, and says so rather than doing nothing.
+#[tauri::command]
+fn open_developer_tools(window: tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    {
+        window.open_devtools();
+        Ok(())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = window;
+        Err("The web inspector is only built into development builds of BuildBridge.".to_string())
+    }
+}
+
 #[tauri::command]
 async fn get_mac_builder_status(
     app: AppHandle,
@@ -6441,6 +6457,7 @@ pub fn run() {
             delete_machine,
             discard_machine_container,
             get_mac_builder_status,
+            open_developer_tools,
             configure_mac_builder,
             launch_mac_builder,
             stop_mac_builder,

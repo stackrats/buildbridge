@@ -1048,6 +1048,9 @@ export function createMockBackend(): Backend {
                 };
             });
         },
+        async openDeveloperTools() {
+            // The browser preview already has its own developer tools.
+        },
         async adoptGuestPodfileLock(machineId) {
             const machine = find(machineId);
             return busy(machine, 'Adopting the guest Podfile.lock', async () => {

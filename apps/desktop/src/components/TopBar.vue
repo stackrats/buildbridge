@@ -2,9 +2,10 @@
 // The window chrome: identity on the left, the two things that are true of the whole
 // application on the right — whether this host can run a machine, and whether the control
 // plane is connected.
-import { Monitor, Moon, Sun } from '@lucide/vue';
+import { Bug, Monitor, Moon, Sun } from '@lucide/vue';
 import { computed, ref } from 'vue';
 
+import { useBackend } from '../lib/backend';
 import { applyTheme, loadTheme, saveTheme, type Theme } from '../lib/prefs';
 import { useMachinesStore } from '../stores/machines';
 import { controlPlaneChip } from '../model/runner';
@@ -22,6 +23,18 @@ const themeOptions: { value: Theme; label: string; icon: typeof Sun }[] = [
     { value: 'light', label: 'Light theme', icon: Sun },
     { value: 'dark', label: 'Dark theme', icon: Moon },
 ];
+
+// The webview's own inspector, for what this desktop is doing: its requests to the control
+// plane, its console, its layout. What the app on the phone is doing is a different inspector,
+// Safari's, and lives in the device step.
+const inspectorAvailable = import.meta.env.DEV;
+function openInspector(): void {
+    void useBackend()
+        .openDeveloperTools()
+        .catch(() => {
+            // Only development builds carry the inspector; the browser preview has its own.
+        });
+}
 
 function setTheme(next: Theme): void {
     theme.value = next;
@@ -91,6 +104,18 @@ const chipClass =
                 {{ runnerChip.text }}
             </button>
 
+            <button
+                v-if="inspectorAvailable"
+                type="button"
+                :class="chipClass"
+                v-tip="
+                    'Open the web inspector for this desktop: its console, network requests and layout'
+                "
+                @click="openInspector"
+            >
+                <Bug class="h-3.5 w-3.5" />
+                Inspector
+            </button>
             <div
                 class="ml-1 flex items-center gap-0.5 rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800"
             >

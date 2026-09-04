@@ -875,10 +875,19 @@ const runFacts = computed(() =>
                 yearly allowance of 100 iPhones and cannot be undone here. Creates an Apple
                 Development identity if the kit has none, creates a development profile for the
                 bundle identifier listing the phone, and provisions both into the guest keychain
-                next to the distribution identity. Nothing at Apple is revoked. If the project's
-                Debug configuration carries its own bundle identifier, that App ID is registered at
-                Apple too, with the main app's capabilities copied onto it, so the debug build
-                installs beside the store build rather than replacing it.
+                next to the distribution identity. Nothing at Apple is revoked.
+            </p>
+            <p>
+                If the project's Debug configuration carries its own bundle identifier, that App ID
+                is registered at Apple too and the debug build installs <b>beside</b> the store
+                build. The main App ID's capabilities are copied onto it — push notifications, for
+                one — so the debug build keeps the entitlements the app relies on. Two things to
+                know: an App ID is a permanent entry in the developer portal (harmless, and it can
+                be deleted there), and capabilities that are their own resources at Apple, such as
+                app groups or iCloud containers, are not copied; if the app uses one, enable it on
+                the new App ID in the portal once. The other route is to sign the debug build under
+                the main identifier, which replaces the store build on that phone; BuildBridge does
+                that only when the kit holds no profile for the Debug identifier, and says so.
             </p>
         </ConfirmDialog>
 

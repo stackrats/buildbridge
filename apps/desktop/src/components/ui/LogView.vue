@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // A bounded, tail-following log pane. Lines are interpolated, never injected.
 import { Eraser, TextWrap } from '@lucide/vue';
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 
 import { loadLogWrap, saveLogWrap } from '../../lib/prefs';
 import Button from './Button.vue';
@@ -55,6 +55,9 @@ async function scrollToEnd(): Promise<void> {
     }
 }
 
+// Follows the tail only while the reader is at the tail: opening a log, switching to another
+// one, and new lines all land at the end, and a reader who has scrolled up to read something is
+// left exactly where they are until they return to the bottom.
 watch(
     () => lines.length,
     () => {
@@ -63,6 +66,16 @@ watch(
         }
     },
 );
+watch(
+    () => lines,
+    () => {
+        pinned.value = true;
+        void scrollToEnd();
+    },
+);
+onMounted(() => {
+    void scrollToEnd();
+});
 
 function toggleWrap(): void {
     wrap.value = !wrap.value;
