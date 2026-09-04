@@ -13,3 +13,6 @@
 /target
 Thumbs.db
 /docs/brand
+
+# ts-rs writes here when a crate is tested without TS_RS_EXPORT_DIR; the desktop's generated dir is the one that counts
+/crates/*/bindings/
