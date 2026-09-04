@@ -58,6 +58,7 @@ export type OperationId =
     | 'usb-attach'
     | 'usb-detach'
     | 'usb-boot'
+    | 'device-pair'
     | 'device-signing'
     | 'run-device'
     | 'clear-device-run'
@@ -82,6 +83,7 @@ const busyKeyStep: Record<string, string> = {
     attaching_usb: 'run-device',
     detaching_usb: 'run-device',
     listing_devices: 'run-device',
+    pairing_device: 'run-device',
     preparing_device_signing: 'run-device',
     running_on_device: 'run-device',
 };
@@ -105,6 +107,7 @@ export const busyKeyLabel: Record<string, string> = {
     attaching_usb: 'Attaching the iPhone',
     detaching_usb: 'Detaching the iPhone',
     listing_devices: 'Reading the phones the guest sees',
+    pairing_device: 'Pairing with the phone',
     preparing_device_signing: 'Preparing device signing',
     running_on_device: 'Running on the device',
 };
@@ -125,6 +128,7 @@ const operationStep: Partial<Record<OperationId, string>> = {
     'usb-attach': 'run-device',
     'usb-detach': 'run-device',
     'usb-boot': 'run-device',
+    'device-pair': 'run-device',
     'device-signing': 'run-device',
     'run-device': 'run-device',
 };
@@ -806,6 +810,12 @@ export function useMachinesStore() {
         detachUsb: (id: string) =>
             runOperation(id, 'usb-detach', () => useBackend().detachUsbDevice(id), {
                 finished: 'iPhone returned to this host. The app stays installed on it.',
+            }),
+        /** Runs the CoreDevice pairing; the phone shows Trust if it has not yet, so this waits. */
+        pairDevice: (id: string, udid: string) =>
+            runOperation(id, 'device-pair', () => useBackend().pairGuestDevice(id, udid), {
+                started: 'Pairing with the phone; tap Trust on it when it asks',
+                finished: 'Paired. The guest can now install and launch on the phone.',
             }),
         /** A probe like refreshMachine, not an operation: the drawer and rows do not react. */
         refreshDevices: async (id: string) => {

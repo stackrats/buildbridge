@@ -92,6 +92,8 @@ export interface Backend {
     ): Promise<T.MacBuilderView>;
     /** Asks the guest which phones it sees; the returned view carries the fresh list. */
     listGuestDevices(machineId: string): Promise<T.MacBuilderView>;
+    /** Pairs the guest with the phone; raises Trust on the phone when needed and waits for it. */
+    pairGuestDevice(machineId: string, udid: string): Promise<T.MacBuilderView>;
     prepareAppleDeviceSigning(
         machineId: string,
         udid: string,
@@ -240,6 +242,8 @@ async function createTauriBackend(): Promise<Backend> {
         setMachineBootUsb: (machineId, device) =>
             invoke('set_machine_boot_usb', { machineId, input: { device, confirmed: true } }),
         listGuestDevices: (machineId) => invoke('list_guest_devices', { machineId }),
+        pairGuestDevice: (machineId, udid) =>
+            invoke('pair_guest_device', { machineId, input: { udid } }),
         prepareAppleDeviceSigning: (machineId, udid, deviceName) =>
             invoke('prepare_apple_device_signing', {
                 machineId,

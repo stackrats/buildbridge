@@ -21,6 +21,8 @@ use crate::{
 /// inside a mebibyte, and anything larger is not a device list.
 const DEVICE_LIST_MAX_BYTES: usize = 1024 * 1024;
 const DEVICE_LIST_TIMEOUT_SECONDS: u32 = 10;
+/// Long enough to unlock the phone and tap Trust.
+const DEVICE_PAIR_TIMEOUT_SECONDS: u32 = 90;
 const NAME_MAX_CHARS: usize = 128;
 const MODEL_MAX_CHARS: usize = 64;
 
@@ -340,6 +342,54 @@ pub(crate) fn device_list_script(username: &str) -> String {
 }
 
 /// The phones the guest can see right now.
+/// The CoreDevice pairing. Tapping Trust on the phone establishes only the classic lockdown
+/// pairing; `devicectl` and Xcode need this second one, and the command raises the Trust prompt
+/// on the phone itself when that has not happened yet, so it is the one action the trust rung
+/// needs. Blocks until the phone answers or the timeout passes.
+pub(crate) fn device_pair_script(username: &str, udid: &str) -> String {
+    let developer_dir = format!("/Users/{username}/Applications/Xcode.app/Contents/Developer");
+
+    format!(
+        "set -u; export DEVELOPER_DIR={}; /usr/bin/xcrun devicectl manage pair --device {} --timeout {DEVICE_PAIR_TIMEOUT_SECONDS} 2>&1 | /usr/bin/tail -n 8",
+        shell_single_quote(&developer_dir),
+        shell_single_quote(udid)
+    )
+}
+
+/// Pairs the guest with one phone, then lists again so the caller sees the result.
+pub fn pair_guest_device(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+    udid: &str,
+) -> Result<Vec<GuestDevice>, ProviderError> {
+    validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
+    if !crate::valid_device_udid(udid) {
+        return Err(ProviderError::GuestBridge(
+            "the device identifier is not a UDID".to_string(),
+        ));
+    }
+    let output = run_guest_command_capped(
+        ssh_port,
+        username,
+        identity_path,
+        known_hosts_path,
+        &device_pair_script(username, udid),
+        DEVICE_LIST_MAX_BYTES,
+    )?;
+    if !output.contains("Paired with device") {
+        let reason = clean_output(output.as_bytes());
+        return Err(ProviderError::GuestBridge(if reason.is_empty() {
+            "the phone did not accept the pairing; unlock it and tap Trust when it asks".to_string()
+        } else {
+            format!("the phone did not accept the pairing: {reason}")
+        }));
+    }
+
+    list_guest_devices(ssh_port, username, identity_path, known_hosts_path)
+}
+
 pub fn list_guest_devices(
     ssh_port: u16,
     username: &str,
@@ -389,6 +439,21 @@ mod tests {
         ]
       }
     }"#;
+
+    #[test]
+    fn the_pairing_script_is_fixed_text_around_a_quoted_udid() {
+        let script = device_pair_script("john", "00008030-000614240A51802E");
+        assert!(script.contains(
+            "/usr/bin/xcrun devicectl manage pair --device '00008030-000614240A51802E' --timeout 90"
+        ));
+        assert!(script.contains(
+            "export DEVELOPER_DIR='/Users/john/Applications/Xcode.app/Contents/Developer'"
+        ));
+        assert!(
+            !script.contains("$("),
+            "nothing here is computed in the guest shell"
+        );
+    }
 
     #[test]
     fn devicectl_output_parses_into_bounded_guest_devices() {

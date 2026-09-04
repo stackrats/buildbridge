@@ -1246,6 +1246,19 @@ export function createMockBackend(): Backend {
                 return view(machine);
             });
         },
+        async pairGuestDevice(machineId, udid) {
+            const machine = find(machineId);
+            return busy(machine, 'Pairing with the phone', async () => {
+                await sleep(1500);
+                for (const device of machine.guestDevices) {
+                    if (device.udid === udid) {
+                        device.pairingState = 'paired';
+                        device.tunnelState = 'connected';
+                    }
+                }
+                return view(machine);
+            });
+        },
         async listGuestDevices(machineId) {
             const machine = find(machineId);
             await sleep(400);

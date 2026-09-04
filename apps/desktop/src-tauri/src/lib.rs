@@ -763,6 +763,12 @@ struct AttachUsbDeviceInput {
 /// recreate the container, so both are confirmed.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PairGuestDeviceInput {
+    udid: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SetBootUsbInput {
     #[serde(default)]
     device: Option<AttachUsbDeviceInput>,
@@ -1722,6 +1728,53 @@ fn clear_usb_attach_issue(app: &AppHandle, machine_id: &str) {
 
 /// Asks the guest which phones it sees and serves the answer from the view until the next
 /// listing. Holds the machine so the probe cannot interleave with a build.
+/// Pairs the guest with the phone. The command raises Trust on the phone if needed and waits
+/// for the answer, so this is what the trust rung's button does.
+#[tauri::command]
+async fn pair_guest_device(
+    app: AppHandle,
+    machine_id: String,
+    input: PairGuestDeviceInput,
+) -> Result<MacBuilderView, String> {
+    let paths = MachinePaths::resolve(&app, &machine_id)?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let access = load_mac_guest_access(&paths)?
+        .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
+    if !buildbridge_docker_osx::valid_device_udid(&input.udid) {
+        return Err("The device identifier is not a UDID.".to_string());
+    }
+    let current = build_mac_builder_view(&app, &paths).await?;
+    ensure_apple_project_guest_ready(&current)?;
+    let guard = begin_machine_operation(&app, &machine_id, "pairing_device")?;
+    let identity_path = paths.guest_identity();
+    let known_hosts_path = paths.known_hosts();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        buildbridge_docker_osx::pair_guest_device(
+            profile.ssh_port,
+            &access.username,
+            &identity_path,
+            &known_hosts_path,
+            &input.udid,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string());
+    drop(guard);
+    let devices = finish_operation(&cancel_probe, joined)?;
+    if let Ok(mut cache) = app.state::<AppState>().guest_devices.lock() {
+        cache.insert(machine_id.clone(), devices);
+    }
+
+    build_mac_builder_view(&app, &paths).await
+}
+
 #[tauri::command]
 async fn list_guest_devices(app: AppHandle, machine_id: String) -> Result<MacBuilderView, String> {
     let paths = MachinePaths::resolve(&app, &machine_id)?;
@@ -6065,6 +6118,7 @@ pub fn run() {
             set_machine_boot_usb,
             detach_usb_device,
             list_guest_devices,
+            pair_guest_device,
             prepare_apple_device_signing,
             run_apple_device_build,
             clear_apple_device_run,

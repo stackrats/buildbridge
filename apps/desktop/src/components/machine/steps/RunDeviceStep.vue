@@ -266,6 +266,15 @@ const primary = computed<Primary | null>(() => {
                 run: () => detach(),
             };
         case 'trust':
+            return {
+                label: 'Pair with the phone',
+                icon: Cable,
+                outline: false,
+                operation: 'device-pair',
+                disabledReason:
+                    needsLive() ?? (device.value?.udid ? null : 'The phone has no UDID yet'),
+                run: () => machines.pairDevice(id, device.value?.udid ?? ''),
+            };
         case 'developer-mode':
             return {
                 label: 'Refresh',
@@ -678,15 +687,10 @@ const runFacts = computed(() =>
                 reappears by itself, or detach to hand the port back.
             </Callout>
             <Callout v-if="readiness.substate === 'trust'" tone="neutral" title="On the phone">
-                Unlock it and tap Trust when it asks about this computer, then enter the passcode.
-                <template v-if="usb.attached && !usb.attached.enumerated">
-                    The guest has not listed the phone yet.
-                    {{
-                        usb.attached.issue ??
-                        'It can take a few seconds after attaching; unplugging and replugging helps.'
-                    }}
-                </template>
-                <template v-else>This refreshes by itself every few seconds.</template>
+                Press <b>Pair with the phone</b>, then unlock the phone and tap <b>Trust</b> when it
+                asks about this computer and enter the passcode. Trust alone gives the guest the
+                older pairing; the button adds the one <code>devicectl</code> and Xcode use, and
+                waits for your tap.
             </Callout>
             <Callout
                 v-if="readiness.substate === 'signing' && !readiness.canPrepareSigning"

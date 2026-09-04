@@ -23,7 +23,7 @@ mod usb;
 
 pub use device_run::{
     AppleDeviceRunPhase, AppleDeviceRunProgress, AppleDeviceRunResult, ConsoleEnd, DeviceSigning,
-    run_apple_device_build,
+    pair_guest_device, run_apple_device_build,
 };
 pub use device_run::{
     DeveloperModeState, GuestDevice, PairingState, TransportType, TunnelState, list_guest_devices,
