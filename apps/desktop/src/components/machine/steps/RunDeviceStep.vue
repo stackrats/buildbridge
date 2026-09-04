@@ -68,7 +68,6 @@ const running = computed(() => step.status === 'running');
 const lastLine = computed(() => session.deviceLog.at(-1)?.text ?? null);
 
 const stepOperations = new Set<OperationId>([
-    'open-inspector',
     'usb-rule',
     'usb-migrate',
     'usb-attach',
@@ -83,7 +82,6 @@ const failureTitle: Partial<Record<OperationId, string>> = {
     'usb-detach': 'The iPhone could not be detached',
     'device-signing': 'Device signing could not be prepared',
     'run-device': 'The device run failed',
-    'open-inspector': 'Safari could not be opened in the guest',
 };
 const failure = computed(() =>
     session.lastFailure && stepOperations.has(session.lastFailure.operation)
@@ -92,16 +90,23 @@ const failure = computed(() =>
 );
 
 // Web Inspector for the app on the phone lives in the guest's Safari, not here: BuildBridge
-// opens Safari with its Develop menu on and then says what to click. Kept while this panel is
-// open; the instructions are the same every time.
+// opens Safari with its Develop menu on and then says what to click. It is not a machine
+// operation — the time to inspect is while the run streams — so it keeps its own state here.
 const inspector = ref<SafariInspectorResult | null>(null);
+const inspecting = ref(false);
+const inspectorError = ref<string | null>(null);
 const showInspector = computed(
     () => readiness.value.substate === 'ready' && (run.value !== null || running.value),
 );
 async function openInspector(): Promise<void> {
-    const result = await machines.openSafariInspector(session.id);
-    if (result) {
-        inspector.value = result.inspector;
+    inspecting.value = true;
+    inspectorError.value = null;
+    try {
+        inspector.value = await machines.openSafariInspector(session.id);
+    } catch (error) {
+        inspectorError.value = error instanceof Error ? error.message : String(error);
+    } finally {
+        inspecting.value = false;
     }
 }
 
@@ -661,11 +666,11 @@ const runFacts = computed(() =>
                 v-if="showInspector"
                 variant="ghost"
                 size="sm"
-                :disabled="busy"
-                title="Opens Safari in the guest console with its Develop menu; the app's web view is listed there under the phone's name"
+                :disabled="inspecting"
+                title="Opens Safari in the guest console with its Develop menu; the app's web view is listed there under the phone's name. Works while the app runs."
                 @click="openInspector"
             >
-                <Spinner v-if="session.operation === 'open-inspector'" />
+                <Spinner v-if="inspecting" />
                 <Globe v-else class="h-3.5 w-3.5" />
                 Inspect in Safari
             </Button>
@@ -805,7 +810,14 @@ const runFacts = computed(() =>
             </Callout>
         </template>
 
-        <template v-if="run || inspector" #result>
+        <template v-if="run || inspector || inspectorError" #result>
+            <FailureBlock
+                v-if="inspectorError"
+                title="Safari could not be opened in the guest"
+                cause="Safari needs the guest's graphical session: log in on the machine's console window, then try again."
+                :diagnostic="inspectorError"
+                class="mb-3"
+            />
             <Callout
                 v-if="inspector"
                 tone="neutral"

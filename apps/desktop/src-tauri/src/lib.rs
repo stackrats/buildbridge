@@ -1874,6 +1874,8 @@ struct OpenSafariInspectorResult {
 
 /// Opens Safari in the guest for Web Inspector on the app running on the phone: the Develop
 /// menu is turned on where macOS lets it be set over SSH, and the result says whether it took.
+/// This takes no machine operation: it is one short guest command, and the moment it is wanted
+/// is while a device run holds the operation and streams the app's console.
 #[tauri::command]
 async fn open_safari_web_inspector(
     app: AppHandle,
@@ -1888,13 +1890,9 @@ async fn open_safari_web_inspector(
         .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
     let current = build_mac_builder_view(&app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
-    let guard = begin_machine_operation(&app, &machine_id, "opening_inspector")?;
     let identity_path = paths.guest_identity();
     let known_hosts_path = paths.known_hosts();
-    let scope = guard.scope();
-    let cancel_probe = Arc::clone(&scope);
-    let joined = tauri::async_runtime::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
+    let inspector = tauri::async_runtime::spawn_blocking(move || {
         buildbridge_docker_osx::open_safari_web_inspector(
             profile.ssh_port,
             &access.username,
@@ -1904,9 +1902,7 @@ async fn open_safari_web_inspector(
         .map_err(|error| error.to_string())
     })
     .await
-    .map_err(|error| error.to_string());
-    drop(guard);
-    let inspector = finish_operation(&cancel_probe, joined)?;
+    .map_err(|error| error.to_string())??;
 
     Ok(OpenSafariInspectorResult {
         view: build_mac_builder_view(&app, &paths).await?,

@@ -1263,13 +1263,11 @@ export function createMockBackend(): Backend {
         },
         async openSafariWebInspector(machineId) {
             const machine = find(machineId);
-            return busy(machine, 'Opening Safari in the guest', async () => {
-                await sleep(900);
-                return {
-                    view: view(machine),
-                    inspector: { developMenuEnabled: true, safariRestarted: false },
-                };
-            });
+            await sleep(900);
+            return {
+                view: view(machine),
+                inspector: { developMenuEnabled: true, safariRestarted: false },
+            };
         },
         async pairGuestDevice(machineId, udid) {
             const machine = find(machineId);

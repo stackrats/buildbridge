@@ -10,12 +10,11 @@ import { formatTime } from '../lib/format';
 import type { LogLine } from '../components/ui/LogView.vue';
 import { deriveJourney, summarizeJourney, type JourneyStep } from '../model/steps';
 import type {
-    ContainerRebuildProgress,
-    UsbAttachProgress,
     AdoptPodfileLockResult,
     AppleArchiveProgress,
     AppleDeviceRunProgress,
     AppleProjectProgress,
+    ContainerRebuildProgress,
     DeviceSigningProgress,
     DiskMigrationProgress,
     GuestOptimizationsView,
@@ -24,9 +23,11 @@ import type {
     MacBuilderConfig,
     MacBuilderView,
     MachineListView,
+    SafariInspectorResult,
     SigningProvisioningProgress,
-    XcodeImportProgress,
     UnsignedBuildTarget,
+    UsbAttachProgress,
+    XcodeImportProgress,
 } from '../types/backend';
 
 export type OperationId =
@@ -63,7 +64,6 @@ export type OperationId =
     | 'device-signing'
     | 'run-device'
     | 'clear-device-run'
-    | 'open-inspector'
     | 'adopt-lock';
 
 /** Maps the native busy key (see src-tauri/src/lib.rs) to the step it blocks. */
@@ -89,7 +89,6 @@ const busyKeyStep: Record<string, string> = {
     pairing_device: 'run-device',
     preparing_device_signing: 'run-device',
     running_on_device: 'run-device',
-    opening_inspector: 'run-device',
 };
 
 export const busyKeyLabel: Record<string, string> = {
@@ -115,7 +114,6 @@ export const busyKeyLabel: Record<string, string> = {
     pairing_device: 'Pairing with the phone',
     preparing_device_signing: 'Preparing device signing',
     running_on_device: 'Running on the device',
-    opening_inspector: 'Opening Safari in the guest',
 };
 
 /** What each operation this client starts is doing, for the header, the drawer bar and rows. */
@@ -153,7 +151,6 @@ export const operationLabel: Record<OperationId, string> = {
     'device-signing': 'Preparing device signing',
     'run-device': 'Running on the device',
     'clear-device-run': 'Clearing the last device run',
-    'open-inspector': 'Opening Safari in the guest',
     'adopt-lock': 'Adopting the guest Podfile.lock',
 };
 
@@ -185,7 +182,6 @@ const operationStep: Partial<Record<OperationId, string>> = {
     'device-pair': 'run-device',
     'device-signing': 'run-device',
     'run-device': 'run-device',
-    'open-inspector': 'run-device',
 };
 
 const LOG_LIMIT = 600;
@@ -996,14 +992,24 @@ export function useMachinesStore() {
                 }
                 return result;
             }),
-        /** Opens Safari in the guest with its Develop menu; the caller shows what to click. */
-        openSafariInspector: (id: string) =>
-            runOperation(id, 'open-inspector', () => useBackend().openSafariWebInspector(id), {
-                finished: (result) =>
-                    result.inspector.developMenuEnabled
-                        ? 'Safari is open in the guest console with its Develop menu on.'
-                        : 'Safari is open in the guest console; turn its Develop menu on in Safari › Settings › Advanced.',
-            }),
+        /**
+         * Opens Safari in the guest with its Develop menu; the caller shows what to click. Not an
+         * operation: it runs beside a streaming device run, which is when it is wanted, so the
+         * caller holds its own in-flight and error state. Throws with the reason.
+         */
+        openSafariInspector: async (id: string): Promise<SafariInspectorResult> => {
+            const target = session(id);
+            const result = await useBackend().openSafariWebInspector(id);
+            applyView(target, result.view);
+            note(
+                target,
+                result.inspector.developMenuEnabled
+                    ? 'Safari is open in the guest console with its Develop menu on.'
+                    : 'Safari is open in the guest console; turn its Develop menu on in Safari › Settings › Advanced.',
+                'success',
+            );
+            return result.inspector;
+        },
         clearDeviceRun: (id: string) =>
             runOperation(id, 'clear-device-run', () => useBackend().clearAppleDeviceRun(id), {
                 finished: 'Last device run cleared.',
