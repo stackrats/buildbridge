@@ -148,3 +148,79 @@ export function deviceWorkingSummary(readiness: DeviceReadiness): string {
             return 'Building, installing, and launching on the iPhone; console streaming';
     }
 }
+
+/** One row of the device step's check grid: a rung, whether it is passed, and one line of why. */
+export interface DeviceCheck {
+    label: string;
+    ok: boolean;
+    detail: string;
+}
+
+/**
+ * Every rung at once, for the grid under the device step. The ladder says what to do next;
+ * this says where the run stands, and it is derived from the same readiness so the two never
+ * disagree.
+ */
+export function deviceChecks(
+    view: MacBuilderView,
+    readiness: DeviceReadiness = deviceReadiness(view),
+): DeviceCheck[] {
+    const { usb } = view;
+    const rung = (needed: DeviceSubstate[]) => !needed.includes(readiness.substate);
+    const attachedOrLater: DeviceSubstate[] = [
+        'host-rule',
+        'container',
+        'plug-in',
+        'attach',
+        'unplugged',
+        'replug',
+    ];
+    return [
+        {
+            label: 'Host rule',
+            ok: rung(['host-rule']),
+            detail:
+                usb.host.rule === 'installed' ? usb.host.rulePath : 'lets usbmuxd release iPhones',
+        },
+        {
+            label: 'Container',
+            ok: rung(['host-rule', 'container']),
+            detail: usb.containerReady
+                ? 'disk on this host · USB access'
+                : (usb.containerIssue ?? 'needs USB access'),
+        },
+        {
+            // QEMU owning the port is not the same as the guest having the phone: a phone reset
+            // during the handover is still listed by QEMU, so this waits for the real thing.
+            label: 'Attached',
+            ok: rung(attachedOrLater) && (usb.attached?.enumerated ?? false),
+            detail: !readiness.hostDevice
+                ? 'plug the phone into this host'
+                : usb.attached && !usb.attached.enumerated
+                  ? 'held by QEMU, not yet seen by the guest'
+                  : `${readiness.hostDevice.product ?? 'phone'} on bus ${readiness.hostDevice.bus} port ${readiness.hostDevice.port}`,
+        },
+        {
+            label: 'Trusted',
+            ok: rung([...attachedOrLater, 'trust']),
+            detail: readiness.device
+                ? `${readiness.device.name}${readiness.device.osVersion ? ` · iOS ${readiness.device.osVersion}` : ''}`
+                : 'tap Trust on the phone',
+        },
+        {
+            label: 'Signing',
+            ok: readiness.signingReady,
+            detail: readiness.signingReady
+                ? 'development profile lists this phone'
+                : 'register the phone at Apple',
+        },
+        {
+            label: 'Developer Mode',
+            ok: readiness.device?.developerMode === 'enabled',
+            detail:
+                readiness.device?.developerMode === 'enabled'
+                    ? 'enabled'
+                    : 'Settings › Privacy & Security',
+        },
+    ];
+}

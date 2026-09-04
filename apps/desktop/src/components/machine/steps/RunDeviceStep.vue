@@ -24,7 +24,7 @@ import { formatDate, percent, shortHash } from '../../../lib/format';
 import type { SafariInspectorResult } from '../../../types/backend';
 import type { ListboxOption } from '../../../lib/listbox';
 import { isLive } from '../../../lib/status';
-import { deviceReadiness, type DeviceSubstate } from '../../../model/device';
+import { deviceChecks, deviceReadiness, type DeviceSubstate } from '../../../model/device';
 import {
     devicePhaseLabel,
     deviceSigningPhaseLabel,
@@ -493,68 +493,7 @@ const recipe = computed(() => [
 
 const passedChecks = computed(() => checks.value.filter((check) => check.ok).length);
 
-const checks = computed(() => {
-    const r = readiness.value;
-    const rung = (needed: DeviceSubstate[]) => !needed.includes(r.substate);
-    return [
-        {
-            label: 'Host rule',
-            ok: rung(['host-rule']),
-            detail:
-                usb.value.host.rule === 'installed'
-                    ? usb.value.host.rulePath
-                    : 'lets usbmuxd release iPhones',
-        },
-        {
-            label: 'Container',
-            ok: rung(['host-rule', 'container']),
-            detail: usb.value.containerReady
-                ? 'disk on this host · USB access'
-                : (usb.value.containerIssue ?? 'needs USB access'),
-        },
-        {
-            // QEMU owning the port is not the same as the guest having the phone: a phone reset
-            // during the handover is still listed by QEMU, so this waits for the real thing.
-            label: 'Attached',
-            ok:
-                rung(['host-rule', 'container', 'plug-in', 'attach', 'unplugged', 'replug']) &&
-                (usb.value.attached?.enumerated ?? false),
-            detail: !r.hostDevice
-                ? 'plug the phone into this host'
-                : usb.value.attached && !usb.value.attached.enumerated
-                  ? 'held by QEMU, not yet seen by the guest'
-                  : `${r.hostDevice.product ?? 'phone'} on bus ${r.hostDevice.bus} port ${r.hostDevice.port}`,
-        },
-        {
-            label: 'Trusted',
-            ok: rung([
-                'host-rule',
-                'container',
-                'plug-in',
-                'attach',
-                'unplugged',
-                'replug',
-                'trust',
-            ]),
-            detail: r.device
-                ? `${r.device.name}${r.device.osVersion ? ` · iOS ${r.device.osVersion}` : ''}`
-                : 'tap Trust on the phone',
-        },
-        {
-            label: 'Signing',
-            ok: r.signingReady,
-            detail: r.signingReady
-                ? 'development profile lists this phone'
-                : 'register the phone at Apple',
-        },
-        {
-            label: 'Developer Mode',
-            ok: r.device?.developerMode === 'enabled',
-            detail:
-                r.device?.developerMode === 'enabled' ? 'enabled' : 'Settings › Privacy & Security',
-        },
-    ];
-});
+const checks = computed(() => deviceChecks(view.value, readiness.value));
 
 const runFacts = computed(() =>
     run.value

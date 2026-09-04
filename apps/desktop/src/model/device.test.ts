@@ -8,6 +8,7 @@ import type {
     SigningProvisioningResult,
 } from '../types/backend';
 import {
+    deviceChecks,
     deviceNextSummary,
     deviceReadiness,
     deviceSigningReady,
@@ -203,5 +204,48 @@ describe('deviceSigningReady', () => {
         const appStoreOnly = signing();
         appStoreOnly.profiles[0]!.kind = 'app_store';
         expect(deviceSigningReady(appStoreOnly, UDID)).toBe(false);
+    });
+});
+
+describe('device checks', () => {
+    it('passes every rung below the current one and names why the rest wait', () => {
+        const missingRule = usbView({ host: { ...usbView({}).usb.host, rule: 'missing' } });
+        const checks = deviceChecks(missingRule);
+
+        expect(checks.map((check) => check.label)).toEqual([
+            'Host rule',
+            'Container',
+            'Attached',
+            'Trusted',
+            'Signing',
+            'Developer Mode',
+        ]);
+        expect(checks.every((check) => !check.ok)).toBe(true);
+        expect(checks[2]?.detail).toBe('plug the phone into this host');
+    });
+
+    it('treats a phone QEMU holds but the guest has not seen as not attached', () => {
+        const held = usbView({
+            host: { ...usbView({}).usb.host, devices: [hostDevice()] },
+            attached: { bus: 1, port: '3', enumerated: false, issue: null },
+        });
+        const attached = deviceChecks(held).find((check) => check.label === 'Attached')!;
+
+        expect(attached.ok).toBe(false);
+        expect(attached.detail).toBe('held by QEMU, not yet seen by the guest');
+    });
+
+    it('passes all six once the phone is ready', () => {
+        const ready = usbView(
+            {
+                host: { ...usbView({}).usb.host, devices: [hostDevice()] },
+                attached: { bus: 1, port: '3', enumerated: true, issue: null },
+            },
+            { guest: { devices: [guestDevice()] } as MacBuilderView['guest'], signing: signing() },
+        );
+        const readiness = deviceReadiness(ready);
+
+        expect(readiness.substate).toBe('ready');
+        expect(deviceChecks(ready, readiness).every((check) => check.ok)).toBe(true);
     });
 });
