@@ -233,7 +233,16 @@ enum DeviceCommand {
 #[derive(Subcommand)]
 enum EnvCommand {
     List,
-    Attach { machine: String, set: String },
+    /// Change values in a stored set: KEY=VALUE pairs; every other variable keeps its value.
+    Set {
+        set: String,
+        #[arg(required = true, value_name = "KEY=VALUE")]
+        variables: Vec<String>,
+    },
+    Attach {
+        machine: String,
+        set: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -353,6 +362,58 @@ where
             }
         }
     }
+}
+
+/// The complete save payload for one stored set with some values changed: the engine removes
+/// any key it is not handed, so every stored variable is listed, a missing value keeping the one
+/// in the vault and secrets staying secret.
+async fn env_set_update(
+    engine: &Engine,
+    set_id: &str,
+    changes: &[(String, String)],
+) -> Result<Value, String> {
+    let sets = serde_json::to_value(buildbridge_engine::list_env_sets(engine).await?)
+        .map_err(|error| error.to_string())?;
+    let stored = sets
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|set| set["id"] == set_id)
+        .ok_or_else(|| format!("No env set is stored as {set_id}; `env list` names them."))?;
+    let changed = |key: &str| {
+        changes
+            .iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, value)| value.clone())
+    };
+    let mut variables = stored["variables"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|variable| {
+            let key = text(&variable["key"]);
+            json!({ "key": key, "value": changed(&key), "secret": false })
+        })
+        .chain(
+            stored["secretKeys"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|key| {
+                    let key = text(key);
+                    json!({ "key": key, "value": changed(&key), "secret": true })
+                }),
+        )
+        .collect::<Vec<_>>();
+    for (key, value) in changes {
+        if !variables
+            .iter()
+            .any(|variable| variable["key"] == key.as_str())
+        {
+            variables.push(json!({ "key": key, "value": value, "secret": false }));
+        }
+    }
+    Ok(json!({ "setId": set_id, "name": stored["name"], "variables": variables }))
 }
 
 fn password_from_stdin(enabled: bool) -> Result<Option<String>, String> {
@@ -1053,6 +1114,26 @@ async fn run(cli: Cli) -> Result<(), String> {
                 table(&["id", "name", "variables", "secrets"], rows);
             }
         }),
+        Command::Env(EnvCommand::Set { set, variables }) => {
+            let changes = variables
+                .iter()
+                .map(|pair| {
+                    pair.split_once('=')
+                        .map(|(key, value)| (key.trim().to_string(), value.to_string()))
+                        .ok_or_else(|| format!("{pair} is not KEY=VALUE."))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let payload = env_set_update(engine, &set, &changes).await?;
+            report(
+                json,
+                &e::save_env_set(engine, input(payload)?).await?,
+                |_| {
+                    for (key, value) in &changes {
+                        println!("{key}={value}");
+                    }
+                },
+            )
+        }
         Command::Env(EnvCommand::Attach { machine, set }) => report(
             json,
             &e::attach_env_set(engine, machine, input(json!({ "setId": set }))?).await?,

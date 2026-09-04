@@ -506,9 +506,27 @@ pub struct StoredAppleDeviceRun {
     pub(crate) finished_at_epoch_seconds: u64,
 }
 
+/// The phone as the view last heard of it from the guest, by UDID.
+fn listed_guest_device(
+    view: &MacBuilderView,
+    udid: &str,
+) -> Option<buildbridge_docker_osx::GuestDevice> {
+    view.guest
+        .devices
+        .iter()
+        .find(|device| {
+            device
+                .udid
+                .as_deref()
+                .is_some_and(|listed| listed.eq_ignore_ascii_case(udid))
+        })
+        .cloned()
+}
+
 /// Builds the Debug configuration for one phone, installs and launches it, and streams its
 /// console until the session ends. A Stop while the app runs is the normal end and the run is
-/// retained; a failure before launch is kept as the step's diagnostic.
+/// retained; a failure before launch is kept as the step's diagnostic. A process that has not
+/// listed the guest's phones yet asks once here, so the terminal can run without listing first.
 pub async fn run_apple_device_build(
     app: &Engine,
     machine_id: String,
@@ -550,20 +568,16 @@ pub async fn run_apple_device_build(
         .development_identity
         .clone()
         .ok_or_else(|| "The kit has no development identity provisioned.".to_string())?;
-    let device = current
-        .guest
-        .devices
-        .iter()
-        .find(|device| {
-            device
-                .udid
-                .as_deref()
-                .is_some_and(|listed| listed.eq_ignore_ascii_case(&udid))
-        })
-        .cloned()
-        .ok_or_else(|| {
-            "The guest does not list that iPhone. Refresh the devices and try again.".to_string()
-        })?;
+    let device = match listed_guest_device(&current, &udid) {
+        Some(device) => device,
+        None => {
+            let refreshed = list_guest_devices(app, machine_id.clone()).await?;
+            listed_guest_device(&refreshed, &udid).ok_or_else(|| {
+                "The guest does not list that iPhone. Refresh the devices and try again."
+                    .to_string()
+            })?
+        }
+    };
     if !device.ready {
         return Err(device
             .issue
