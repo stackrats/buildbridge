@@ -330,6 +330,8 @@ export interface StoredAppleWorkspace {
     lastNativeLockUpdated: boolean;
     /** Which SDK the last unsigned build compiled against; null before the choice existed. */
     lastBuildTarget: UnsignedBuildTarget | null;
+    /** The App target's Debug identifier once registered at Apple, so the debug build installs beside the store build. */
+    debugBundleIdentifier?: string | null;
     /** What the last snapshot came from: the approved folder, or a fetched revision of it. */
     lastSource: WorkspaceSource | null;
 }

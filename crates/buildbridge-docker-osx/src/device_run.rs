@@ -871,6 +871,45 @@ PRODUCT_BUNDLE_IDENTIFIER = $(BUILDBRIDGE_BUNDLE_$(TARGET_NAME):default=$(inheri
     xcconfig
 }
 
+/// The bundle identifier the App target's Debug configuration builds, read from the guest's
+/// build settings. A project often gives Debug its own, suffixed identifier so a debug build
+/// can sit beside the store build on one phone; the device step registers that one at Apple.
+pub fn resolve_debug_bundle_identifier(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+    scheme: &str,
+) -> Result<String, ProviderError> {
+    validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
+    if !valid_apple_scheme(scheme) {
+        return Err(ProviderError::GuestBridge(
+            "the stored Xcode scheme is missing or invalid".to_string(),
+        ));
+    }
+    let guest_home = format!("/Users/{username}");
+    let xcodebuild =
+        format!("{guest_home}/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild");
+    let workspace_root = format!("{guest_home}/BuildBridge/workspaces/active");
+    let workspace = format!("{workspace_root}/ios/App/App.xcworkspace");
+    let derived_data = format!("{workspace_root}/.buildbridge/DerivedData");
+    let settings = run_guest_command(
+        ssh_port,
+        username,
+        identity_path,
+        known_hosts_path,
+        &format!(
+            "set -o pipefail; {} -workspace {} -scheme {} -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath {} -showBuildSettings | /usr/bin/awk '$1 == \"TARGET_NAME\" || $1 == \"PRODUCT_BUNDLE_IDENTIFIER\" || $1 == \"CODESIGNING_FOLDER_PATH\" {{ print }}'",
+            shell_single_quote(&xcodebuild),
+            shell_single_quote(&workspace),
+            shell_single_quote(scheme),
+            shell_single_quote(&derived_data),
+        ),
+    )?;
+
+    Ok(parse_device_build_target(&settings, &derived_data)?.bundle_identifier)
+}
+
 pub(crate) fn parse_device_build_target(
     output: &str,
     derived_data: &str,

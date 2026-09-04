@@ -451,7 +451,13 @@ const recipe = computed(() => [
         value: signing.value?.developmentIdentity?.identityName ?? 'no development identity yet',
     },
     { label: 'Profile', value: developmentProfile.value?.uuid ?? null, mono: true },
-    { label: 'Bundle identifier', value: workspace.value?.bundleIdentifier, mono: true },
+    {
+        label: workspace.value?.debugBundleIdentifier
+            ? 'Debug bundle identifier'
+            : 'Bundle identifier',
+        value: workspace.value?.debugBundleIdentifier ?? workspace.value?.bundleIdentifier,
+        mono: true,
+    },
     { label: 'Team', value: workspace.value?.developmentTeam, mono: true },
     {
         label: 'USB',
@@ -869,7 +875,10 @@ const runFacts = computed(() =>
                 yearly allowance of 100 iPhones and cannot be undone here. Creates an Apple
                 Development identity if the kit has none, creates a development profile for the
                 bundle identifier listing the phone, and provisions both into the guest keychain
-                next to the distribution identity. Nothing at Apple is revoked.
+                next to the distribution identity. Nothing at Apple is revoked. If the project's
+                Debug configuration carries its own bundle identifier, that App ID is registered at
+                Apple too, with the main app's capabilities copied onto it, so the debug build
+                installs beside the store build rather than replacing it.
             </p>
         </ConfirmDialog>
 

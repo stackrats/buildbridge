@@ -23,7 +23,7 @@ mod usb;
 
 pub use device_run::{
     AppleDeviceRunPhase, AppleDeviceRunProgress, AppleDeviceRunResult, ConsoleEnd, DeviceSigning,
-    pair_guest_device, run_apple_device_build,
+    pair_guest_device, resolve_debug_bundle_identifier, run_apple_device_build,
 };
 pub use device_run::{
     DeveloperModeState, GuestDevice, PairingState, TransportType, TunnelState, list_guest_devices,
@@ -479,6 +479,9 @@ pub struct SigningMaterial<'a> {
     pub development_certificate: Option<(&'a Path, &'a str)>,
     pub profile_paths: &'a [PathBuf],
     pub keychain_password: &'a str,
+    /// Identifiers besides the approved one that a profile in the kit may be for: the
+    /// project's own Debug identifier, once the device step has registered it.
+    pub extra_bundle_identifiers: &'a [String],
 }
 
 /// Whether the helper creates the keychain or adds to the one a previous import created.
@@ -2614,10 +2617,17 @@ where
                     profile.uuid, profile.team_identifier, development_team
                 )));
             }
-            if !profile_allows_bundle(&profile.application_identifier, bundle_identifier) {
+            let accepted = std::iter::once(bundle_identifier)
+                .chain(material.extra_bundle_identifiers.iter().map(String::as_str));
+            if !accepted
+                .clone()
+                .any(|bundle| profile_allows_bundle(&profile.application_identifier, bundle))
+            {
                 return Err(ProviderError::GuestBridge(format!(
                     "provisioning profile {} allows {}, not the project bundle identifier {}",
-                    profile.uuid, profile.application_identifier, bundle_identifier
+                    profile.uuid,
+                    profile.application_identifier,
+                    accepted.collect::<Vec<_>>().join(" or ")
                 )));
             }
             // Development profiles carry the development certificate; App Store, ad hoc and
@@ -5377,10 +5387,11 @@ pub fn classify_profile(
 fn profile_matches_project(
     profile: &ProvisioningProfileSummary,
     signing: &SigningProvisioningResult,
+    bundle_identifier: &str,
 ) -> bool {
     valid_profile_uuid(&profile.uuid)
         && profile.team_identifier == signing.development_team
-        && profile_allows_bundle(&profile.application_identifier, &signing.bundle_identifier)
+        && profile_allows_bundle(&profile.application_identifier, bundle_identifier)
 }
 
 /// The profile an App Store archive signs with: the project's, carrying the distribution
@@ -5392,7 +5403,7 @@ pub fn select_app_store_profile(
     let identity = signing.distribution_identity.as_ref()?;
     signing.profiles.iter().find(|profile| {
         matches!(profile.kind, Some(ProfileKind::AppStore) | None)
-            && profile_matches_project(profile, signing)
+            && profile_matches_project(profile, signing, &signing.bundle_identifier)
             && profile
                 .developer_certificate_sha256
                 .iter()
@@ -5400,16 +5411,18 @@ pub fn select_app_store_profile(
     })
 }
 
-/// The profile a device build signs with: a development profile carrying the development
-/// certificate and listing the phone.
+/// The profile a device build signs with: a development profile for the identifier the Debug
+/// build carries — a project's Debug configuration often has its own, suffixed one — carrying
+/// the development certificate and listing the phone.
 pub fn select_development_profile<'a>(
     signing: &'a SigningProvisioningResult,
+    bundle_identifier: &str,
     udid: &str,
 ) -> Option<&'a ProvisioningProfileSummary> {
     let identity = signing.development_identity.as_ref()?;
     signing.profiles.iter().find(|profile| {
         profile.kind == Some(ProfileKind::Development)
-            && profile_matches_project(profile, signing)
+            && profile_matches_project(profile, signing, bundle_identifier)
             && profile
                 .developer_certificate_sha256
                 .iter()

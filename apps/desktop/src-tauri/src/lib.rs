@@ -668,6 +668,11 @@ struct StoredAppleWorkspace {
     /// Which SDK the last unsigned build compiled against; None on records from before the choice.
     #[serde(default)]
     last_build_target: Option<UnsignedBuildTarget>,
+    /// The identifier the App target's Debug configuration builds, once the device step has
+    /// registered it at Apple; the device build is signed for it and installs beside the store
+    /// build. None until then, or when it is the approved identifier.
+    #[serde(default)]
+    debug_bundle_identifier: Option<String>,
     /// What the last snapshot was taken from: the approved folder as it was, or a checked-out
     /// revision of it requested by a remote build.
     #[serde(default)]
@@ -3539,6 +3544,12 @@ async fn provision_with_kit(
     let keychain_password = secrets.guest_keychain_password.ok_or_else(|| {
         "Store a dedicated guest keychain password in the operating-system vault first.".to_string()
     })?;
+    let extra_bundle_identifiers: Vec<String> = workspace
+        .debug_bundle_identifier
+        .iter()
+        .filter(|debug| *debug != &bundle_identifier)
+        .cloned()
+        .collect();
     let identity_path = paths.guest_identity();
     let known_hosts_path = paths.known_hosts();
 
@@ -3575,6 +3586,7 @@ async fn provision_with_kit(
                 .map(|(path, password)| (path.as_path(), password.as_str())),
             profile_paths: &profile_paths,
             keychain_password: &keychain_password,
+            extra_bundle_identifiers: &extra_bundle_identifiers,
         };
         buildbridge_docker_osx::provision_signing(
             &material,
@@ -3665,7 +3677,7 @@ async fn prepare_apple_device_signing(
     apple_api::validate_device_udid(&udid)?;
     let device_name = apple_api::validate_device_name(&input.device_name)?;
     let paths = MachinePaths::resolve(&app, &machine_id)?;
-    let workspace = load_apple_workspace(&paths)?
+    let mut workspace = load_apple_workspace(&paths)?
         .ok_or_else(|| "Approve and verify an Apple project first.".to_string())?;
     if !workspace.last_build_succeeded {
         return Err("Complete the unsigned project test build first.".to_string());
@@ -3697,10 +3709,46 @@ async fn prepare_apple_device_signing(
         );
     }
 
+    // The identifier the Debug build carries, which is what its profile must be for. A project
+    // often gives Debug its own suffixed identifier so both builds fit on one phone.
+    let access = load_mac_guest_access(&paths)?
+        .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
+    let profile = machines::load_registry(&app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    let device_bundle_identifier = {
+        let identity_path = paths.guest_identity();
+        let known_hosts_path = paths.known_hosts();
+        let scheme = workspace.scheme.clone();
+        let ssh_port = profile.ssh_port;
+        let username = access.username.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            buildbridge_docker_osx::resolve_debug_bundle_identifier(
+                ssh_port,
+                &username,
+                &identity_path,
+                &known_hosts_path,
+                &scheme,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())??
+    };
+    if device_bundle_identifier != bundle_identifier {
+        apple_api::validate_bundle_identifier(&device_bundle_identifier)?;
+    }
+
     // Already prepared for this phone: nothing to do beyond confirming the registration.
     if kit.development_certificate_path.is_some()
         && current.signing.as_ref().is_some_and(|signing| {
-            buildbridge_docker_osx::select_development_profile(signing, &udid).is_some()
+            buildbridge_docker_osx::select_development_profile(
+                signing,
+                &device_bundle_identifier,
+                &udid,
+            )
+            .is_some()
         })
     {
         let registered =
@@ -3775,6 +3823,44 @@ async fn prepare_apple_device_signing(
             apple_api::register_device(&key_id, &issuer_id, &private_key, &udid, &device_name)
                 .await?;
 
+        if device_bundle_identifier != bundle_identifier {
+            report(
+                DeviceSigningPhase::CheckingProfiles,
+                &format!(
+                    "Registering the Debug identifier {device_bundle_identifier} at Apple with the main app's capabilities"
+                ),
+            );
+            let ensured = apple_api::ensure_bundle_id(
+                &key_id,
+                &issuer_id,
+                &private_key,
+                &device_bundle_identifier,
+                &format!("{} Debug", workspace.name),
+            )
+            .await?;
+            if ensured.created {
+                let main = apple_api::ensure_bundle_id(
+                    &key_id,
+                    &issuer_id,
+                    &private_key,
+                    &bundle_identifier,
+                    &workspace.name,
+                )
+                .await?;
+                apple_api::copy_bundle_id_capabilities(
+                    &key_id,
+                    &issuer_id,
+                    &private_key,
+                    &main.id,
+                    &ensured.id,
+                )
+                .await?;
+            }
+            if workspace.debug_bundle_identifier.as_deref() != Some(&device_bundle_identifier) {
+                workspace.debug_bundle_identifier = Some(device_bundle_identifier.clone());
+                save_apple_workspace(&paths, &workspace)?;
+            }
+        }
         report(
             DeviceSigningPhase::CheckingProfiles,
             "Checking the team's development profiles for this phone",
@@ -3783,7 +3869,7 @@ async fn prepare_apple_device_signing(
             &key_id,
             &issuer_id,
             &private_key,
-            &bundle_identifier,
+            &device_bundle_identifier,
             &certificate.id,
             &udid,
         )
@@ -3814,7 +3900,7 @@ async fn prepare_apple_device_signing(
                     &key_id,
                     &issuer_id,
                     &private_key,
-                    &bundle_identifier,
+                    &device_bundle_identifier,
                     &certificate.id,
                     &device_ids,
                 )
@@ -3860,7 +3946,12 @@ async fn prepare_apple_device_signing(
     );
     let view = provision_with_kit(&app, &machine_id, kit).await?;
     let ready = view.signing.as_ref().is_some_and(|signing| {
-        buildbridge_docker_osx::select_development_profile(signing, &udid).is_some()
+        buildbridge_docker_osx::select_development_profile(
+            signing,
+            &device_bundle_identifier,
+            &udid,
+        )
+        .is_some()
     });
     if !ready {
         return Err(
@@ -3937,9 +4028,16 @@ async fn run_apple_device_build(
         .signing
         .clone()
         .ok_or_else(|| "Provision and verify signing in macOS first.".to_string())?;
-    let device_profile = buildbridge_docker_osx::select_development_profile(&signing, &udid)
-        .cloned()
-        .ok_or_else(|| "Prepare signing for this iPhone first.".to_string())?;
+    let device_profile = buildbridge_docker_osx::select_development_profile(
+        &signing,
+        workspace
+            .debug_bundle_identifier
+            .as_deref()
+            .unwrap_or(&signing.bundle_identifier),
+        &udid,
+    )
+    .cloned()
+    .ok_or_else(|| "Prepare signing for this iPhone first.".to_string())?;
     let identity = signing
         .development_identity
         .clone()
@@ -5647,6 +5745,7 @@ fn inspect_apple_workspace(path: &str) -> Result<StoredAppleWorkspace, String> {
         last_xcode_version: None,
         last_native_lock_updated: false,
         last_build_target: None,
+        debug_bundle_identifier: None,
         last_source: None,
     })
 }

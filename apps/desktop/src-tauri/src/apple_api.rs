@@ -635,6 +635,207 @@ pub(crate) fn validate_device_name(name: &str) -> Result<String, String> {
 
 /// Registers a phone with the team, or finds it if it is already there. Registration counts
 /// against Apple's yearly allowance and cannot be undone here, so the caller confirms first.
+const APP_STORE_CONNECT_BUNDLE_ID_CAPABILITIES_URL: &str =
+    "https://api.appstoreconnect.apple.com/v1/bundleIdCapabilities";
+
+/// A Developer Bundle ID the device step made sure exists, and whether it made it.
+#[derive(Debug, Clone)]
+pub(crate) struct EnsuredBundleId {
+    pub(crate) id: String,
+    pub(crate) created: bool,
+}
+
+/// A bundle identifier as Apple accepts one: reverse-DNS characters only. Anything else is
+/// refused before it becomes a request.
+pub(crate) fn validate_bundle_identifier(identifier: &str) -> Result<(), String> {
+    let valid = !identifier.is_empty()
+        && identifier.len() <= 255
+        && identifier
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-'));
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("{identifier} is not a bundle identifier."))
+    }
+}
+
+/// Finds the Developer Bundle ID for an exact identifier, or registers it. Registration is a
+/// new resource at Apple and revokes nothing; the caller confirms it, and it happens once.
+pub(crate) async fn ensure_bundle_id(
+    key_id: &str,
+    issuer_id: &str,
+    private_key: &str,
+    identifier: &str,
+    name: &str,
+) -> Result<EnsuredBundleId, String> {
+    validate_bundle_identifier(identifier)?;
+    let name = validate_device_name(name)?;
+    let now = unix_timestamp()?;
+    let token = create_token(key_id, issuer_id, private_key, now)?;
+    let client = api_client()?;
+
+    let (bundle, accessible, issue, _) = fetch_bundle_id(&client, &token, identifier).await?;
+    if !accessible {
+        return Err(issue.unwrap_or_else(|| {
+            "The Team key cannot access Developer provisioning resources.".to_string()
+        }));
+    }
+    // The lookup falls back to any bundle ID for an app; only an exact match counts here.
+    if let Some(bundle) = bundle.filter(|bundle| bundle.attributes.identifier == identifier) {
+        return Ok(EnsuredBundleId {
+            id: bundle.id,
+            created: false,
+        });
+    }
+
+    let response = client
+        .post(APP_STORE_CONNECT_BUNDLE_IDS_URL)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "data": {
+                "type": "bundleIds",
+                "attributes": { "identifier": identifier, "name": name, "platform": "IOS" }
+            }
+        }))
+        .send()
+        .await
+        .map_err(|error| connection_error("bundle ID registration", &error))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Could not read Apple's bundle ID response: {error}"))?;
+    if status == StatusCode::CREATED {
+        #[derive(Deserialize)]
+        struct Created {
+            data: BundleIdResource,
+        }
+        let created: Created = serde_json::from_str(&body).map_err(|_| {
+            "Apple registered the bundle ID but returned an unreadable response.".to_string()
+        })?;
+        if created.data.attributes.identifier != identifier {
+            return Err(
+                "Apple registered a bundle ID but returned a different identifier; check Identifiers in the developer portal."
+                    .to_string(),
+            );
+        }
+        return Ok(EnsuredBundleId {
+            id: created.data.id,
+            created: true,
+        });
+    }
+    if matches!(
+        status,
+        StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY
+    ) && let (Some(bundle), _, _, _) = fetch_bundle_id(&client, &token, identifier).await?
+        && bundle.attributes.identifier == identifier
+    {
+        return Ok(EnsuredBundleId {
+            id: bundle.id,
+            created: false,
+        });
+    }
+
+    Err(apple_error_message(status, &body, "bundle ID registration"))
+}
+
+#[derive(Debug, Deserialize)]
+struct BundleIdCapabilitiesResponse {
+    data: Vec<BundleIdCapabilityResource>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BundleIdCapabilityResource {
+    attributes: BundleIdCapabilityAttributes,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BundleIdCapabilityAttributes {
+    capability_type: Option<String>,
+    #[serde(default)]
+    settings: Option<serde_json::Value>,
+}
+
+/// Enables on one bundle ID every capability another has, with the same settings, so a Debug
+/// build carries the entitlements the main app does. Capabilities Apple grants every App ID by
+/// default answer with a conflict, which is not a failure. Returns what was enabled.
+pub(crate) async fn copy_bundle_id_capabilities(
+    key_id: &str,
+    issuer_id: &str,
+    private_key: &str,
+    from_bundle_id: &str,
+    to_bundle_id: &str,
+) -> Result<Vec<String>, String> {
+    validate_resource_id(from_bundle_id, "The source bundle ID is not valid.")?;
+    validate_resource_id(to_bundle_id, "The target bundle ID is not valid.")?;
+    let now = unix_timestamp()?;
+    let token = create_token(key_id, issuer_id, private_key, now)?;
+    let client = api_client()?;
+
+    let response = client
+        .get(format!(
+            "{APP_STORE_CONNECT_BUNDLE_IDS_URL}/{from_bundle_id}/bundleIdCapabilities"
+        ))
+        .bearer_auth(&token)
+        .query(&[("limit", "200")])
+        .send()
+        .await
+        .map_err(|error| connection_error("bundle ID capabilities", &error))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Could not read Apple's capabilities response: {error}"))?;
+    if !status.is_success() {
+        return Err(apple_error_message(status, &body, "bundle ID capabilities"));
+    }
+    let listed: BundleIdCapabilitiesResponse = serde_json::from_str(&body)
+        .map_err(|_| "Apple returned unreadable bundle ID capabilities.".to_string())?;
+
+    let mut enabled = Vec::new();
+    for capability in listed.data {
+        let Some(capability_type) = capability.attributes.capability_type else {
+            continue;
+        };
+        let mut attributes = serde_json::json!({ "capabilityType": capability_type });
+        if let Some(settings) = capability
+            .attributes
+            .settings
+            .filter(|value| !value.is_null())
+        {
+            attributes["settings"] = settings;
+        }
+        let response = client
+            .post(APP_STORE_CONNECT_BUNDLE_ID_CAPABILITIES_URL)
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "data": {
+                    "type": "bundleIdCapabilities",
+                    "attributes": attributes,
+                    "relationships": {
+                        "bundleId": { "data": { "type": "bundleIds", "id": to_bundle_id } }
+                    }
+                }
+            }))
+            .send()
+            .await
+            .map_err(|error| connection_error("bundle ID capability", &error))?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        match status {
+            StatusCode::CREATED | StatusCode::OK => enabled.push(capability_type),
+            StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY => {}
+            _ => {
+                return Err(apple_error_message(status, &body, "bundle ID capability"));
+            }
+        }
+    }
+
+    Ok(enabled)
+}
+
 pub(crate) async fn register_device(
     key_id: &str,
     issuer_id: &str,
