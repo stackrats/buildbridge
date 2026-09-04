@@ -80,6 +80,8 @@ export const xcodePhaseLabel: Record<XcodeImportPhase, string> = {
 };
 
 export const signingPhaseLabel: Record<SigningProvisioningPhase, string> = {
+    creating_certificate: 'Creating the distribution certificate at Apple',
+    creating_profile: 'Finding or creating the App Store profile at Apple',
     preparing: 'Preparing',
     transferring: 'Transferring signing files',
     importing_certificate: 'Importing the certificate',

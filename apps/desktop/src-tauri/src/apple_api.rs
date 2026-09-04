@@ -1130,6 +1130,76 @@ pub(crate) async fn find_development_profile(
     })
 }
 
+/// The team's usable App Store profiles for a bundle, split by whether they list one
+/// certificate: `matching` is what provisioning downloads; `other_usable` names the live
+/// profiles for other certificates, which are why a new one cannot simply be created (Apple keeps
+/// one active App Store profile per bundle, and BuildBridge never replaces a live profile it did
+/// not make).
+#[derive(Debug, Default)]
+pub(crate) struct AppStoreProfileSearch {
+    pub(crate) matching: Option<AppleProvisioningProfileSummary>,
+    pub(crate) other_usable: Vec<String>,
+}
+
+pub(crate) async fn find_app_store_profile(
+    key_id: &str,
+    issuer_id: &str,
+    private_key: &str,
+    bundle_identifier: &str,
+    certificate_id: &str,
+) -> Result<AppStoreProfileSearch, String> {
+    validate_certificate_id(certificate_id)?;
+    let now = unix_timestamp()?;
+    let token = create_token(key_id, issuer_id, private_key, now)?;
+    let client = api_client()?;
+
+    let (bundle, accessible, issue, _) =
+        fetch_bundle_id(&client, &token, bundle_identifier).await?;
+    if !accessible {
+        return Err(issue.unwrap_or_else(|| {
+            "The Team key cannot access Developer provisioning resources.".to_string()
+        }));
+    }
+    let Some(bundle) = bundle else {
+        return Ok(AppStoreProfileSearch::default());
+    };
+    let (profiles, profiles_accessible, profiles_issue) =
+        fetch_profiles(&client, &token, &bundle.id).await?;
+    if !profiles_accessible {
+        return Err(profiles_issue.unwrap_or_else(|| {
+            "The Team key cannot inspect the existing provisioning profiles.".to_string()
+        }));
+    }
+    let candidates = profiles
+        .into_iter()
+        .filter(|profile| profile_is_usable_app_store(profile, now))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(AppStoreProfileSearch::default());
+    }
+    let ids = candidates
+        .iter()
+        .map(|profile| profile.id.clone())
+        .collect::<Vec<_>>();
+    let memberships = fetch_profile_memberships(&client, &token, &ids).await?;
+    let mut search = AppStoreProfileSearch::default();
+    // `fetch_profiles` sorts newest expiry first, so the first hit is the newest.
+    for mut profile in candidates {
+        let listed = memberships
+            .get(&profile.id)
+            .map(|membership| membership.certificate_ids.clone())
+            .unwrap_or_default();
+        if search.matching.is_none() && listed.iter().any(|id| id == certificate_id) {
+            profile.certificate_ids = listed;
+            search.matching = Some(profile);
+        } else {
+            search.other_usable.push(profile.name);
+        }
+    }
+
+    Ok(search)
+}
+
 /// Creates a development profile for the bundle listing the given devices. Unlike the App
 /// Store replacement it never refuses because a usable profile exists: usable here depends on
 /// which phones a profile lists, which the caller has already checked.

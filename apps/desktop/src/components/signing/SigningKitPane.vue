@@ -13,7 +13,7 @@ import { computed, ref, watch } from 'vue';
 
 import { formatDate } from '../../lib/format';
 import { useMachinesStore } from '../../stores/machines';
-import { kitReadiness } from '../../model/signing';
+import { kitReadiness, kitShortfall } from '../../model/signing';
 import { useSigningStore } from '../../stores/signing';
 import type { SigningKitSummary } from '../../types/backend';
 import Badge from '../ui/Badge.vue';
@@ -95,31 +95,53 @@ async function remove(): Promise<void> {
     }
 }
 
+// A missing file is a warning only when nothing will create it: with a Team key it is simply
+// not there yet.
 function detailsFor(kit: SigningKitSummary) {
+    const readiness = kitReadiness(kit);
     return [
-        {
-            label: 'Signing identity',
-            value: kit.signingCertificateName ?? 'Not stored',
-            tone: kit.signingCertificateConfigured ? ('default' as const) : ('warn' as const),
-        },
-        {
-            label: 'Export password',
-            value: kit.signingCertificatePasswordStored ? 'Stored in the OS vault' : 'Not stored',
-            tone: kit.signingCertificatePasswordStored ? ('default' as const) : ('warn' as const),
-        },
         {
             label: 'Guest keychain password',
             value: kit.guestKeychainConfigured ? 'Stored in the OS vault' : 'Not stored',
             tone: kit.guestKeychainConfigured ? ('default' as const) : ('warn' as const),
         },
         {
-            label: 'Development identity',
-            value: kit.developmentCertificateName ?? 'Not stored · optional, for iPhone builds',
+            label: 'Team key',
+            value: kit.appStoreConnectKeyId ?? 'None',
+            mono: kit.appStoreConnectKeyId !== null,
         },
         {
-            label: 'App Store Connect key',
-            value: kit.appStoreConnectKeyId ?? 'Not stored',
-            mono: kit.appStoreConnectKeyId !== null,
+            label: 'Distribution identity',
+            value:
+                kit.signingCertificateName ??
+                (readiness.teamKey ? 'Created at Apple when a machine provisions' : 'Not stored'),
+            tone:
+                kit.signingCertificateConfigured || readiness.teamKey
+                    ? ('default' as const)
+                    : ('warn' as const),
+        },
+        {
+            label: 'Export password',
+            value: kit.signingCertificatePasswordStored
+                ? 'Stored in the OS vault'
+                : kit.signingCertificateConfigured
+                  ? 'Not stored'
+                  : readiness.teamKey
+                    ? 'Set when the identity is created'
+                    : 'Not stored',
+            tone:
+                kit.signingCertificatePasswordStored ||
+                (readiness.teamKey && !kit.signingCertificateConfigured)
+                    ? ('default' as const)
+                    : ('warn' as const),
+        },
+        {
+            label: 'Development identity',
+            value:
+                kit.developmentCertificateName ??
+                (readiness.teamKey
+                    ? 'Created at Apple when a phone is prepared'
+                    : 'Not stored · optional, for iPhone builds'),
         },
         {
             label: 'Added',
@@ -144,10 +166,12 @@ const orphaned = computed(() =>
             <div>
                 <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">Signing kits</h1>
                 <p class="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                    A kit is one set of Apple signing material, held in this host's operating-system
-                    vault. Keep one per developer team or app, then attach a kit to each machine:
-                    the files are entered once here, and provisioning imports the attached kit into
-                    that machine's own keychain.
+                    A kit is one set of Apple signing credentials, held in this host's
+                    operating-system vault. The simplest kit is a Team key and a keychain password:
+                    BuildBridge creates the certificates and profiles from the key as machines need
+                    them. Files exported from a Mac work too. Keep one kit per developer team,
+                    attach it to each machine, and provisioning imports it into that machine's own
+                    keychain.
                 </p>
             </div>
             <Button size="sm" @click="createKit">
@@ -178,7 +202,7 @@ const orphaned = computed(() =>
         <EmptyState
             v-if="!signing.kits.value.length && !signing.state.loading"
             title="No signing kits stored"
-            description="Export an Apple Distribution identity and its provisioning profile from a trusted Mac, then store them here once. Every machine can then be attached to this kit."
+            description="Store a Team key (an App Store Connect API key) and a keychain password once, and BuildBridge creates the certificates and profiles it needs at Apple. Or bring the .p12 and profiles exported from a Mac. Every machine can then be attached to the kit."
         >
             <template #icon><KeyRound class="h-4 w-4" /></template>
             <Button size="sm" @click="createKit">
@@ -196,40 +220,38 @@ const orphaned = computed(() =>
                     >
                     <Badge v-else tone="warn">incomplete</Badge>
                     <Badge
-                        v-if="kitReadiness(kit).provisionable && !kitReadiness(kit).distribution"
+                        v-if="kitReadiness(kit).provisionable && kitReadiness(kit).archive === null"
                         tone="warn"
                         >phone only</Badge
                     >
                 </span>
             </template>
             <template #actions>
+                <!-- Provisioning and the device step create these themselves; the buttons
+                     are for creating one ahead of time, so they go once the identity exists. -->
                 <Button
-                    v-if="kit.appStoreConnectConfigured"
+                    v-if="kit.appStoreConnectConfigured && !kit.signingCertificateConfigured"
                     variant="outline"
                     size="sm"
-                    title="No Mac needed"
+                    title="Not required: provisioning creates it when a machine first needs it"
                     :disabled="creatingAny"
                     @click="certifying = { kit, kind: 'distribution' }"
                 >
                     <Spinner v-if="signing.state.creatingCertificateKitId === kit.id" />
                     <BadgePlus v-else class="h-3.5 w-3.5" />
-                    Create certificate at Apple
+                    Create distribution certificate now
                 </Button>
                 <Button
-                    v-if="kit.appStoreConnectConfigured"
+                    v-if="kit.appStoreConnectConfigured && !kit.developmentCertificateConfigured"
                     variant="outline"
                     size="sm"
-                    title="The identity a Debug build on a registered iPhone is signed with"
+                    title="Not required: preparing a phone creates it when needed"
                     :disabled="creatingAny"
                     @click="certifying = { kit, kind: 'development' }"
                 >
                     <Spinner v-if="signing.state.creatingDevelopmentCertificateKitId === kit.id" />
                     <Smartphone v-else class="h-3.5 w-3.5" />
-                    {{
-                        kit.developmentCertificateConfigured
-                            ? 'New development certificate'
-                            : 'Create development certificate'
-                    }}
+                    Create development certificate now
                 </Button>
                 <Button variant="outline" size="sm" @click="editKit(kit)">
                     <Pencil class="h-3.5 w-3.5" />
@@ -253,19 +275,19 @@ const orphaned = computed(() =>
 
             <KeyValue :items="detailsFor(kit)" :columns="3" />
             <p
-                v-if="!kit.signingCertificateConfigured"
+                v-if="!kitReadiness(kit).provisionable"
                 class="mt-2 text-[11px] leading-4 text-amber-700 dark:text-amber-400"
             >
-                {{
-                    kit.developmentCertificateConfigured
-                        ? 'No distribution identity: this kit can run Debug builds on a phone, but cannot sign an App Store archive.'
-                        : 'No identity yet.'
-                }}
-                {{
-                    kit.appStoreConnectConfigured
-                        ? 'Create one at Apple from here — the key is generated on this host — or export a .p12 from a Mac.'
-                        : 'Add an App Store Connect key to create one at Apple without a Mac, or export a .p12 from a Mac.'
-                }}
+                Not usable yet: still needs {{ kitShortfall(kit).join(' and ') }}. Edit the kit to
+                add it.
+            </p>
+            <p
+                v-else-if="kitReadiness(kit).archive === null"
+                class="mt-2 text-[11px] leading-4 text-amber-700 dark:text-amber-400"
+            >
+                This kit can run Debug builds on a phone, but cannot sign an App Store archive: it
+                holds no distribution identity and no Team key to create one. Edit the kit to add
+                either.
             </p>
 
             <div class="mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-800">
@@ -291,9 +313,16 @@ const orphaned = computed(() =>
                         />
                     </li>
                 </ul>
+                <p
+                    v-else-if="kit.appStoreConnectConfigured"
+                    class="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400"
+                >
+                    None yet. The App Store profile is created at Apple when a machine provisions,
+                    and a device profile when a phone is prepared; both are kept here.
+                </p>
                 <p v-else class="mt-1 text-[11px] text-amber-700 dark:text-amber-400">
-                    None stored. A signed archive needs a Distribution App Store Connect profile for
-                    the project's exact bundle identifier.
+                    None stored. A signed archive needs an App Store profile for the project's exact
+                    bundle identifier; a Team key would create one.
                 </p>
             </div>
 

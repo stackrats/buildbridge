@@ -24,18 +24,24 @@ const activating = computed(() => step.status === 'running');
 const showManual = ref(false);
 // Held only until activation starts; cleared before the call goes out either way.
 const password = ref('');
-const overBridge = computed(() => password.value !== '');
+// Which of the two routes is running, for the spinner on the button that started it.
+const route = ref<'ssh' | 'terminal' | null>(null);
 const failure = computed(() =>
     session.lastFailure?.operation === 'xcode-activate' ? session.lastFailure : null,
 );
 
-async function activate(): Promise<void> {
-    if (busy.value || step.status !== 'active') {
+async function activate(via: 'ssh' | 'terminal'): Promise<void> {
+    if (busy.value || step.status !== 'active' || (via === 'ssh' && password.value === '')) {
         return;
     }
-    const secret = password.value;
+    const secret = via === 'ssh' ? password.value : null;
     password.value = '';
-    await machines.activateXcode(session.id, secret === '' ? null : secret);
+    route.value = via;
+    try {
+        await machines.activateXcode(session.id, secret);
+    } finally {
+        route.value = null;
+    }
 }
 
 const commands = computed(() => {
@@ -60,22 +66,30 @@ const commands = computed(() => {
             <Button
                 size="sm"
                 :title="
-                    overBridge
-                        ? 'The password is used for this one session and then discarded'
-                        : 'You type the macOS password there'
+                    password === ''
+                        ? 'Type the macOS login password below first'
+                        : 'Runs over the pinned SSH bridge; the password is used once and discarded'
                 "
-                :disabled="busy || step.status !== 'active'"
-                @click="activate"
+                :disabled="busy || step.status !== 'active' || password === ''"
+                @click="activate('ssh')"
             >
                 <Spinner
-                    v-if="session.operation === 'xcode-activate'"
+                    v-if="session.operation === 'xcode-activate' && route === 'ssh'"
                     tone="text-white dark:text-zinc-950"
                 />
-                <KeyRound v-else-if="overBridge" class="h-3.5 w-3.5" />
+                <KeyRound v-else class="h-3.5 w-3.5" />
+                Activate Xcode
+            </Button>
+            <Button
+                variant="outline"
+                size="sm"
+                title="Opens a command file in the guest's Terminal, where you type the password yourself"
+                :disabled="busy || step.status !== 'active'"
+                @click="activate('terminal')"
+            >
+                <Spinner v-if="session.operation === 'xcode-activate' && route === 'terminal'" />
                 <Terminal v-else class="h-3.5 w-3.5" />
-                {{
-                    overBridge ? 'Activate Xcode over SSH' : 'Activate Xcode in the guest Terminal'
-                }}
+                Use the guest Terminal instead
             </Button>
         </template>
 
@@ -96,7 +110,7 @@ const commands = computed(() => {
             <FailureBlock
                 v-else-if="failure"
                 title="Activation did not complete"
-                cause="Check the password and run it again, leave the field blank to type the password in the guest Terminal instead, or use the manual commands below."
+                cause="Check the password and run it again, use the guest Terminal route instead, or use the manual commands below."
                 :diagnostic="failure.message"
             />
         </template>
@@ -106,16 +120,15 @@ const commands = computed(() => {
                 Activation selects the developer directory, accepts Apple's license, and runs
                 Xcode's first-launch tasks, all of which need an administrator. Type the local macOS
                 password here and BuildBridge runs them over the pinned SSH bridge with sudo, using
-                the password for that one session and then discarding it. Leave the field blank and
-                BuildBridge opens a short-lived command file in the guest's Terminal instead, where
-                you type the password and it never leaves macOS. The Terminal route times out after
-                30 minutes.
+                the password for that one session and then discarding it. If you would rather not
+                type it here, the guest Terminal route opens a short-lived command file inside macOS
+                where you type the password yourself; it times out after 30 minutes.
             </p>
 
             <Field
                 v-if="step.status !== 'done'"
                 label="macOS login password"
-                hint="Optional. Not the Apple Account password. Blank opens the guest Terminal."
+                hint="The account created during installation. Not the Apple Account password. Used once over SSH, then discarded; never stored."
             >
                 <Input
                     v-model="password"
@@ -123,7 +136,7 @@ const commands = computed(() => {
                     autocomplete="off"
                     :maxlength="512"
                     :disabled="busy || step.status !== 'active'"
-                    @keydown.enter.prevent="activate"
+                    @keydown.enter.prevent="activate('ssh')"
                 />
             </Field>
 

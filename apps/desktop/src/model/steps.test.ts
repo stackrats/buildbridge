@@ -477,7 +477,13 @@ describe('development-only kit', () => {
 
     it('names what an unfinished kit still lacks', () => {
         const view = developmentOnlyView();
-        view.signingKit = { ...view.signingKit!, developmentCertificatePasswordStored: false };
+        // Without a Team key nothing would create the missing piece, so the gap is real.
+        view.signingKit = {
+            ...view.signingKit!,
+            developmentCertificatePasswordStored: false,
+            appStoreConnectConfigured: false,
+            appStoreConnectKeyId: null,
+        };
         view.signing = null;
         const step = deriveBuildSteps(view, { runningStep: null }).find(
             (step) => step.id === 'signing-kit',

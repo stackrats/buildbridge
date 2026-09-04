@@ -343,6 +343,10 @@ pub struct XcodeImportResult {
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SigningProvisioningPhase {
+    /// The Team key route: a distribution certificate is being created at Apple for the kit.
+    CreatingCertificate,
+    /// The Team key route: an App Store profile is being found or created at Apple for the kit.
+    CreatingProfile,
     Preparing,
     Transferring,
     ImportingCertificate,

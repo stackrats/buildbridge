@@ -46,7 +46,9 @@ const detaching = computed(() => selected.value === '' && kit.value !== null);
 const readiness = computed(() => kitReadiness(kit.value));
 const complete = computed(() => readiness.value.provisionable);
 // Complete for the phone route only: it provisions, and the archive step stays locked.
-const developmentOnly = computed(() => complete.value && !readiness.value.distribution);
+const developmentOnly = computed(() => complete.value && readiness.value.archive === null);
+// The Team key route: the next step creates the distribution files at Apple first.
+const createsOnProvision = computed(() => complete.value && readiness.value.archive === 'team_key');
 const changed = computed(() => selected.value !== (kit.value?.id ?? ''));
 const vaultBroken = computed(
     () =>
@@ -54,26 +56,10 @@ const vaultBroken = computed(
         view.value.signingHealth === 'kit_missing',
 );
 
+// A missing file is a warning only when nothing will create it.
 const details = computed(() =>
     kit.value
         ? [
-              {
-                  label: 'Signing identity',
-                  value: kit.value.signingCertificateName ?? 'Not stored',
-                  tone: kit.value.signingCertificateConfigured
-                      ? ('default' as const)
-                      : ('warn' as const),
-              },
-              {
-                  label: 'Profiles',
-                  value: kit.value.provisioningProfileNames.length
-                      ? kit.value.provisioningProfileNames.join(', ')
-                      : 'None stored',
-                  mono: kit.value.provisioningProfileNames.length > 0,
-                  tone: kit.value.provisioningProfileNames.length
-                      ? ('default' as const)
-                      : ('warn' as const),
-              },
               {
                   label: 'Guest keychain password',
                   value: kit.value.guestKeychainConfigured ? 'Stored' : 'Not stored',
@@ -82,10 +68,40 @@ const details = computed(() =>
                       : ('warn' as const),
               },
               {
+                  label: 'Team key',
+                  value: kit.value.appStoreConnectKeyId ?? 'None',
+                  mono: kit.value.appStoreConnectKeyId !== null,
+              },
+              {
+                  label: 'Distribution identity',
+                  value:
+                      kit.value.signingCertificateName ??
+                      (readiness.value.teamKey ? 'Created when provisioning' : 'Not stored'),
+                  tone:
+                      kit.value.signingCertificateConfigured || readiness.value.teamKey
+                          ? ('default' as const)
+                          : ('warn' as const),
+              },
+              {
+                  label: 'Profiles',
+                  value: kit.value.provisioningProfileNames.length
+                      ? kit.value.provisioningProfileNames.join(', ')
+                      : readiness.value.teamKey
+                        ? 'Created when provisioning'
+                        : 'None stored',
+                  mono: kit.value.provisioningProfileNames.length > 0,
+                  tone:
+                      kit.value.provisioningProfileNames.length > 0 || readiness.value.teamKey
+                          ? ('default' as const)
+                          : ('warn' as const),
+              },
+              {
                   label: 'Development identity',
                   value:
                       kit.value.developmentCertificateName ??
-                      'Not stored · optional, for iPhone builds',
+                      (readiness.value.teamKey
+                          ? 'Created when a phone is prepared'
+                          : 'Not stored · optional, for iPhone builds'),
               },
           ]
         : [],
@@ -144,8 +160,8 @@ async function attach(): Promise<void> {
                 </template>
             </FailureBlock>
             <Callout v-else tone="warn" title="No signing kits stored yet">
-                Store an Apple Distribution identity and its provisioning profile once, then attach
-                it here.
+                Store a Team key (an App Store Connect API key) and a keychain password once, or the
+                identity and profiles exported from a Mac, then attach the kit here.
                 <div class="mt-2">
                     <Button variant="outline" size="sm" @click="ui.navigate({ kind: 'signing' })">
                         <Plus class="h-3.5 w-3.5" />
@@ -157,9 +173,10 @@ async function attach(): Promise<void> {
 
         <div class="space-y-3">
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                Signing kits are stored once on this host and shared by every machine, so a
-                certificate and its profiles are never re-entered. Each machine is attached to one
-                kit; the next step imports that kit into this machine's own keychain.
+                Signing kits are stored once on this host and shared by every machine, so
+                credentials are never re-entered. Each machine is attached to one kit; the next step
+                imports that kit into this machine's own keychain, creating the certificate and
+                profile at Apple first when the kit signs with a Team key.
             </p>
 
             <template v-if="kits.length && !vaultBroken">
@@ -195,8 +212,23 @@ async function attach(): Promise<void> {
                         class="mt-3"
                     >
                         This kit can provision and run Debug builds on a registered iPhone, but it
-                        holds no distribution identity or App Store profile, so the signed archive
-                        step stays locked. Add them to the kit and provision again to unlock it.
+                        holds no distribution identity and no Team key to create one, so the signed
+                        archive step stays locked. Add either to the kit and provision again to
+                        unlock it.
+                    </Callout>
+                    <Callout
+                        v-else-if="createsOnProvision"
+                        tone="neutral"
+                        title="Created at Apple when you provision"
+                        class="mt-3"
+                    >
+                        This kit signs with its Team key. The next step creates the Apple
+                        Distribution certificate and the App Store profile for
+                        <span class="font-mono">{{
+                            view.appleWorkspace?.bundleIdentifier ?? 'the project'
+                        }}</span>
+                        at Apple, keeps them in the kit, and imports them into this machine's
+                        keychain. Nothing at Apple is revoked.
                     </Callout>
                     <div class="flex flex-wrap items-center gap-1.5">
                         <Chip

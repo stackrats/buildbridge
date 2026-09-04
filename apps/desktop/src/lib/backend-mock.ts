@@ -904,7 +904,16 @@ export function createMockBackend(): Backend {
         async provisionSigning(machineId) {
             const machine = find(machineId);
             return busy(machine, 'Provisioning signing', async () => {
+                const kit = storedKits().find((entry) => entry.id === attachments[machineId]);
+                const creating =
+                    kit?.appStoreConnectConfigured === true &&
+                    !(
+                        kit.signingCertificateConfigured &&
+                        kit.signingCertificatePasswordStored &&
+                        kit.provisioningProfileNames.length > 0
+                    );
                 const phases: T.SigningProvisioningPhase[] = [
+                    ...(creating ? (['creating_certificate', 'creating_profile'] as const) : []),
                     'preparing',
                     'transferring',
                     'importing_certificate',
@@ -926,6 +935,16 @@ export function createMockBackend(): Backend {
                         },
                     );
                     await sleep(450);
+                }
+                if (kit && creating) {
+                    kit.signingCertificateConfigured = true;
+                    kit.signingCertificateName ??= 'distribution.p12';
+                    kit.signingCertificatePasswordStored = true;
+                    if (kit.provisioningProfileNames.length === 0) {
+                        kit.provisioningProfileNames.push(
+                            '22222222-3333-4444-5555-666666666666.mobileprovision',
+                        );
+                    }
                 }
                 machine.signing = readyMachine().signing;
                 return view(machine);

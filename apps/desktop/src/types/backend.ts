@@ -478,6 +478,8 @@ export interface XcodeImportProgress {
 }
 
 export type SigningProvisioningPhase =
+    | 'creating_certificate'
+    | 'creating_profile'
     | 'preparing'
     | 'transferring'
     | 'importing_certificate'

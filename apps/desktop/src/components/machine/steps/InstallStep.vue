@@ -16,15 +16,15 @@ const uptime = computed(() => secondsSince(view.value.runtime.startedAt));
 const instructions = [
     {
         title: 'Boot the installer',
-        body: 'In the console window, choose"macOS Base System" in the OpenCore picker. Do not choose EFI Shell or Reset NVRAM.',
+        body: 'In the console window, choose "macOS Base System" in the OpenCore picker. Do not choose EFI Shell or Reset NVRAM.',
     },
     {
         title: 'Erase the target disk once',
-        body: 'Open Disk Utility, choose View → Show All Devices, and select the largest"QEMU HARDDISK Media" (about 275 GB). Erase it as"Macintosh HD" with APFS and a GUID Partition Map. Leave the smaller installer disk alone.',
+        body: 'Open Disk Utility, choose View → Show All Devices, and select the largest "QEMU HARDDISK Media" (about 275 GB). Erase it as "Macintosh HD" with APFS and a GUID Partition Map. Leave the smaller installer disk alone.',
     },
     {
         title: 'Install macOS and create the account',
-        body: 'Quit Disk Utility, choose"Reinstall macOS", and target Macintosh HD. The guest restarts several times; keep the console open. Create a local user with a password you will type once more when Xcode is activated. Skip Apple Account sign-in: BuildBridge never needs it.',
+        body: 'Quit Disk Utility, choose "Reinstall macOS", and target Macintosh HD. The guest restarts several times; keep the console open. Create a local user with a password you will type once more when Xcode is activated. Skip Apple Account sign-in: BuildBridge never needs it.',
     },
     {
         title: 'Enable Remote Login',

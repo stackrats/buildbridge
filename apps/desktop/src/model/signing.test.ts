@@ -3,18 +3,15 @@ import { describe, expect, it } from 'vite-plus/test';
 import type { SigningKitSummary } from '../types/backend';
 import {
     appStoreConnectIsPartial,
+    draftKitSummary,
+    emptySigningKitDraft,
     kitHoldsProfile,
     kitReadiness,
     kitShortfall,
     missingKitRequirements,
 } from './signing';
 
-const emptyDraft = {
-    certificatePath: '',
-    certificatePassword: '',
-    profilePaths: [] as string[],
-    keychainPassword: '',
-};
+const emptyDraft = emptySigningKitDraft;
 
 function storedKit(overrides: Partial<SigningKitSummary> = {}): SigningKitSummary {
     return {
@@ -36,13 +33,12 @@ function storedKit(overrides: Partial<SigningKitSummary> = {}): SigningKitSummar
     };
 }
 
-describe('kit requirements', () => {
-    it('names all four requirements for an empty new kit', () => {
+describe('distribution files', () => {
+    it('names all three files for an empty new kit', () => {
         expect(missingKitRequirements(emptyDraft, null).map((item) => item.id)).toEqual([
             'certificate',
             'password',
             'profiles',
-            'keychain',
         ]);
     });
 
@@ -51,7 +47,6 @@ describe('kit requirements', () => {
             certificatePath: '/path/to/dist.p12',
             certificatePassword: 'secret',
             profilePaths: ['/path/to/app.mobileprovision'],
-            keychainPassword: 'keychain',
         };
 
         expect(missingKitRequirements(draft, null)).toEqual([]);
@@ -76,8 +71,51 @@ describe('kit requirements', () => {
 
         const missing = missingKitRequirements(emptyDraft, stored);
 
-        expect(missing.map((item) => item.id)).toEqual(['profiles', 'keychain']);
+        expect(missing.map((item) => item.id)).toEqual(['profiles']);
         expect(missing[0]?.label).toBe('Provisioning profile');
+    });
+});
+
+describe('the kit a dialog would store', () => {
+    it('is what is typed, else what the vault holds', () => {
+        const stored = storedKit({
+            signingCertificateConfigured: true,
+            signingCertificatePasswordStored: true,
+            provisioningProfileNames: ['stored.mobileprovision'],
+        });
+        const summary = draftKitSummary(
+            {
+                ...emptyDraft,
+                keychainPassword: 'keychain',
+                profilePaths: ['/typed.mobileprovision'],
+            },
+            stored,
+        );
+
+        expect(summary.signingCertificateConfigured).toBe(true);
+        expect(summary.guestKeychainConfigured).toBe(true);
+        expect(summary.provisioningProfileNames).toEqual(['/typed.mobileprovision']);
+        expect(kitReadiness(summary).provisionable).toBe(true);
+    });
+
+    it('counts a Team key only when all three parts are typed', () => {
+        const partial = draftKitSummary(
+            { ...emptyDraft, teamKeyPath: '/AuthKey.p8', teamKeyId: 'KEYID12345' },
+            null,
+        );
+        const whole = draftKitSummary(
+            {
+                ...emptyDraft,
+                teamKeyPath: '/AuthKey.p8',
+                teamKeyId: 'KEYID12345',
+                teamIssuerId: 'issuer',
+            },
+            null,
+        );
+
+        expect(partial.appStoreConnectConfigured).toBe(false);
+        expect(whole.appStoreConnectConfigured).toBe(true);
+        expect(whole.appStoreConnectKeyId).toBe('KEYID12345');
     });
 });
 
@@ -144,22 +182,53 @@ describe('kit readiness', () => {
         guestKeychainConfigured: true,
     };
 
+    const teamKey = {
+        appStoreConnectConfigured: true,
+        appStoreConnectKeyId: 'KEYID12345',
+        guestKeychainConfigured: true,
+    };
+
     it('provisions with the distribution set, the development identity, or both', () => {
         expect(kitReadiness(storedKit(distribution))).toEqual({
             distribution: true,
             development: false,
+            teamKey: false,
             keychain: true,
             provisionable: true,
+            archive: 'files',
+            phone: null,
         });
         expect(kitReadiness(storedKit(development))).toEqual({
             distribution: false,
             development: true,
+            teamKey: false,
             keychain: true,
             provisionable: true,
+            archive: null,
+            phone: 'files',
         });
         expect(kitReadiness(storedKit({ ...distribution, ...development })).provisionable).toBe(
             true,
         );
+    });
+
+    it('provisions with a Team key alone, creating certificates and profiles on demand', () => {
+        expect(kitReadiness(storedKit(teamKey))).toEqual({
+            distribution: false,
+            development: false,
+            teamKey: true,
+            keychain: true,
+            provisionable: true,
+            archive: 'team_key',
+            phone: 'team_key',
+        });
+    });
+
+    it('prefers stored files over the Team key for whichever route has them', () => {
+        const readiness = kitReadiness(storedKit({ ...teamKey, ...distribution }));
+
+        expect(readiness.archive).toBe('files');
+        expect(readiness.phone).toBe('team_key');
     });
 
     it('always needs the keychain password, and a .p12 without its password is not an identity', () => {
@@ -176,7 +245,10 @@ describe('kit readiness', () => {
 
     it('lists the shortest route to provisioning', () => {
         expect(kitShortfall(storedKit())).toEqual([
-            'a distribution or development identity',
+            'a Team key, or a distribution or development identity',
+            'keychain password',
+        ]);
+        expect(kitShortfall(storedKit({ appStoreConnectConfigured: true }))).toEqual([
             'keychain password',
         ]);
         expect(

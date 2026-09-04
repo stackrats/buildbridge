@@ -2310,7 +2310,7 @@ async fn create_apple_certificate_for_kit(
 }
 
 /// Apple's serial number for the kit's development `.p12`: recorded when BuildBridge created
-/// it, read out of the file with OpenSSL otherwise. The passphrase goes through the environment.
+/// it, read out of the file with OpenSSL otherwise.
 fn development_certificate_serial(kit: &StoredSigningKit) -> Result<String, String> {
     if let Some(serial) = &kit.development_certificate_serial_number {
         return Ok(serial.clone());
@@ -2326,6 +2326,13 @@ fn development_certificate_serial(kit: &StoredSigningKit) -> Result<String, Stri
             "Store the development certificate passphrase in the operating-system vault first."
                 .to_string()
         })?;
+    certificate_serial_from_p12(path, password, "development")
+}
+
+/// The serial of the certificate inside a `.p12`, as Apple lists it. The passphrase goes
+/// through the environment, never the command line, and OpenSSL 3 is retried in legacy mode for
+/// files exported by older tooling.
+fn certificate_serial_from_p12(path: &str, password: &str, what: &str) -> Result<String, String> {
     let env = Some(("BUILDBRIDGE_P12_PASSWORD", password));
     let pem = openssl(
         &[
@@ -2369,12 +2376,161 @@ fn development_certificate_serial(kit: &StoredSigningKit) -> Result<String, Stri
             .chars()
             .all(|character| character.is_ascii_hexdigit())
     {
-        return Err(
-            "OpenSSL could not read the development certificate's serial number.".to_string(),
-        );
+        return Err(format!(
+            "OpenSSL could not read the {what} certificate's serial number."
+        ));
     }
 
     Ok(serial)
+}
+
+/// Keeps a profile Apple returned: the managed copy on this host, and its path in the kit.
+async fn retain_profile_in_kit(
+    app: &AppHandle,
+    kit: &mut StoredSigningKit,
+    profile: &apple_api::AppleProvisioningProfileSummary,
+    content: &[u8],
+) -> Result<(), String> {
+    if kit.provisioning_profile_paths.len() >= MAX_PROVISIONING_PROFILES {
+        return Err(format!(
+            "This kit already holds {MAX_PROVISIONING_PROFILES} profiles. Remove obsolete paths before adding another."
+        ));
+    }
+    let saved_path = save_managed_apple_profile(app, profile, content)?;
+    let saved_path = saved_path
+        .to_str()
+        .ok_or_else(|| "The managed profile path is not valid UTF-8.".to_string())?
+        .to_string();
+    if !kit
+        .provisioning_profile_paths
+        .iter()
+        .any(|path| path == &saved_path)
+    {
+        kit.provisioning_profile_paths.push(saved_path);
+    }
+    save_signing_kit_record(kit.clone()).await
+}
+
+/// What the Team key route creates before a kit without stored distribution files can
+/// provision: an Apple Distribution certificate packaged into the kit, and an App Store profile
+/// for the project's bundle identifier that lists it, downloaded into the kit. Each step persists
+/// before the next, so a retry resumes rather than repeats; nothing at Apple is revoked or
+/// replaced.
+async fn ensure_distribution_set(
+    app: &AppHandle,
+    kit: &mut StoredSigningKit,
+    bundle_identifier: &str,
+    workspace_name: &str,
+    report: &(dyn Fn(buildbridge_docker_osx::SigningProvisioningPhase, &str) + Sync),
+) -> Result<(), String> {
+    use buildbridge_docker_osx::SigningProvisioningPhase as Phase;
+
+    let (key_id, issuer_id, private_key) = match (
+        kit.app_store_connect_key_id.clone(),
+        kit.app_store_connect_issuer_id.clone(),
+        kit.app_store_connect_private_key.clone(),
+    ) {
+        (Some(key_id), Some(issuer_id), Some(private_key)) => (key_id, issuer_id, private_key),
+        _ => {
+            return Err(
+                "This kit has no App Store Connect key, so BuildBridge cannot create signing material for it. Store a distribution identity with its profile, or add a Team key."
+                    .to_string(),
+            );
+        }
+    };
+
+    if kit.signing_certificate_path.is_none() {
+        report(
+            Phase::CreatingCertificate,
+            "Creating an Apple Distribution certificate for a key generated on this host",
+        );
+        let kits = read_signing_kits().await?.kits;
+        let holders = kits_holding_distribution_identity(&kits, &kit.id);
+        create_apple_certificate_for_kit(app, kit, apple_api::CertificateKind::Distribution)
+            .await
+            .map_err(|error| {
+                with_other_kit_hint(error, apple_api::CertificateKind::Distribution, &holders)
+            })?;
+    }
+    let path = kit
+        .signing_certificate_path
+        .clone()
+        .ok_or_else(|| "This kit has no distribution certificate.".to_string())?;
+    let password = kit.signing_certificate_password.clone().ok_or_else(|| {
+        "Store the certificate export password in the operating-system vault first.".to_string()
+    })?;
+    let serial = tauri::async_runtime::spawn_blocking(move || {
+        certificate_serial_from_p12(&path, &password, "distribution")
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let certificate = apple_api::find_certificate_by_serial(
+        &key_id,
+        &issuer_id,
+        &private_key,
+        &serial,
+        apple_api::CertificateKind::Distribution,
+    )
+    .await?
+    .ok_or_else(|| {
+        format!(
+            "The kit's distribution certificate (serial {serial}) is not an unexpired Apple Distribution certificate on this team. Store the .p12 of a current certificate in the kit, or store the kit again with only the Team key so BuildBridge creates one."
+        )
+    })?;
+
+    report(
+        Phase::CreatingProfile,
+        &format!("Checking the team's App Store profiles for {bundle_identifier}"),
+    );
+    apple_api::ensure_bundle_id(
+        &key_id,
+        &issuer_id,
+        &private_key,
+        bundle_identifier,
+        workspace_name,
+    )
+    .await?;
+    let search = apple_api::find_app_store_profile(
+        &key_id,
+        &issuer_id,
+        &private_key,
+        bundle_identifier,
+        &certificate.id,
+    )
+    .await?;
+    let (profile, content) = match search.matching {
+        Some(profile) if kit_holds_profile_uuid(kit, &profile.uuid) => return Ok(()),
+        Some(profile) => {
+            report(
+                Phase::CreatingProfile,
+                "Downloading the App Store profile that already lists this certificate",
+            );
+            apple_api::download_profile(&key_id, &issuer_id, &private_key, &profile.id).await?
+        }
+        None if !search.other_usable.is_empty() => {
+            return Err(format!(
+                "An active App Store profile for {bundle_identifier} exists at Apple ({}) but is for a different certificate, and BuildBridge does not replace a live profile it did not create. Store that certificate's .p12 in the kit, or let the profile expire or delete it in the developer portal, then provision again.",
+                search.other_usable.join(", ")
+            ));
+        }
+        None => {
+            report(
+                Phase::CreatingProfile,
+                &format!("Creating an App Store profile for {bundle_identifier}"),
+            );
+            let created = apple_api::create_replacement_profile(
+                &key_id,
+                &issuer_id,
+                &private_key,
+                bundle_identifier,
+                &certificate.id,
+            )
+            .await?;
+            (created.profile, created.content)
+        }
+    };
+
+    retain_profile_in_kit(app, kit, &profile, &content).await
 }
 
 /// Whether the kit already holds a copy of the profile with this UUID, by managed file name.
@@ -3463,13 +3619,14 @@ async fn provision_mac_signing(
     provision_with_kit(&app, &machine_id, secrets).await
 }
 
-/// Provisions one kit into a machine's guest keychain: the distribution identity every kit
-/// has, the development identity when the kit holds one, and every profile, replacing what
-/// the previous provisioning installed.
+/// Provisions one kit into a machine's guest keychain: the distribution identity, the
+/// development identity when the kit holds one, and every profile, replacing what the previous
+/// provisioning installed. A kit that holds a Team key but no distribution files gets them
+/// created at Apple first, so a Team key and a keychain password are all a kit needs.
 async fn provision_with_kit(
     app: &AppHandle,
     machine_id: &str,
-    secrets: StoredSigningKit,
+    mut secrets: StoredSigningKit,
 ) -> Result<MacBuilderView, String> {
     let paths = MachinePaths::resolve(app, machine_id)?;
     let profile = machines::load_registry(app)?
@@ -3511,6 +3668,33 @@ async fn provision_with_kit(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+
+    let guard = begin_machine_operation(app, machine_id, "provisioning_signing")?;
+    if !kit_has_distribution_set(&secrets) && kit_has_team_key(&secrets) {
+        let started = std::time::Instant::now();
+        let report = |phase: buildbridge_docker_osx::SigningProvisioningPhase, detail: &str| {
+            emit_machine_progress(
+                app,
+                SIGNING_PROGRESS_EVENT,
+                machine_id,
+                SigningProvisioningProgress {
+                    phase,
+                    completed_bytes: 0,
+                    total_bytes: 0,
+                    elapsed_seconds: started.elapsed().as_secs(),
+                    detail: detail.to_string(),
+                },
+            );
+        };
+        ensure_distribution_set(
+            app,
+            &mut secrets,
+            &bundle_identifier,
+            &workspace.name,
+            &report,
+        )
+        .await?;
+    }
 
     let distribution_certificate = match (
         secrets.signing_certificate_path,
@@ -3569,7 +3753,6 @@ async fn provision_with_kit(
     let identity_path = paths.guest_identity();
     let known_hosts_path = paths.known_hosts();
 
-    let guard = begin_machine_operation(app, machine_id, "provisioning_signing")?;
     if current.signing.is_some()
         && let Err(error) = remove_signing_provisioning_record(&paths)
     {
@@ -3817,19 +4000,49 @@ async fn prepare_apple_device_signing(
             kit.development_certificate_serial_number = Some(serial.clone());
             save_signing_kit_record(kit.clone()).await?;
         }
-        let certificate = apple_api::find_certificate_by_serial(
+        let found = apple_api::find_certificate_by_serial(
             &key_id,
             &issuer_id,
             &private_key,
             &serial,
             apple_api::CertificateKind::Development,
         )
-        .await?
-        .ok_or_else(|| {
-            format!(
-                "The kit's development certificate (serial {serial}) is not an unexpired development certificate on the Apple team. Create one from the kit, or store the .p12 Apple issued for this team."
-            )
-        })?;
+        .await?;
+        let certificate = match found {
+            Some(certificate) => certificate,
+            None => {
+                // Expired, revoked, or from another team: a development certificate is cheap
+                // and per-team, so a new one is created rather than the kit sent back to edit.
+                report(
+                    DeviceSigningPhase::CreatingCertificate,
+                    "The kit's development certificate is no longer valid at Apple; creating a new one",
+                );
+                create_apple_certificate_for_kit(
+                    &app,
+                    &mut kit,
+                    apple_api::CertificateKind::Development,
+                )
+                .await?;
+                certificate_created = true;
+                let serial = kit.development_certificate_serial_number.clone().ok_or_else(|| {
+                    "BuildBridge created a development certificate but recorded no serial for it."
+                        .to_string()
+                })?;
+                apple_api::find_certificate_by_serial(
+                    &key_id,
+                    &issuer_id,
+                    &private_key,
+                    &serial,
+                    apple_api::CertificateKind::Development,
+                )
+                .await?
+                .ok_or_else(|| {
+                    format!(
+                        "Apple issued development certificate {serial} but does not list it yet. Try again in a moment."
+                    )
+                })?
+            }
+        };
 
         report(
             DeviceSigningPhase::RegisteringDevice,
@@ -6027,12 +6240,23 @@ fn resolve_signing_kit<'a>(
 }
 
 /// Whether a kit holds everything provisioning needs.
-/// A kit provisions with either identity. The distribution set — identity, passphrase and at
-/// least one profile — is what an archive needs; a development identity with its passphrase is
-/// enough to run on a phone, and a kit holding only that is complete for that route alone.
+///
+/// Three things make a kit usable, any one of them with the guest keychain password: a Team
+/// key, from which BuildBridge creates certificates and profiles at Apple when a machine first
+/// needs them; the distribution set — identity, passphrase and at least one profile — which is
+/// what an archive needs; or a development identity with its passphrase, enough to run on a
+/// phone and nothing more.
 fn kit_is_complete(kit: &StoredSigningKit) -> bool {
     kit.guest_keychain_password.is_some()
-        && (kit_has_distribution_set(kit) || kit_has_development_identity(kit))
+        && (kit_has_team_key(kit)
+            || kit_has_distribution_set(kit)
+            || kit_has_development_identity(kit))
+}
+
+fn kit_has_team_key(kit: &StoredSigningKit) -> bool {
+    kit.app_store_connect_key_id.is_some()
+        && kit.app_store_connect_issuer_id.is_some()
+        && kit.app_store_connect_private_key.is_some()
 }
 
 fn kit_has_distribution_set(kit: &StoredSigningKit) -> bool {
@@ -7278,6 +7502,32 @@ mod tests {
                 "a kit without its {missing} cannot provision"
             );
         }
+    }
+
+    #[test]
+    fn a_team_key_with_the_keychain_password_completes_a_kit_because_the_rest_is_created() {
+        let mut key_only = kit("team", false);
+        key_only.guest_keychain_password = Some("keychain".to_string());
+        assert!(!kit_is_complete(&key_only), "nothing to sign with yet");
+
+        key_only.app_store_connect_key_id = Some("KEYID12345".to_string());
+        key_only.app_store_connect_issuer_id = Some("issuer".to_string());
+        assert!(
+            !kit_is_complete(&key_only),
+            "a Team key is all three parts, not two"
+        );
+
+        key_only.app_store_connect_private_key = Some("-----BEGIN PRIVATE KEY-----".to_string());
+        assert!(
+            kit_is_complete(&key_only),
+            "certificates and profiles are created at Apple when first needed"
+        );
+
+        key_only.guest_keychain_password = None;
+        assert!(
+            !kit_is_complete(&key_only),
+            "the keychain password is the one thing nothing can create"
+        );
     }
 
     #[test]

@@ -46,11 +46,15 @@ const phases = [
     },
     {
         title: 'Approve a project and test build',
-        body: 'Approve one local folder, synchronize a filtered snapshot, and run an unsigned Simulator build on the prepared machine.',
+        body: 'Approve one local folder, synchronize a filtered snapshot, and run an unsigned test build on the prepared machine.',
     },
     {
         title: 'Sign and export an IPA',
-        body: 'Store your certificate and profiles once in the OS vault, provision them into the guest, and export a verified App Store Connect IPA.',
+        body: 'Store a Team key, or your certificate and profiles, once in the OS vault; provision them into the guest; export a verified App Store Connect IPA.',
+    },
+    {
+        title: 'Optional: run it on your iPhone',
+        body: 'Hand a plugged-in iPhone to the machine over USB, and BuildBridge installs a Debug build on it and streams its console. Not one of the thirteen.',
     },
 ];
 
@@ -115,7 +119,7 @@ const wellClass =
             class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
         >
             <h2 class="text-[15px] font-semibold text-zinc-900 dark:text-zinc-50">
-                Two phases, fourteen steps, one machine
+                Thirteen steps, one machine
             </h2>
             <p class="mt-1 max-w-xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                 The machine is prepared once and then builds any number of projects. Every step says
