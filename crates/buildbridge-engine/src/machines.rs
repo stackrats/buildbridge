@@ -131,6 +131,12 @@ impl MachinePaths {
         self.config_dir.join("identity.env")
     }
 
+    /// Held by the process running an operation on this machine, so another BuildBridge
+    /// process sees it busy.
+    pub fn operation_lock(&self) -> PathBuf {
+        self.data_dir.join("operation.lock")
+    }
+
     pub fn guest_access(&self) -> PathBuf {
         self.config_dir.join("guest.json")
     }
@@ -230,6 +236,7 @@ impl MachinePaths {
             self.apple_archive_error(),
             self.apple_device_run_record(),
             self.apple_device_run_error(),
+            self.operation_lock(),
         ] {
             remove_file_if_present(&path)?;
         }

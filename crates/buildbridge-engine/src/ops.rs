@@ -67,6 +67,9 @@ impl Drop for MachineOperationGuard {
         if let Ok(mut busy) = self.app.state().busy_machines.lock() {
             busy.remove(&self.machine_id);
         }
+        if let Ok(path) = operation_lock_path(&self.app, &self.machine_id) {
+            let _ = fs::remove_file(path);
+        }
         if let Ok(mut scopes) = self.app.state().operation_scopes.lock() {
             scopes.remove(&self.machine_id);
         }
@@ -95,6 +98,7 @@ pub(crate) fn begin_machine_operation(
                 .to_string(),
         );
     }
+    acquire_operation_lock(&operation_lock_path(app, machine_id)?, label)?;
     busy.insert(machine_id.to_string(), label);
     drop(busy);
     let scope = OperationScope::new();
@@ -182,14 +186,89 @@ pub(crate) fn finish_operation<T>(
 
 pub(crate) const CANCELLED_MESSAGE: &str = "Stopped.";
 
+/// What holds the machine right now: an operation in this process, or one in another
+/// BuildBridge process that left its lock on disk and is still alive.
 pub(crate) fn busy_operation(app: &Engine, machine_id: &str) -> Result<Option<String>, String> {
     let state = app.state();
     let busy = state
         .busy_machines
         .lock()
         .map_err(|_| "The machine operation registry is poisoned.".to_string())?;
+    if let Some(label) = busy.get(machine_id) {
+        return Ok(Some((*label).to_string()));
+    }
 
-    Ok(busy.get(machine_id).map(|label| (*label).to_string()))
+    Ok(operation_lock_path(app, machine_id)
+        .ok()
+        .and_then(|path| foreign_operation(&path)))
+}
+
+/// What a running operation leaves on disk beside the machine, so a second BuildBridge
+/// process — a command line beside the desktop — sees the machine busy and refuses, instead of
+/// running its own operation into the same guest. A dead owner's lock is replaced.
+#[derive(Debug, Serialize, Deserialize)]
+struct OperationLock {
+    pid: u32,
+    label: String,
+    started_at_epoch_seconds: u64,
+}
+
+fn operation_lock_path(app: &Engine, machine_id: &str) -> Result<PathBuf, String> {
+    Ok(MachinePaths::resolve(app, machine_id)?.operation_lock())
+}
+
+fn process_alive(pid: u32) -> bool {
+    if cfg!(target_os = "linux") {
+        std::path::Path::new("/proc").join(pid.to_string()).exists()
+    } else {
+        true
+    }
+}
+
+/// The label another live process holds the machine under, if any.
+pub(crate) fn foreign_operation(path: &std::path::Path) -> Option<String> {
+    let lock: OperationLock = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    (lock.pid != std::process::id() && process_alive(lock.pid)).then_some(lock.label)
+}
+
+fn acquire_operation_lock(path: &std::path::Path, label: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    for _ in 0..2 {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut file) => {
+                let lock = OperationLock {
+                    pid: std::process::id(),
+                    label: label.to_string(),
+                    started_at_epoch_seconds: machines::now_epoch_seconds(),
+                };
+                let encoded = serde_json::to_vec(&lock).map_err(|error| error.to_string())?;
+                std::io::Write::write_all(&mut file, &encoded)
+                    .map_err(|error| error.to_string())?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if let Some(held) = foreign_operation(path) {
+                    return Err(format!(
+                        "Another BuildBridge process holds this machine ({}). Wait for it to finish.",
+                        held.replace('_', " ")
+                    ));
+                }
+                let _ = fs::remove_file(path);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Could not lock the machine for the operation: {error}"
+                ));
+            }
+        }
+    }
+    Err("Could not lock the machine for the operation.".to_string())
 }
 
 pub(crate) fn emit_machine_progress<T: Serialize + Clone>(
@@ -269,4 +348,52 @@ where
     .map_err(|error| error.to_string());
     drop(guard);
     finish_operation(&cancel_probe, joined)
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn a_lock_held_by_this_process_or_a_dead_one_does_not_count_as_foreign() {
+        let dir = std::env::temp_dir().join(format!("buildbridge-lock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("operation.lock");
+        acquire_operation_lock(&path, "archiving").expect("first acquisition");
+        assert_eq!(
+            foreign_operation(&path),
+            None,
+            "our own lock is not foreign"
+        );
+        assert!(
+            acquire_operation_lock(&path, "archiving").is_ok(),
+            "our own stale lock is replaced"
+        );
+
+        let dead = OperationLock {
+            pid: u32::MAX - 1,
+            label: "test_building".to_string(),
+            started_at_epoch_seconds: 0,
+        };
+        fs::write(&path, serde_json::to_vec(&dead).unwrap()).unwrap();
+        assert_eq!(
+            foreign_operation(&path),
+            None,
+            "a dead owner does not hold it"
+        );
+        assert!(acquire_operation_lock(&path, "archiving").is_ok());
+
+        let alive = OperationLock {
+            pid: 1,
+            label: "archiving".to_string(),
+            started_at_epoch_seconds: 0,
+        };
+        fs::write(&path, serde_json::to_vec(&alive).unwrap()).unwrap();
+        if cfg!(target_os = "linux") {
+            assert_eq!(foreign_operation(&path), Some("archiving".to_string()));
+            let refused = acquire_operation_lock(&path, "archiving").unwrap_err();
+            assert!(refused.contains("Another BuildBridge process holds this machine"));
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
