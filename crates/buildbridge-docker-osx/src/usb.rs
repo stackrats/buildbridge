@@ -20,23 +20,19 @@ use crate::{ContainerState, ProviderError, TrackedCommand, clean_output, recent_
 /// Sorted after `39-usbmuxd.rules`, whose ownership and systemd activation it overrides, and
 /// before the `80-`/`99-` rules that do not touch phones.
 pub const USB_UDEV_RULE_PATH: &str = "/etc/udev/rules.d/40-buildbridge-iphone.rules";
-/// The rule. It stops usbmuxd from being started for the phone, hands the node to `plugdev` —
-/// the group the container's QEMU user is added to — and puts the phone back into a configured
-/// state.
+/// The rule. It stops usbmuxd from being started for the phone and hands the node to `plugdev`,
+/// the group the container's QEMU user is added to. That is deliberately all it does.
 ///
-/// That last part matters. usbmuxd's own rule runs first and parks the phone in configuration 0
-/// (`ATTR{bConfigurationValue}="0"`) so that usbmuxd can choose a configuration itself. With
-/// usbmuxd disabled nothing ever does, and an unconfigured device offers no interfaces at all.
-/// Because this file sorts after `39-usbmuxd.rules`, assigning the attribute here runs last
-/// and wins.
-///
-/// The value is the phone's *highest* configuration, not its first. An iPhone lists its
-/// configurations in increasing capability — on iOS 18 they run PTP, iPod audio, PTP + Apple
-/// Mobile Device, that plus Apple USB Ethernet, and finally that plus NCM — and only the last
-/// carries the USB network interface CoreDevice and `devicectl` speak over. Selecting the first
-/// gets a camera and nothing a build can use.
+/// It does **not** choose a USB configuration; the phone is left parked in configuration 0 by
+/// `39-usbmuxd.rules`. Choosing one here was tried and is wrong in both directions. An iPhone
+/// lists its configurations in increasing capability — on iOS 18: PTP, iPod audio, PTP + Apple
+/// Mobile Device, that plus Apple USB Ethernet, and finally that plus NCM. Selecting the first
+/// gets a camera; selecting the last is worse, because its network interfaces then appear on
+/// this host, Linux binds `cdc_ncm` to them, and the interfaces the guest needs are taken by
+/// the wrong machine. Configuration 0 exposes no interfaces at all, so nothing here can bind,
+/// and macOS chooses a configuration itself while enumerating, the way it would over a cable.
 pub const USB_UDEV_RULE: &str = "# Written by BuildBridge; remove this file to restore usbmuxd handling of iPhones.\n\
-SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ENV{PRODUCT}==\"5ac/12[9a][0-9a-f]/*\", ENV{USBMUX_SUPPORTED}=\"0\", ENV{SYSTEMD_WANTS}=\"\", TAG-=\"systemd\", GROUP=\"plugdev\", MODE=\"0660\", ATTR{bConfigurationValue}=\"$attr{bNumConfigurations}\"\n";
+SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ENV{PRODUCT}==\"5ac/12[9a][0-9a-f]/*\", ENV{USBMUX_SUPPORTED}=\"0\", ENV{SYSTEMD_WANTS}=\"\", TAG-=\"systemd\", GROUP=\"plugdev\", MODE=\"0660\"\n";
 /// The character-device major of `/dev/bus/usb`, for the container's device cgroup rule.
 pub const USB_BUS_MAJOR: u32 = 189;
 pub const APPLE_VENDOR_ID: &str = "05ac";
@@ -816,21 +812,15 @@ mod tests {
             "TAG-=\"systemd\"",
             "GROUP=\"plugdev\"",
             "MODE=\"0660\"",
-            // Undoes usbmuxd's configuration-0 parking, and picks the phone's most capable
-            // configuration rather than its first, which is a camera.
-            "ATTR{bConfigurationValue}=\"$attr{bNumConfigurations}\"",
         ] {
             assert!(rule.contains(fragment), "{fragment}");
         }
-        for wrong in [
-            "ATTR{bConfigurationValue}=\"0\"",
-            "ATTR{bConfigurationValue}=\"1\"",
-        ] {
-            assert!(
-                !rule.contains(wrong),
-                "{wrong}: unconfigured is what this rule undoes, and the first configuration is a camera"
-            );
-        }
+        // Choosing a configuration on this host is what hands the phone's network interfaces
+        // to Linux's own drivers; the guest has to be the one that chooses.
+        assert!(
+            !rule.contains("bConfigurationValue"),
+            "the phone stays unconfigured here so that no driver on this host binds to it"
+        );
         assert!(USB_UDEV_RULE.ends_with('\n'));
     }
 
