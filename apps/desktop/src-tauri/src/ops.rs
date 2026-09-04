@@ -210,3 +210,70 @@ pub(crate) fn emit_machine_progress<T: Serialize + Clone>(
         },
     );
 }
+
+/// Everything a command that talks to a machine's guest resolves first: the machine's paths
+/// and profile, the guest username, the key files, and a fresh view that proves the guest is
+/// ready for project work. One place for the checks, so every command refuses the same way.
+pub(crate) struct GuestContext {
+    pub(crate) paths: MachinePaths,
+    pub(crate) profile: MacBuilderConfig,
+    pub(crate) username: String,
+    pub(crate) identity_path: PathBuf,
+    pub(crate) known_hosts_path: PathBuf,
+    pub(crate) current: MacBuilderView,
+}
+
+impl GuestContext {
+    pub(crate) fn ssh_port(&self) -> u16 {
+        self.profile.ssh_port
+    }
+}
+
+pub(crate) async fn guest_context(
+    app: &AppHandle,
+    machine_id: &str,
+) -> Result<GuestContext, String> {
+    let paths = MachinePaths::resolve(app, machine_id)?;
+    let profile = machines::load_registry(app)?
+        .find(machine_id)?
+        .config
+        .clone();
+    let access = load_mac_guest_access(&paths)?
+        .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
+    let current = build_mac_builder_view(app, &paths).await?;
+    ensure_apple_project_guest_ready(&current)?;
+    Ok(GuestContext {
+        identity_path: paths.guest_identity(),
+        known_hosts_path: paths.known_hosts(),
+        paths,
+        profile,
+        username: access.username,
+        current,
+    })
+}
+
+/// Runs blocking provider work as the machine's one operation: the busy marker is held for
+/// its duration, the work enters a cancellation scope so a Stop reaches its processes, and a
+/// cancelled run reports as such rather than with whatever error the kill produced.
+pub(crate) async fn run_machine_operation<T, W>(
+    app: &AppHandle,
+    machine_id: &str,
+    label: &'static str,
+    work: W,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    W: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let guard = begin_machine_operation(app, machine_id, label)?;
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        work()
+    })
+    .await
+    .map_err(|error| error.to_string());
+    drop(guard);
+    finish_operation(&cancel_probe, joined)
+}

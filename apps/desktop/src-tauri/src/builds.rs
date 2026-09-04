@@ -368,16 +368,10 @@ pub(crate) async fn clear_mac_guest_signing(
     app: AppHandle,
     machine_id: String,
 ) -> Result<MacBuilderView, String> {
-    let paths = MachinePaths::resolve(&app, &machine_id)?;
-    let profile = machines::load_registry(&app)?
-        .find(&machine_id)?
-        .config
-        .clone();
-    let access = load_mac_guest_access(&paths)?
-        .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
-    let current = build_mac_builder_view(&app, &paths).await?;
-    ensure_apple_project_guest_ready(&current)?;
-    let profile_uuids = current
+    let guest = guest_context(&app, &machine_id).await?;
+    let paths = guest.paths.clone();
+    let profile_uuids = guest
+        .current
         .signing
         .as_ref()
         .ok_or_else(|| "No provisioned signing state is recorded for this guest.".to_string())?
@@ -385,27 +379,17 @@ pub(crate) async fn clear_mac_guest_signing(
         .iter()
         .map(|profile| profile.uuid.clone())
         .collect::<Vec<_>>();
-    let identity_path = paths.guest_identity();
-    let known_hosts_path = paths.known_hosts();
-
-    let guard = begin_machine_operation(&app, &machine_id, "clearing_signing")?;
-    let scope = guard.scope();
-    let cancel_probe = Arc::clone(&scope);
-    let joined = tauri::async_runtime::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
+    run_machine_operation(&app, &machine_id, "clearing_signing", move || {
         buildbridge_docker_osx::clear_signing(
             &profile_uuids,
-            profile.ssh_port,
-            &access.username,
-            &identity_path,
-            &known_hosts_path,
+            guest.ssh_port(),
+            &guest.username,
+            &guest.identity_path,
+            &guest.known_hosts_path,
         )
         .map_err(|error| error.to_string())
     })
-    .await
-    .map_err(|error| error.to_string());
-    drop(guard);
-    finish_operation(&cancel_probe, joined)?;
+    .await?;
     remove_signing_provisioning_record(&paths)?;
 
     build_mac_builder_view(&app, &paths).await

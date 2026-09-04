@@ -12,38 +12,22 @@ pub(crate) async fn pair_guest_device(
     machine_id: String,
     input: PairGuestDeviceInput,
 ) -> Result<MacBuilderView, String> {
-    let paths = MachinePaths::resolve(&app, &machine_id)?;
-    let profile = machines::load_registry(&app)?
-        .find(&machine_id)?
-        .config
-        .clone();
-    let access = load_mac_guest_access(&paths)?
-        .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
     if !buildbridge_docker_osx::valid_device_udid(&input.udid) {
         return Err("The device identifier is not a UDID.".to_string());
     }
-    let current = build_mac_builder_view(&app, &paths).await?;
-    ensure_apple_project_guest_ready(&current)?;
-    let guard = begin_machine_operation(&app, &machine_id, "pairing_device")?;
-    let identity_path = paths.guest_identity();
-    let known_hosts_path = paths.known_hosts();
-    let scope = guard.scope();
-    let cancel_probe = Arc::clone(&scope);
-    let joined = tauri::async_runtime::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
+    let guest = guest_context(&app, &machine_id).await?;
+    let paths = guest.paths.clone();
+    let devices = run_machine_operation(&app, &machine_id, "pairing_device", move || {
         buildbridge_docker_osx::pair_guest_device(
-            profile.ssh_port,
-            &access.username,
-            &identity_path,
-            &known_hosts_path,
+            guest.ssh_port(),
+            &guest.username,
+            &guest.identity_path,
+            &guest.known_hosts_path,
             &input.udid,
         )
         .map_err(|error| error.to_string())
     })
-    .await
-    .map_err(|error| error.to_string());
-    drop(guard);
-    let devices = finish_operation(&cancel_probe, joined)?;
+    .await?;
     if let Ok(mut cache) = app.state::<AppState>().guest_devices.lock() {
         cache.insert(machine_id.clone(), devices);
     }
@@ -67,23 +51,14 @@ pub(crate) async fn open_safari_web_inspector(
     app: AppHandle,
     machine_id: String,
 ) -> Result<OpenSafariInspectorResult, String> {
-    let paths = MachinePaths::resolve(&app, &machine_id)?;
-    let profile = machines::load_registry(&app)?
-        .find(&machine_id)?
-        .config
-        .clone();
-    let access = load_mac_guest_access(&paths)?
-        .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
-    let current = build_mac_builder_view(&app, &paths).await?;
-    ensure_apple_project_guest_ready(&current)?;
-    let identity_path = paths.guest_identity();
-    let known_hosts_path = paths.known_hosts();
+    let guest = guest_context(&app, &machine_id).await?;
+    let paths = guest.paths.clone();
     let inspector = tauri::async_runtime::spawn_blocking(move || {
         buildbridge_docker_osx::open_safari_web_inspector(
-            profile.ssh_port,
-            &access.username,
-            &identity_path,
-            &known_hosts_path,
+            guest.ssh_port(),
+            &guest.username,
+            &guest.identity_path,
+            &guest.known_hosts_path,
         )
         .map_err(|error| error.to_string())
     })
@@ -101,34 +76,18 @@ pub(crate) async fn list_guest_devices(
     app: AppHandle,
     machine_id: String,
 ) -> Result<MacBuilderView, String> {
-    let paths = MachinePaths::resolve(&app, &machine_id)?;
-    let profile = machines::load_registry(&app)?
-        .find(&machine_id)?
-        .config
-        .clone();
-    let access = load_mac_guest_access(&paths)?
-        .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
-    let current = build_mac_builder_view(&app, &paths).await?;
-    ensure_apple_project_guest_ready(&current)?;
-    let guard = begin_machine_operation(&app, &machine_id, "listing_devices")?;
-    let identity_path = paths.guest_identity();
-    let known_hosts_path = paths.known_hosts();
-    let scope = guard.scope();
-    let cancel_probe = Arc::clone(&scope);
-    let joined = tauri::async_runtime::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
+    let guest = guest_context(&app, &machine_id).await?;
+    let paths = guest.paths.clone();
+    let devices = run_machine_operation(&app, &machine_id, "listing_devices", move || {
         buildbridge_docker_osx::list_guest_devices(
-            profile.ssh_port,
-            &access.username,
-            &identity_path,
-            &known_hosts_path,
+            guest.ssh_port(),
+            &guest.username,
+            &guest.identity_path,
+            &guest.known_hosts_path,
         )
         .map_err(|error| error.to_string())
     })
-    .await
-    .map_err(|error| error.to_string());
-    drop(guard);
-    let devices = finish_operation(&cancel_probe, joined)?;
+    .await?;
     if let Ok(mut cache) = app.state::<AppState>().guest_devices.lock() {
         cache.insert(machine_id.clone(), devices);
     }
@@ -723,13 +682,8 @@ pub(crate) async fn adopt_guest_podfile_lock(
     app: AppHandle,
     machine_id: String,
 ) -> Result<AdoptPodfileLockResult, String> {
-    let paths = MachinePaths::resolve(&app, &machine_id)?;
-    let profile = machines::load_registry(&app)?
-        .find(&machine_id)?
-        .config
-        .clone();
-    let access = load_mac_guest_access(&paths)?
-        .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
+    let guest = guest_context(&app, &machine_id).await?;
+    let paths = guest.paths.clone();
     let mut workspace = load_apple_workspace(&paths)?
         .ok_or_else(|| "Approve and synchronize a local Apple project first.".to_string())?;
     if !workspace.last_native_lock_updated {
@@ -738,29 +692,17 @@ pub(crate) async fn adopt_guest_podfile_lock(
                 .to_string(),
         );
     }
-    let current = build_mac_builder_view(&app, &paths).await?;
-    ensure_apple_project_guest_ready(&current)?;
     let host_lock = PathBuf::from(&workspace.local_path).join("ios/App/Podfile.lock");
-    let identity_path = paths.guest_identity();
-    let known_hosts_path = paths.known_hosts();
-
-    let guard = begin_machine_operation(&app, &machine_id, "adopting_lock")?;
-    let scope = guard.scope();
-    let cancel_probe = Arc::clone(&scope);
-    let joined = tauri::async_runtime::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
+    let guest_lock = run_machine_operation(&app, &machine_id, "adopting_lock", move || {
         buildbridge_docker_osx::read_guest_podfile_lock(
-            profile.ssh_port,
-            &access.username,
-            &identity_path,
-            &known_hosts_path,
+            guest.ssh_port(),
+            &guest.username,
+            &guest.identity_path,
+            &guest.known_hosts_path,
         )
         .map_err(|error| error.to_string())
     })
-    .await
-    .map_err(|error| error.to_string());
-    drop(guard);
-    let guest_lock = finish_operation(&cancel_probe, joined)?;
+    .await?;
 
     let before = match fs::read_to_string(&host_lock) {
         Ok(content) => content,
