@@ -278,7 +278,7 @@ pub(crate) async fn settle_attached_phone(
         };
         report(
             UsbAttachPhase::WaitingForMacos,
-            "macOS is enumerating the phone; this takes up to a minute",
+            "macOS is enumerating the phone; this can take a minute and a half",
         );
         let mut devices = Vec::new();
         while started.elapsed() < std::time::Duration::from_secs(90) {
