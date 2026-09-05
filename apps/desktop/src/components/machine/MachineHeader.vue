@@ -3,6 +3,7 @@
 // facts that used to be chips live in the rail now, each on the step that produced it.
 import {
     EllipsisVertical,
+    ExternalLink,
     HardDrive,
     Layers,
     Pencil,
@@ -162,6 +163,16 @@ const menuItemClass =
             <p class="mt-1 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">{{ facts }}</p>
         </div>
         <div class="flex shrink-0 items-center gap-1.5">
+            <Button
+                v-if="view.displayUrl && live"
+                variant="outline"
+                size="sm"
+                title="Opens the machine's screen in its own window; any browser on this host can open the same address"
+                @click="machines.openMachineScreen(session.id)"
+            >
+                <ExternalLink class="h-3.5 w-3.5" />
+                Screen
+            </Button>
             <Button
                 v-if="live"
                 variant="outline"

@@ -96,6 +96,13 @@ enum MachineCommand {
     Show {
         machine: String,
     },
+    /// Print the address of the machine's screen, for providers that serve it as a web page.
+    Screen {
+        machine: String,
+        /// Open it in this host's default browser as well.
+        #[arg(long)]
+        open: bool,
+    },
     /// Remove the container and its macOS disk; the machine profile stays.
     Discard {
         machine: String,
@@ -672,6 +679,39 @@ async fn run(cli: Cli) -> Result<(), String> {
             &e::get_mac_builder_status(engine, machine).await?,
             print_machine,
         ),
+        Command::Machine(MachineCommand::Screen { machine, open }) => {
+            let view = serde_json::to_value(e::get_mac_builder_status(engine, machine).await?)
+                .map_err(|error| error.to_string())?;
+            let Some(url) = view["displayUrl"].as_str().map(str::to_string) else {
+                return Err(
+                    "This machine's provider shows its screen in a window on this host's display, not at an address."
+                        .to_string(),
+                );
+            };
+            if view["runtime"]["state"].as_str() != Some("running") {
+                return Err(
+                    "Start the machine first; its screen is served while it runs.".to_string(),
+                );
+            }
+            if json {
+                println!("{}", serde_json::json!({ "displayUrl": url }));
+            } else {
+                println!("{url}");
+            }
+            if open {
+                let status = std::process::Command::new("xdg-open")
+                    .arg(&url)
+                    .status()
+                    .map_err(|error| format!("could not run xdg-open: {error}"))?;
+                if !status.success() {
+                    return Err(
+                        "xdg-open could not open the screen; open the address above in a browser."
+                            .to_string(),
+                    );
+                }
+            }
+            Ok(())
+        }
         Command::Machine(MachineCommand::Discard { machine, confirm }) => {
             confirm.require("Discarding the container and its macOS disk")?;
             report(
