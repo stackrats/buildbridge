@@ -81,8 +81,9 @@ enum MachineCommand {
         /// Clone a saved template instead of installing macOS.
         #[arg(long)]
         from_template: Option<String>,
-        /// Which image runs macOS: docker-osx, or dockur-macos (experimental) whose screen is a
-        /// web page on the port after the SSH port.
+        /// Which image runs macOS. docker-osx shows the screen in a window on this host's
+        /// display; dockur-macos serves it as a web page on the port after the SSH port and
+        /// needs /dev/net/tun and the machine's memory free. Either builds and clones the same.
         #[arg(long, value_enum, default_value_t = ProviderArg::DockerOsx)]
         provider: ProviderArg,
     },

@@ -119,7 +119,7 @@ where
     if config.provider == MachineProvider::DockurMacos {
         return dockur::launch(container_name, config, options, on_progress);
     }
-    let disk = MachineDisk::for_launch(options)?;
+    let disk = MachineDisk::for_launch(options, config)?;
     validate_bind_path(options.qmp_dir, "control socket directory")?;
     let started = Instant::now();
     let mut report = |phase: LaunchPhase, detail: &str| {

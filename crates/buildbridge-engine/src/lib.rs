@@ -15,8 +15,8 @@ pub use buildbridge_docker_osx::{
     AppleArchiveArtifact, AppleArchiveProgress, AppleArchiveResult, AppleDeviceRunProgress,
     AppleDeviceRunResult, AppleProjectProgress, AppleSmokeBuildResult, AppleWorkspaceSyncResult,
     ContainerState, GuestDiagnostics, GuestEnvFiles, GuestOptimization, GuestSshStatus,
-    GuestTrustState, HostPrerequisites, MacBuilderConfig, MachineProvider, OperationScope,
-    PodfileLockChanges,
+    GuestTrustState, HostPrerequisites, MacBuilderConfig, MacOsRelease, MachineProvider,
+    OperationScope, PodfileLockChanges,
     RuntimeStatus, SigningProvisioningProgress, SigningProvisioningResult, UnsignedBuildTarget,
     XcodeImportProgress,
 };

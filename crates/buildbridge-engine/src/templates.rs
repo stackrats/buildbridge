@@ -32,6 +32,14 @@ pub struct StoredMachineTemplate {
     pub(crate) known_hosts_line: String,
     #[ts(type = "number")]
     pub(crate) size_bytes: u64,
+    /// The provider of the machine it was saved from; a clone must run on the same one, since
+    /// the disk directory's layout belongs to the provider.
+    #[serde(default)]
+    pub(crate) provider: MachineProvider,
+    /// The release the source machine was created with; a clone adopts it, because for
+    /// dockur/macos it also names the directory the image keeps the disk in.
+    #[serde(default)]
+    pub(crate) macos_release: Option<MacOsRelease>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -52,6 +60,7 @@ pub struct MachineTemplateSummary {
     pub(crate) machine_names: Vec<String>,
     /// The files are all present; a save that stopped halfway leaves this false.
     pub(crate) ready: bool,
+    pub(crate) provider: MachineProvider,
 }
 
 /// The template a machine was cloned from, as the machine view names it.
@@ -223,6 +232,7 @@ fn summarize_template(
             .map(|machine| machine.config.name.clone())
             .collect(),
         ready: files.ready(),
+        provider: template.provider,
     })
 }
 
@@ -267,12 +277,6 @@ pub async fn save_machine_template(
     let paths = MachinePaths::resolve(app, &machine_id)?;
     let registry = machines::load_registry(app)?;
     let machine = registry.find(&machine_id)?.clone();
-    if machine.config.provider == MachineProvider::DockurMacos {
-        return Err(
-            "Templates are saved from Docker-OSX machines for now; a dockur/macos machine keeps its identity inside its storage directory, which a clone must not share."
-                .to_string(),
-        );
-    }
     if !paths.known_hosts().is_file() {
         return Err(
             "Pin the guest identity first; a template carries it so clones need no comparison."
@@ -288,16 +292,20 @@ pub async fn save_machine_template(
     }
     let public_key = read_mac_guest_public_key(&paths.guest_public_key())?;
     let source_dir = paths.disk_dir();
-    if !source_dir
-        .join(buildbridge_docker_osx::DISK_IMAGE_NAME)
-        .is_file()
-    {
+    let source_template_dir = template_dir_for(app, &machine_id)?;
+    let source_config = machine.config.clone();
+    let source_disk = buildbridge_docker_osx::MachineDisk::for_machine(
+        &source_config,
+        &source_dir,
+        source_template_dir.as_deref(),
+    )
+    .map_err(|error| error.to_string())?;
+    if !source_disk.image().is_file() {
         return Err(
             "This machine keeps its macOS disk inside the container. Enable USB on this machine first: that moves the disk to this host, which a template needs."
                 .to_string(),
         );
     }
-    let source_template_dir = template_dir_for(app, &machine_id)?;
     let known_hosts_line = fs::read_to_string(paths.known_hosts())
         .map_err(|error| format!("Could not read the pinned identity: {error}"))?
         .trim()
@@ -331,12 +339,11 @@ pub async fn save_machine_template(
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
         let _operation = buildbridge_docker_osx::enter_operation(scope);
-        let source = match source_template_dir.as_deref() {
-            Some(template_dir) => {
-                buildbridge_docker_osx::MachineDisk::from_template(&source_dir, template_dir)
-            }
-            None => buildbridge_docker_osx::MachineDisk::new(&source_dir),
-        }
+        let source = buildbridge_docker_osx::MachineDisk::for_machine(
+            &source_config,
+            &source_dir,
+            source_template_dir.as_deref(),
+        )
         .map_err(|error| error.to_string())?;
         let files = buildbridge_docker_osx::MachineTemplateFiles::new(&files_dir)
             .map_err(|error| error.to_string())?;
@@ -376,6 +383,8 @@ pub async fn save_machine_template(
         guest_username: access.username,
         known_hosts_line,
         size_bytes,
+        provider: machine.config.provider,
+        macos_release: Some(machine.config.macos_release),
     };
     if let Err(error) = save_template_record(app, &template) {
         let _ = template_paths.remove();
@@ -536,6 +545,8 @@ mod tests {
             guest_username: "builder".to_string(),
             known_hosts_line: "[127.0.0.1]:50922 ssh-ed25519 AAAA".to_string(),
             size_bytes: 21_000_000_000,
+            provider: MachineProvider::DockerOsx,
+            macos_release: None,
         };
         let encoded = serde_json::to_string(&template).unwrap();
         assert!(encoded.contains("\"knownHostsLine\""));

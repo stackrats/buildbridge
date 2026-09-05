@@ -58,7 +58,7 @@ pub use device_run::{
     DeveloperModeState, GuestDevice, PairingState, TransportType, TunnelState, list_guest_devices,
 };
 pub use disk::{
-    ContainerLayout, ContainerRebuildPhase, ContainerRebuildProgress, DISK_IMAGE_NAME,
+    ContainerLayout, ContainerRebuildPhase, ContainerRebuildProgress, DISK_IMAGE_NAME, DiskLayout,
     DISK_NVRAM_NAME, DiskMigrationPhase, DiskMigrationProgress, MachineDisk, ensure_machine_disk,
     inspect_container_layout, migrate_disk_to_host, rebuild_container, remove_machine_disk,
     required_free_bytes, validate_bind_path,

@@ -41,22 +41,94 @@ const GIB: u64 = 1024 * 1024 * 1024;
 /// QEMU runs as `arch`, uid 1000, in the image; a control directory it can use has that owner.
 const CONTAINER_QEMU_UID: u32 = 1000;
 
+/// Where a provider keeps a machine's files inside its disk directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskLayout {
+    /// Docker-OSX: the image, the NVRAM and the install media at the top of the directory.
+    DockerOsx,
+    /// dockur/macos: everything under the macOS version directory the image keeps them in.
+    DockurMacos { version: &'static str },
+}
+
+impl DiskLayout {
+    pub fn for_config(config: &MacBuilderConfig) -> Self {
+        match config.provider {
+            MachineProvider::DockerOsx => Self::DockerOsx,
+            MachineProvider::DockurMacos => Self::DockurMacos {
+                version: crate::dockur::version_env(config.macos_release),
+            },
+        }
+    }
+
+    pub fn provider(self) -> MachineProvider {
+        match self {
+            Self::DockerOsx => MachineProvider::DockerOsx,
+            Self::DockurMacos { .. } => MachineProvider::DockurMacos,
+        }
+    }
+
+    fn relative(self, docker_osx_name: &str, dockur_name: &str) -> PathBuf {
+        match self {
+            Self::DockerOsx => PathBuf::from(docker_osx_name),
+            Self::DockurMacos { version } => Path::new(version).join(dockur_name),
+        }
+    }
+
+    fn image(self) -> PathBuf {
+        self.relative(DISK_IMAGE_NAME, crate::dockur::DATA_DISK_NAME)
+    }
+
+    fn nvram(self) -> PathBuf {
+        self.relative(DISK_NVRAM_NAME, crate::dockur::NVRAM_NAME)
+    }
+
+    fn basesystem(self) -> PathBuf {
+        self.relative(DISK_BASESYSTEM_NAME, crate::dockur::RECOVERY_NAME)
+    }
+}
+
 /// The host directory holding one machine's disk files, and the template directory its disk
 /// is an overlay of, when it was cloned from one.
 #[derive(Debug, Clone)]
 pub struct MachineDisk {
     dir: PathBuf,
     template_dir: Option<PathBuf>,
+    layout: DiskLayout,
 }
 
 impl MachineDisk {
+    /// A Docker-OSX disk; [`MachineDisk::for_machine`] is the provider-aware constructor.
     pub fn new(dir: &Path) -> Result<Self, ProviderError> {
         validate_bind_path(dir, "disk directory")?;
 
         Ok(Self {
             dir: dir.to_path_buf(),
             template_dir: None,
+            layout: DiskLayout::DockerOsx,
         })
+    }
+
+    /// The disk of a machine with this profile, an overlay of a template when it has one.
+    pub fn for_machine(
+        config: &MacBuilderConfig,
+        dir: &Path,
+        template_dir: Option<&Path>,
+    ) -> Result<Self, ProviderError> {
+        let mut disk = match template_dir {
+            Some(template_dir) => Self::from_template(dir, template_dir)?,
+            None => Self::new(dir)?,
+        };
+        disk.layout = DiskLayout::for_config(config);
+        Ok(disk)
+    }
+
+    pub fn layout(&self) -> DiskLayout {
+        self.layout
+    }
+
+    /// The image's path inside the disk directory, as a throwaway container sees it.
+    pub fn image_relative(&self) -> String {
+        self.layout.image().to_string_lossy().into_owned()
     }
 
     /// A disk cloned from a template: its image is a copy-on-write overlay whose backing file
@@ -69,15 +141,16 @@ impl MachineDisk {
         Ok(Self {
             dir: dir.to_path_buf(),
             template_dir: Some(template_dir.to_path_buf()),
+            layout: DiskLayout::DockerOsx,
         })
     }
 
     /// The disk a launch describes: an overlay over its template when it has one.
-    pub fn for_launch(options: &LaunchOptions<'_>) -> Result<Self, ProviderError> {
-        match options.template_dir {
-            Some(template_dir) => Self::from_template(options.disk_dir, template_dir),
-            None => Self::new(options.disk_dir),
-        }
+    pub fn for_launch(
+        options: &LaunchOptions<'_>,
+        config: &MacBuilderConfig,
+    ) -> Result<Self, ProviderError> {
+        Self::for_machine(config, options.disk_dir, options.template_dir)
     }
 
     pub fn dir(&self) -> &Path {
@@ -89,20 +162,22 @@ impl MachineDisk {
     }
 
     pub fn image(&self) -> PathBuf {
-        self.dir.join(DISK_IMAGE_NAME)
+        self.dir.join(self.layout.image())
     }
 
     pub fn nvram(&self) -> PathBuf {
-        self.dir.join(DISK_NVRAM_NAME)
+        self.dir.join(self.layout.nvram())
     }
 
     pub fn basesystem(&self) -> PathBuf {
-        self.dir.join(DISK_BASESYSTEM_NAME)
+        self.dir.join(self.layout.basesystem())
     }
 
-    /// The disk and NVRAM exist and are not empty; the install media is optional.
+    /// The disk exists and is not empty, and for Docker-OSX so does the NVRAM it is created
+    /// with; the install media is optional. dockur/macos writes its own NVRAM on first boot.
     pub fn ready(&self) -> bool {
-        non_empty_file(&self.image()) && non_empty_file(&self.nvram())
+        non_empty_file(&self.image())
+            && (self.layout != DiskLayout::DockerOsx || non_empty_file(&self.nvram()))
     }
 }
 
@@ -512,7 +587,7 @@ where
             "a dockur/macos machine keeps its disk on this host from its first start; there is nothing to migrate".to_string(),
         ));
     }
-    let disk = MachineDisk::for_launch(options)?;
+    let disk = MachineDisk::for_launch(options, config)?;
     validate_bind_path(options.qmp_dir, "control socket directory")?;
     let started = Instant::now();
     let mut report = |phase: DiskMigrationPhase, completed: u64, total: u64, detail: &str| {
@@ -663,7 +738,7 @@ where
     F: FnMut(ContainerRebuildProgress),
 {
     config.validate()?;
-    let disk = MachineDisk::for_launch(options)?;
+    let disk = MachineDisk::for_launch(options, config)?;
     validate_bind_path(options.qmp_dir, "control socket directory")?;
     let started = Instant::now();
     let mut report = |phase: ContainerRebuildPhase, detail: &str| {

@@ -981,10 +981,14 @@ The following decisions should be treated as settled until this document is deli
     because the image would, and reaches QEMU's control socket through `docker exec` and
     netcat because QEMU is root in that image and its socket is not the host user's to open;
     `QmpEndpoint` names the two routes and every QMP caller takes one. Everything spoken over
-    SSH to the guest is untouched. Templates, disk migration and the console window stay
-    Docker-OSX only: a dockur/macos clone would share its template's generated identity, and
-    its disk is on the host from the first start. The screen's port is the one after the SSH
-    port, so the port check covers both. The provider crate keeps its name for now; it is the
+    SSH to the guest is untouched. Templates work for both: a template keeps one naming
+    whichever provider saved it, records that provider and the release, and a clone takes both,
+    its overlay placed where its own image keeps the disk; a dockur/macos clone gets a fresh
+    identity and boot image because neither is in the template. Disk migration stays
+    Docker-OSX's because that disk starts on the host, and the console window because the
+    screen is a page. Neither provider is called experimental in the interface; the chooser
+    describes how they differ (screen, host needs, disk, track record) and leaves the choice.
+    The screen's port is the one after the SSH port, so the port check covers both. The provider crate keeps its name for now; it is the
     macOS-machine crate, and renaming it is churn without a third provider. Run live the same
     day, which corrected three things. The `QMP` value is spelled out as the full chardev
     (`unix:/run/buildbridge-qmp.sock,server=on,wait=off`): the image version in use passes a

@@ -43,8 +43,12 @@ const error = ref<string | null>(null);
 // '' is a fresh install; a template id clones that template's disk.
 const startFrom = ref('');
 
+// A template belongs to the provider that saved it: the disk directory's layout is that
+// provider's, so only its templates are offered.
 const readyTemplates = computed(() =>
-    machines.state.templates.filter((template) => template.ready),
+    machines.state.templates.filter(
+        (template) => template.ready && template.provider === profile.value.provider,
+    ),
 );
 const startOptions = computed(() => [
     { value: '', label: 'A fresh macOS install (about an hour, in the console)' },
@@ -54,13 +58,11 @@ const startOptions = computed(() => [
     })),
 ]);
 
-// A dockur/macos machine installs macOS itself; a template is a Docker-OSX disk.
+// The offered templates change with the provider, so the choice starts over.
 watch(
     () => profile.value.provider,
-    (provider) => {
-        if (provider === 'dockur_macos') {
-            startFrom.value = '';
-        }
+    () => {
+        startFrom.value = '';
     },
 );
 
@@ -116,7 +118,7 @@ async function create(): Promise<void> {
                 start.
             </Callout>
             <Field
-                v-if="readyTemplates.length && profile.provider !== 'dockur_macos'"
+                v-if="readyTemplates.length"
                 label="Start from"
                 :hint="
                     startFrom
@@ -127,16 +129,6 @@ async function create(): Promise<void> {
                 <Select v-model="startFrom" :options="startOptions" />
             </Field>
             <MachineProfileForm v-model="profile" />
-            <Callout
-                v-if="profile.provider === 'dockur_macos'"
-                tone="neutral"
-                title="dockur/macos is experimental here"
-            >
-                Its screen opens as a web page from the machine's Install step, the image forwards
-                the guest's SSH port to this host, and a phone attaches through the same USB
-                controller. Templates, disk migration and the console window are Docker-OSX only for
-                now.
-            </Callout>
             <Callout v-if="error" tone="danger">{{ error }}</Callout>
             <div class="flex justify-end gap-2">
                 <Button variant="outline" size="sm" :disabled="saving" @click="open = false">

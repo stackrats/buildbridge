@@ -15,9 +15,48 @@ const { hardwareLocked = false, providerLocked = false } = defineProps<{
 }>();
 
 const providers: { value: MachineProvider; label: string }[] = [
-    { value: 'docker_osx', label: 'Docker-OSX (recommended)' },
-    { value: 'dockur_macos', label: 'dockur/macos · experimental' },
+    { value: 'docker_osx', label: 'Docker-OSX' },
+    { value: 'dockur_macos', label: 'dockur/macos' },
 ];
+
+// Both run macOS under QEMU with KVM in a container BuildBridge creates; installs, builds,
+// signing and templates are the same on either. What differs is below, so the choice is an
+// informed one rather than a label.
+const differences: Record<MachineProvider, { label: string; detail: string }[]> = {
+    docker_osx: [
+        {
+            label: 'Screen',
+            detail: "A window on this host's X display, opened by the machine itself.",
+        },
+        { label: 'Host', detail: 'Docker with KVM and an X11 display; nothing else.' },
+        {
+            label: 'Disk',
+            detail: 'A qcow2 BuildBridge keeps beside the machine on this host, with an identity it generates once.',
+        },
+        {
+            label: 'Track record',
+            detail: 'The original. Templates, signing, archives and iPhone passthrough have all been proven on it; its upstream has been quiet since late 2025.',
+        },
+    ],
+    dockur_macos: [
+        {
+            label: 'Screen',
+            detail: 'A web page on the port after the SSH port, opened from the Install step or any browser, so a headless host works too.',
+        },
+        {
+            label: 'Host',
+            detail: "Docker with KVM, plus /dev/net/tun and the NET_ADMIN capability for its network. It refuses to start unless the machine's memory is actually free.",
+        },
+        {
+            label: 'Disk',
+            detail: "A qcow2 under the machine's storage directory on this host, with an identity the image generates itself.",
+        },
+        {
+            label: 'Track record',
+            detail: 'Actively maintained, with a newer QEMU. Installs, builds and templates work the same; iPhone passthrough uses the same controller but has not been proven on it yet.',
+        },
+    ],
+};
 
 // Newest first. Xcode 26 does not run on Sonoma or Ventura, so a machine built on either
 // cannot reach a signed archive; say so here rather than letting it fail at the Xcode step.
@@ -38,10 +77,8 @@ const releases: { value: MacOsRelease; label: string }[] = [
             label="Provider"
             :hint="
                 providerLocked
-                    ? 'Fixed once the machine exists.'
-                    : model.provider === 'dockur_macos'
-                      ? 'The screen is a web page on the port after the SSH port. Needs /dev/net/tun and the memory actually free on this host. Templates and disk migration are Docker-OSX only for now.'
-                      : 'A window on this host\'s display, the disk on this host, templates and phone passthrough.'
+                    ? 'Fixed once the machine exists: its disk directory belongs to this provider.'
+                    : 'Which image runs macOS. Either installs, builds, signs and clones the same way.'
             "
         >
             <Select
@@ -50,6 +87,20 @@ const releases: { value: MacOsRelease; label: string }[] = [
                 :disabled="providerLocked"
                 @update:model-value="model.provider = $event as MachineProvider"
             />
+            <dl class="mt-2 space-y-1.5 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950">
+                <div
+                    v-for="difference in differences[model.provider]"
+                    :key="difference.label"
+                    class="grid grid-cols-[6.5rem_1fr] gap-2"
+                >
+                    <dt class="text-xs font-medium text-zinc-700 dark:text-zinc-200">
+                        {{ difference.label }}
+                    </dt>
+                    <dd class="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                        {{ difference.detail }}
+                    </dd>
+                </div>
+            </dl>
         </Field>
         <Field
             label="macOS installer"

@@ -6,20 +6,26 @@ pub async fn list_machines(app: &Engine) -> Result<MachineListView, String> {
 }
 pub async fn create_machine(
     app: &Engine,
-    profile: MacBuilderConfig,
+    mut profile: MacBuilderConfig,
     template_id: Option<String>,
 ) -> Result<MachineListView, String> {
     profile.validate().map_err(|error| error.to_string())?;
     let template_id = match template_id.map(|id| id.trim().to_string()) {
         Some(id) if !id.is_empty() => {
-            if profile.provider == MachineProvider::DockurMacos {
-                return Err(
-                    "Templates clone Docker-OSX disks; a dockur/macos machine installs macOS itself."
-                        .to_string(),
-                );
-            }
             let template = load_template(app, &id)?
                 .ok_or_else(|| "That template is no longer stored.".to_string())?;
+            // The disk directory's layout belongs to the provider that made the template, and
+            // the release names that layout for dockur/macos; a clone takes both from it.
+            if template.provider != profile.provider {
+                return Err(format!(
+                    "The template {} was saved from a {} machine; choose that provider to clone it.",
+                    template.name,
+                    template.provider.label()
+                ));
+            }
+            if let Some(release) = template.macos_release {
+                profile.macos_release = release;
+            }
             let files = buildbridge_docker_osx::MachineTemplateFiles::new(
                 &TemplatePaths::resolve(app, &id)?.files_dir(),
             )

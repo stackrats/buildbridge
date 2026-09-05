@@ -11,8 +11,12 @@
 use super::*;
 
 pub const DOCKUR_IMAGE: &str = "dockurr/macos:latest";
-/// The volume the image keeps every file of the machine in.
+/// The volume the image keeps every file of the machine in. Inside it, everything sits under
+/// the macOS version directory, which is what `version_env` names.
 pub(crate) const STORAGE_CONTAINER_DIR: &str = "/storage";
+pub(crate) const DATA_DISK_NAME: &str = "data.qcow2";
+pub(crate) const NVRAM_NAME: &str = "macos.vars";
+pub(crate) const RECOVERY_NAME: &str = "base.dmg";
 /// Where QEMU creates its control socket inside the container.
 pub(crate) const QMP_CONTAINER_SOCKET: &str = "/run/buildbridge-qmp.sock";
 /// The `-qmp` value the image hands QEMU. Spelled out in full: a bare path is passed through
@@ -50,7 +54,7 @@ pub(crate) fn qemu_arguments(usb: Option<&ContainerUsbOptions>) -> Option<String
 pub(crate) fn create_args(
     container_name: &str,
     config: &MacBuilderConfig,
-    storage_dir: &Path,
+    disk: &MachineDisk,
     usb: Option<&ContainerUsbOptions>,
 ) -> Vec<String> {
     let mut args = vec![
@@ -70,8 +74,15 @@ pub(crate) fn create_args(
     }
     args.push(format!(
         "--volume={}:{STORAGE_CONTAINER_DIR}:rw",
-        storage_dir.display()
+        disk.dir().display()
     ));
+    if let Some(template_dir) = disk.template_dir() {
+        args.push(format!(
+            "--volume={}:{}:ro",
+            template_dir.display(),
+            crate::templates::CONTAINER_TEMPLATE_DIR
+        ));
+    }
     if usb.is_some() {
         args.push(format!(
             "--device-cgroup-rule=c {}:* rwm",
@@ -137,17 +148,19 @@ pub(crate) fn create_container(
     config: &MacBuilderConfig,
     options: &LaunchOptions<'_>,
 ) -> Result<(), ProviderError> {
-    validate_bind_path(options.disk_dir, "storage directory")?;
+    let disk = MachineDisk::for_launch(options, config)?;
     run_docker(
         "container creation",
-        &create_args(container_name, config, options.disk_dir, options.usb.as_ref()),
+        &create_args(container_name, config, &disk, options.usb.as_ref()),
     )?;
 
     Ok(())
 }
 
 /// Creates the container when it is missing, then starts it. There is no identity to generate
-/// and no disk to prepare: the image does both on its first start, into the storage directory.
+/// and, from scratch, no disk to prepare: the image does both on its first start, into the
+/// storage directory. A clone gets its overlay first, and the image then generates a fresh
+/// identity and boot image for it, since neither is in the storage directory.
 pub(crate) fn launch<F>(
     container_name: &str,
     config: &MacBuilderConfig,
@@ -157,12 +170,7 @@ pub(crate) fn launch<F>(
 where
     F: FnMut(LaunchProgress),
 {
-    if options.template_dir.is_some() {
-        return Err(ProviderError::InvalidConfig(
-            "templates are saved from Docker-OSX machines; a dockur/macos machine installs macOS itself".to_string(),
-        ));
-    }
-    validate_bind_path(options.disk_dir, "storage directory")?;
+    let disk = MachineDisk::for_launch(options, config)?;
     let started = Instant::now();
     let mut report = |phase: LaunchPhase, detail: &str| {
         on_progress(LaunchProgress {
@@ -186,6 +194,12 @@ where
             "Preparing the machine's storage directory on this host",
         );
         ensure_storage_dir(options.disk_dir)?;
+        if let Some(template_dir) = disk.template_dir()
+            && !disk.ready()
+        {
+            let _ = fs::remove_file(disk.image());
+            crate::templates::clone_template_files(template_dir, &disk)?;
+        }
         report(
             LaunchPhase::CreatingContainer,
             "Creating the managed container",
@@ -241,10 +255,12 @@ mod tests {
 
     #[test]
     fn docker_create_uses_fixed_argv_with_loopback_ports_and_no_privileged_mode() {
+        let disk = MachineDisk::for_machine(&profile(), Path::new("/tmp/buildbridge/x/disk"), None)
+            .unwrap();
         let args = create_args(
             "buildbridge-machine-x",
             &profile(),
-            Path::new("/tmp/buildbridge/x/disk"),
+            &disk,
             Some(&ContainerUsbOptions { plugdev_gid: 46 }),
         );
 
@@ -273,10 +289,24 @@ mod tests {
 
     #[test]
     fn without_usb_no_qemu_arguments_and_no_device_rule_are_passed() {
-        let args = create_args("c", &profile(), Path::new("/tmp/d"), None);
+        let disk = MachineDisk::for_machine(&profile(), Path::new("/tmp/d"), None).unwrap();
+        let args = create_args("c", &profile(), &disk, None);
 
         assert!(!args.iter().any(|arg| arg.starts_with("--env=ARGUMENTS=")));
         assert!(!args.iter().any(|arg| arg.starts_with("--device-cgroup-rule")));
+        assert!(!args.iter().any(|arg| arg.contains("/buildbridge-template")));
+    }
+
+    #[test]
+    fn a_clone_binds_its_template_read_only_where_the_overlay_expects_it() {
+        let disk = MachineDisk::for_machine(
+            &profile(),
+            Path::new("/tmp/d"),
+            Some(Path::new("/tmp/templates/base")),
+        )
+        .unwrap();
+        let args = create_args("c", &profile(), &disk, None);
+        assert!(args.contains(&"--volume=/tmp/templates/base:/buildbridge-template:ro".to_string()));
     }
 
     #[test]

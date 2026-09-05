@@ -451,6 +451,7 @@ export function createMockBackend(): Backend {
             sizeBytes: 21_400_000_000,
             machineNames: [],
             ready: true,
+            provider: 'docker_osx',
         },
     ];
     const templateFor = (machine: MockMachine) =>
@@ -779,6 +780,7 @@ export function createMockBackend(): Backend {
                     name,
                     createdAtEpochSeconds: Math.floor(Date.now() / 1000),
                     sourceMachineName: machine.config.name,
+                    provider: machine.config.provider,
                     macosVersion: machine.macosVersion,
                     xcodeVersion: machine.xcodeVersion,
                     sizeBytes: 20_800_000_000,

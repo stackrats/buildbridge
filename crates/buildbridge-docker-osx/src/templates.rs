@@ -25,8 +25,7 @@ use crate::disk::{
     validate_bind_path,
 };
 use crate::{
-    ContainerState, DOCKER_IMAGE, ProviderError, TrackedCommand, clean_output, inspect_container,
-    run_docker,
+    ContainerState, ProviderError, TrackedCommand, clean_output, inspect_container, run_docker,
 };
 
 /// Where every container that runs a clone binds its template directory, read-only. The
@@ -110,6 +109,7 @@ pub struct TemplateSaveProgress {
 /// through its own template, bound where its overlay expects it, and the conversion flattens
 /// the chain. The image's own tool, so the format is what the image boots.
 pub(crate) fn template_compress_args(source: &MachineDisk, output_dir: &Path) -> Vec<String> {
+    let image_relative = source.image_relative();
     let mut args = vec![
         "run".to_string(),
         "--rm".to_string(),
@@ -129,14 +129,14 @@ pub(crate) fn template_compress_args(source: &MachineDisk, output_dir: &Path) ->
         ));
     }
     args.extend([
-        DOCKER_IMAGE.to_string(),
+        source.layout().provider().image().to_string(),
         "qemu-img".to_string(),
         "convert".to_string(),
         "-p".to_string(),
         "-c".to_string(),
         "-O".to_string(),
         "qcow2".to_string(),
-        format!("{THROWAWAY_SOURCE_DIR}/{DISK_IMAGE_NAME}"),
+        format!("{THROWAWAY_SOURCE_DIR}/{image_relative}"),
         format!("{THROWAWAY_OUTPUT_DIR}/{DISK_IMAGE_NAME}.part"),
     ]);
 
@@ -144,8 +144,9 @@ pub(crate) fn template_compress_args(source: &MachineDisk, output_dir: &Path) ->
 }
 
 /// The clone's overlay: a new qcow2 whose backing file is the template image at the path the
-/// machine's container will bind the template to.
-pub(crate) fn template_clone_args(template_dir: &Path, disk_dir: &Path) -> Vec<String> {
+/// machine's container will bind the template to, created where the clone's provider expects
+/// its disk. A template's files keep one naming whichever provider made them.
+pub(crate) fn template_clone_args(template_dir: &Path, disk: &MachineDisk) -> Vec<String> {
     vec![
         "run".to_string(),
         "--rm".to_string(),
@@ -153,8 +154,8 @@ pub(crate) fn template_clone_args(template_dir: &Path, disk_dir: &Path) -> Vec<S
             "--volume={}:{CONTAINER_TEMPLATE_DIR}:ro",
             template_dir.display()
         ),
-        format!("--volume={}:{THROWAWAY_DISK_DIR}:rw", disk_dir.display()),
-        DOCKER_IMAGE.to_string(),
+        format!("--volume={}:{THROWAWAY_DISK_DIR}:rw", disk.dir().display()),
+        disk.layout().provider().image().to_string(),
         "qemu-img".to_string(),
         "create".to_string(),
         "-f".to_string(),
@@ -163,7 +164,7 @@ pub(crate) fn template_clone_args(template_dir: &Path, disk_dir: &Path) -> Vec<S
         format!("{CONTAINER_TEMPLATE_DIR}/{DISK_IMAGE_NAME}"),
         "-F".to_string(),
         "qcow2".to_string(),
-        format!("{THROWAWAY_DISK_DIR}/{DISK_IMAGE_NAME}"),
+        format!("{THROWAWAY_DISK_DIR}/{}", disk.image_relative()),
     ]
 }
 
@@ -361,16 +362,21 @@ pub(crate) fn clone_template_files(
             template_dir.display()
         )));
     }
-    run_docker(
-        "template clone",
-        &template_clone_args(template_dir, disk.dir()),
-    )?;
+    if let Some(parent) = disk.image().parent() {
+        fs::create_dir_all(parent).map_err(|error| ProviderError::Identity(error.to_string()))?;
+    }
+    run_docker("template clone", &template_clone_args(template_dir, disk))?;
     fs::copy(template.nvram(), disk.nvram())
         .map_err(|error| ProviderError::Identity(format!("could not copy the NVRAM: {error}")))?;
     if non_empty_file(&template.basesystem()) {
-        fs::copy(template.basesystem(), disk.basesystem()).map_err(|error| {
-            ProviderError::Identity(format!("could not copy the install media: {error}"))
-        })?;
+        // A gigabyte of Apple's recovery image, identical for every clone: linked when the
+        // filesystem allows it, copied when it does not.
+        let _ = fs::remove_file(disk.basesystem());
+        if fs::hard_link(template.basesystem(), disk.basesystem()).is_err() {
+            fs::copy(template.basesystem(), disk.basesystem()).map_err(|error| {
+                ProviderError::Identity(format!("could not copy the install media: {error}"))
+            })?;
+        }
     }
 
     Ok(())
@@ -438,6 +444,7 @@ pub fn remove_template_files(template: &MachineTemplateFiles) -> Result<(), Prov
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DOCKER_IMAGE;
 
     #[test]
     fn a_template_is_compressed_by_the_images_own_tool_from_a_read_only_source() {
@@ -474,10 +481,12 @@ mod tests {
 
     #[test]
     fn a_clone_is_an_overlay_whose_backing_path_is_where_the_container_binds_the_template() {
-        let args = template_clone_args(
-            Path::new("/home/m/templates/xcode"),
+        let disk = MachineDisk::from_template(
             Path::new("/home/m/machines/two/disk"),
-        );
+            Path::new("/home/m/templates/xcode"),
+        )
+        .unwrap();
+        let args = template_clone_args(Path::new("/home/m/templates/xcode"), &disk);
         assert!(
             args.contains(&"--volume=/home/m/templates/xcode:/buildbridge-template:ro".to_string())
         );
@@ -490,6 +499,35 @@ mod tests {
             .expect("a backing file");
         assert_eq!(args[backing + 1], "/buildbridge-template/mac_hdd_ng.img");
         assert_eq!(args[args.len() - 1], "/buildbridge-disk/mac_hdd_ng.img");
+        assert!(args.contains(&DOCKER_IMAGE.to_string()));
+    }
+
+    #[test]
+    fn a_dockur_clone_lands_where_that_image_keeps_its_disk_and_uses_its_own_tool() {
+        let config = crate::MacBuilderConfig {
+            provider: crate::MachineProvider::DockurMacos,
+            macos_release: crate::MacOsRelease::Tahoe,
+            ..crate::MacBuilderConfig::default()
+        };
+        let disk = MachineDisk::for_machine(
+            &config,
+            Path::new("/home/m/machines/two/disk"),
+            Some(Path::new("/home/m/templates/xcode")),
+        )
+        .unwrap();
+        let args = template_clone_args(Path::new("/home/m/templates/xcode"), &disk);
+        assert_eq!(args[args.len() - 1], "/buildbridge-disk/26/data.qcow2");
+        assert!(args.contains(&crate::DOCKUR_IMAGE.to_string()));
+        assert!(!args.contains(&DOCKER_IMAGE.to_string()));
+
+        let compress = template_compress_args(&disk, Path::new("/home/m/templates/next"));
+        assert!(compress.contains(&"/buildbridge-source/26/data.qcow2".to_string()));
+        assert!(compress.contains(&"/buildbridge-output/mac_hdd_ng.img.part".to_string()));
+        assert!(compress.contains(&crate::DOCKUR_IMAGE.to_string()));
+        assert_eq!(
+            disk.nvram(),
+            Path::new("/home/m/machines/two/disk/26/macos.vars")
+        );
     }
 
     #[test]

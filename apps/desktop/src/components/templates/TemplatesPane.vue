@@ -55,6 +55,10 @@ async function remove(): Promise<void> {
 function detailsFor(template: MachineTemplateSummary) {
     return [
         { label: 'Saved from', value: template.sourceMachineName },
+        {
+            label: 'Provider',
+            value: template.provider === 'dockur_macos' ? 'dockur/macos' : 'Docker-OSX',
+        },
         { label: 'macOS', value: template.macosVersion ?? 'not recorded' },
         { label: 'Xcode', value: template.xcodeVersion ?? 'not recorded' },
         { label: 'Size on disk', value: formatBytes(template.sizeBytes) },
