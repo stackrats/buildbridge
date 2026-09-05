@@ -68,14 +68,20 @@ install_ios_platform() {{
             platform_total=$(/usr/bin/plutil -p "$platform_catalog" 2>/dev/null | /usr/bin/awk '/"_DownloadSize"/ {{ if ($3 > max) max = $3 }} END {{ printf "%.0f", max }}')
         fi
         platform_current=0
-        if /bin/test -d "$platform_assets"; then
+        # xcodebuild reports its own count, "(10.56 GB of 10.6 GB)", after carriage returns;
+        # that is the truth wherever macOS puts the bytes. The asset directory is the fallback.
+        platform_report=$(/usr/bin/tr '\r' '\n' < "$platform_log" 2>/dev/null | /usr/bin/grep -o '([0-9.]* [kMG]B of [0-9.]* [kMG]B)' | /usr/bin/tail -1)
+        if /bin/test -n "$platform_report"; then
+            platform_current=$(/usr/bin/printf '%s\n' "$platform_report" | /usr/bin/awk '{{ gsub(/[()]/, ""); printf "%.0f", $1 * (($2 ~ /^k/) ? 1000 : ($2 ~ /^M/) ? 1000000 : 1000000000) }}')
+            platform_total=$(/usr/bin/printf '%s\n' "$platform_report" | /usr/bin/awk '{{ gsub(/[()]/, ""); printf "%.0f", $4 * (($5 ~ /^k/) ? 1000 : ($5 ~ /^M/) ? 1000000 : 1000000000) }}')
+        elif /bin/test -d "$platform_assets"; then
             platform_current_kib=$(/usr/bin/du -sk "$platform_assets" 2>/dev/null | /usr/bin/awk '{{ print $1 }}')
             platform_current=$((platform_current_kib * 1024))
         fi
         platform_stage="locating"
         if /bin/test "$platform_total" -gt 0; then
             platform_stage="downloading"
-            if /bin/test "$platform_current" -ge "$platform_total"; then
+            if /bin/test "$platform_current" -ge "$platform_total" || /usr/bin/grep -q 'Installing' "$platform_log" 2>/dev/null; then
                 platform_current="$platform_total"
                 platform_stage="installing"
             fi
