@@ -75,6 +75,8 @@ pub(crate) struct GuestToolchain {
     pub(crate) developer_dir: String,
     /// The `PATH` the recipes export: pinned tools first, then only Apple's system directories.
     pub(crate) path: String,
+    /// The synchronized project the recipes build.
+    pub(crate) workspace: String,
 }
 
 pub(crate) fn guest_toolchain(guest_home: &str) -> GuestToolchain {
@@ -95,6 +97,7 @@ pub(crate) fn guest_toolchain(guest_home: &str) -> GuestToolchain {
         ruby_root,
         gem_home,
         path,
+        workspace: format!("{guest_home}/BuildBridge/workspaces/active"),
     }
 }
 
@@ -110,6 +113,7 @@ pub(crate) fn guest_tools_preparation(toolchain: &GuestToolchain) -> String {
         ruby_root,
         gem_home,
         pod,
+        workspace,
         ..
     } = toolchain;
     let node_name = format!("node-v{NODE_VERSION}-darwin-x64");
@@ -139,7 +143,11 @@ if /bin/test ! -x "{pod}"; then
     /bin/rm -rf "{gem_home}" "{tools}/gems"
     "{ruby_root}/bin/gem" install cocoapods --version "{COCOAPODS_VERSION}" --no-document
     /bin/test -x "{pod}"
-fi"#
+fi
+# Xcode's DerivedData and the env file live under the workspace's .buildbridge; a tool that
+# honours ignore files, such as Tailwind's content scanner, must not crawl the build output.
+/bin/mkdir -p "{workspace}/.buildbridge"
+/usr/bin/printf '*\n' > "{workspace}/.buildbridge/.gitignore""#
     )
 }
 
