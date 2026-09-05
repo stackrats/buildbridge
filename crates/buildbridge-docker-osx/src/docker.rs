@@ -202,13 +202,34 @@ pub fn stop(container_name: &str) -> Result<RuntimeStatus, ProviderError> {
             "stop",
             &[
                 "stop".to_string(),
-                "--time=30".to_string(),
+                format!("--time={}", stop_grace_seconds(container_name)),
                 container_name.to_string(),
             ],
         )?;
     }
 
     status(container_name)
+}
+
+/// Thirty seconds is what a Docker-OSX container needs to flush; it names no grace of its own.
+const DEFAULT_STOP_GRACE_SECONDS: u32 = 30;
+
+/// The grace a container was created with, when it names one: a dockur/macos container asks
+/// macOS to shut down before QEMU exits and is created with two minutes for that, and a stop
+/// that cut it short would kill the guest mid-shutdown.
+pub(crate) fn stop_grace_seconds(container_name: &str) -> u32 {
+    Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "{{if .HostConfig.StopTimeout}}{{.HostConfig.StopTimeout}}{{end}}",
+            container_name,
+        ])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| clean_output(&output.stdout).trim().parse::<u32>().ok())
+        .unwrap_or(DEFAULT_STOP_GRACE_SECONDS)
 }
 
 /// Removes a stopped container together with the macOS disk stored inside it.

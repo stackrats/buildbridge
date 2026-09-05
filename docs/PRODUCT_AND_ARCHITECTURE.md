@@ -936,7 +936,7 @@ The following decisions should be treated as settled until this document is deli
 44. The TypeScript contract is generated, never mirrored by hand. Every serde type in the
     contract, provider and engine crates derives ts-rs's `TS` with `#[ts(export)]`, 64-bit
     fields carry `#[ts(type = "number")]` because serde writes them as JSON numbers, and
-    `pnpm types:generate` runs the crates' export tests into `apps/desktop/src/types/generated`
+    `vp run types:generate` runs the crates' export tests into `apps/desktop/src/types/generated`
     (committed, lint-ignored) and writes its index; `types/backend.ts` re-exports it and keeps
     only the event envelope and the short aliases the interface used. A new DTO is a Rust
     struct with the derive and one regeneration; a renamed field fails the desktop's type
@@ -985,9 +985,20 @@ The following decisions should be treated as settled until this document is deli
     Docker-OSX only: a dockur/macos clone would share its template's generated identity, and
     its disk is on the host from the first start. The screen's port is the one after the SSH
     port, so the port check covers both. The provider crate keeps its name for now; it is the
-    macOS-machine crate, and renaming it is churn without a third provider. Not yet run end to
-    end on this host, whose memory the existing machine holds; the spike stops at the image's
-    memory refusal, which the engine now makes first, with the numbers.
+    macOS-machine crate, and renaming it is churn without a third provider. Run live the same
+    day, which corrected three things. The `QMP` value is spelled out as the full chardev
+    (`unix:/run/buildbridge-qmp.sock,server=on,wait=off`): the image version in use passes a
+    bare path through untouched, and QEMU exits on it. QEMU serves that socket to one client
+    at a time, so the relay is `nc -q 1`, which leaves a second after the engine closes its
+    input, and every read through the relay times out, so a socket someone else holds reports
+    the machine's control as unreachable instead of hanging the engine. And a stop reads the
+    grace the container was created with, two minutes for dockur/macos because it asks macOS
+    to shut down before QEMU exits, rather than the thirty seconds Docker-OSX needs. What the
+    run showed: the image keeps everything under `<disk dir>/<macOS version>/` (`base.dmg`,
+    `boot.img`, `data.qcow2`, `macos.vars`, and the generated identity as `macos.sn`, `.mlb`,
+    `.rom`, `.mac`, `.id`), owned by the host user rather than root, the screen answers on the
+    published loopback port, the phone controller is in the guest's peripheral list, and the
+    recovery image boots to the installer.
 
 ### Credential loss and recovery
 

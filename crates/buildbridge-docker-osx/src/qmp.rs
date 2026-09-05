@@ -5,11 +5,13 @@
 //! touches the disk, the network, or the monitor's human-readable commands beyond the one
 //! `x-query-usb` summary, and every request is built from validated values.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -49,16 +51,40 @@ impl QmpEndpoint {
     }
 }
 
-pub(crate) struct QmpClient {
-    reader: BufReader<Box<dyn Read + Send>>,
-    writer: Box<dyn Write + Send>,
-    /// The `docker exec` relay, when the socket is reached through one; killed on drop.
-    relay: Option<Child>,
+/// Where the lines come from. Through the relay they arrive by way of a thread, so a socket
+/// QEMU is serving to someone else (it serves one client at a time) times out instead of
+/// holding the engine.
+enum Transport {
+    Direct(BufReader<UnixStream>),
+    Relay {
+        lines: Receiver<std::io::Result<String>>,
+        relay: Child,
+    },
 }
+
+pub(crate) struct QmpClient {
+    transport: Transport,
+    /// Dropped first on the way out: closing the relay's input is what ends netcat.
+    writer: Option<Box<dyn Write + Send>>,
+}
+
+/// How long netcat gets to leave after its input closes before the relay is killed.
+const RELAY_EXIT_GRACE: Duration = Duration::from_secs(3);
+const CLOSED: &str = "QEMU closed the control socket";
 
 impl Drop for QmpClient {
     fn drop(&mut self) {
-        if let Some(relay) = self.relay.as_mut() {
+        // Closing the input ends netcat a second later, and QEMU then serves the next client;
+        // killing the `docker exec` on this side would leave netcat holding the socket.
+        drop(self.writer.take());
+        if let Transport::Relay { relay, .. } = &mut self.transport {
+            let deadline = Instant::now() + RELAY_EXIT_GRACE;
+            while Instant::now() < deadline {
+                if matches!(relay.try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
             let _ = relay.kill();
             let _ = relay.wait();
         }
@@ -97,51 +123,80 @@ impl QmpClient {
     /// Connects, reads the greeting, and negotiates capabilities. A closed socket means the
     /// machine is not running: QEMU removes nothing on exit, so the stale file refuses.
     pub fn connect(endpoint: &QmpEndpoint) -> Result<Self, ProviderError> {
-        let (reader, writer, relay): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<Child>) =
-            match endpoint {
-                QmpEndpoint::Socket(socket) => {
-                    let stream = UnixStream::connect(socket).map_err(|error| match error.kind() {
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
-                            not_running()
-                        }
-                        _ => ProviderError::UsbPassthrough(format!(
-                            "could not open the QEMU control socket: {error}"
-                        )),
+        let (transport, writer): (Transport, Box<dyn Write + Send>) = match endpoint {
+            QmpEndpoint::Socket(socket) => {
+                let stream = UnixStream::connect(socket).map_err(|error| match error.kind() {
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+                        not_running()
+                    }
+                    _ => ProviderError::UsbPassthrough(format!(
+                        "could not open the QEMU control socket: {error}"
+                    )),
+                })?;
+                stream
+                    .set_read_timeout(Some(QMP_TIMEOUT))
+                    .and_then(|()| stream.set_write_timeout(Some(QMP_TIMEOUT)))
+                    .map_err(|error| ProviderError::UsbPassthrough(error.to_string()))?;
+                let writer = stream
+                    .try_clone()
+                    .map_err(|error| ProviderError::UsbPassthrough(error.to_string()))?;
+                (Transport::Direct(BufReader::new(stream)), Box::new(writer))
+            }
+            QmpEndpoint::ContainerExec { container, socket } => {
+                // `-q 1`: netcat leaves a second after its input closes, which frees the socket.
+                let mut relay = Command::new("docker")
+                    .args([
+                        "exec",
+                        "--interactive",
+                        container,
+                        "nc",
+                        "-q",
+                        "1",
+                        "-U",
+                        socket,
+                    ])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .map_err(|error| {
+                        ProviderError::UsbPassthrough(format!(
+                            "could not reach the container's QEMU control socket: {error}"
+                        ))
                     })?;
-                    stream
-                        .set_read_timeout(Some(QMP_TIMEOUT))
-                        .and_then(|()| stream.set_write_timeout(Some(QMP_TIMEOUT)))
-                        .map_err(|error| ProviderError::UsbPassthrough(error.to_string()))?;
-                    let writer = stream
-                        .try_clone()
-                        .map_err(|error| ProviderError::UsbPassthrough(error.to_string()))?;
-                    (Box::new(stream), Box::new(writer), None)
-                }
-                QmpEndpoint::ContainerExec { container, socket } => {
-                    let mut relay = Command::new("docker")
-                        .args(["exec", "--interactive", container, "nc", "-U", socket])
-                        .stdin(Stdio::piped())
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::null())
-                        .spawn()
-                        .map_err(|error| {
-                            ProviderError::UsbPassthrough(format!(
-                                "could not reach the container's QEMU control socket: {error}"
-                            ))
-                        })?;
-                    let (Some(stdout), Some(stdin)) = (relay.stdout.take(), relay.stdin.take())
-                    else {
-                        return Err(ProviderError::UsbPassthrough(
-                            "the control socket relay has no pipes".to_string(),
-                        ));
-                    };
-                    (Box::new(stdout), Box::new(stdin), Some(relay))
-                }
-            };
+                let (Some(stdout), Some(stdin)) = (relay.stdout.take(), relay.stdin.take())
+                else {
+                    return Err(ProviderError::UsbPassthrough(
+                        "the control socket relay has no pipes".to_string(),
+                    ));
+                };
+                let (sender, lines) = mpsc::channel();
+                thread::spawn(move || {
+                    let mut reader = BufReader::new(stdout);
+                    loop {
+                        let mut line = String::new();
+                        let more = match reader.read_line(&mut line) {
+                            Ok(0) => {
+                                let _ = sender.send(Ok(String::new()));
+                                false
+                            }
+                            Ok(_) => sender.send(Ok(line)).is_ok(),
+                            Err(error) => {
+                                let _ = sender.send(Err(error));
+                                false
+                            }
+                        };
+                        if !more {
+                            break;
+                        }
+                    }
+                });
+                (Transport::Relay { lines, relay }, Box::new(stdin))
+            }
+        };
         let mut client = Self {
-            reader: BufReader::new(reader),
-            writer,
-            relay,
+            transport,
+            writer: Some(writer),
         };
 
         let mut greeted = false;
@@ -154,7 +209,11 @@ impl QmpClient {
                 Ok(QmpMessage::Event) => continue,
                 Ok(_) => break,
                 // The relay exits at once when nothing listens on the socket: not running.
-                Err(QmpError::Transport(_)) if client.relay.is_some() => return Err(not_running()),
+                Err(QmpError::Transport(message))
+                    if message == CLOSED && matches!(client.transport, Transport::Relay { .. }) =>
+                {
+                    return Err(not_running());
+                }
                 Err(error) => return Err(transport_error(error)),
             }
         }
@@ -170,17 +229,33 @@ impl QmpClient {
         Ok(client)
     }
 
-    fn read_message(&mut self) -> Result<QmpMessage, QmpError> {
-        let mut line = String::new();
-        let read = self
-            .reader
-            .read_line(&mut line)
-            .map_err(|error| QmpError::Transport(error.to_string()))?;
-        if read == 0 {
-            return Err(QmpError::Transport(
-                "QEMU closed the control socket".to_string(),
-            ));
+    fn read_line(&mut self) -> Result<String, QmpError> {
+        match &mut self.transport {
+            Transport::Direct(reader) => {
+                let mut line = String::new();
+                let read = reader
+                    .read_line(&mut line)
+                    .map_err(|error| QmpError::Transport(error.to_string()))?;
+                if read == 0 {
+                    return Err(QmpError::Transport(CLOSED.to_string()));
+                }
+                Ok(line)
+            }
+            Transport::Relay { lines, .. } => match lines.recv_timeout(QMP_TIMEOUT) {
+                Ok(Ok(line)) if line.is_empty() => Err(QmpError::Transport(CLOSED.to_string())),
+                Ok(Ok(line)) => Ok(line),
+                Ok(Err(error)) => Err(QmpError::Transport(error.to_string())),
+                Err(RecvTimeoutError::Timeout) => Err(QmpError::Transport(
+                    "the QEMU control socket did not answer in time; another client may hold it"
+                        .to_string(),
+                )),
+                Err(RecvTimeoutError::Disconnected) => Err(QmpError::Transport(CLOSED.to_string())),
+            },
         }
+    }
+
+    fn read_message(&mut self) -> Result<QmpMessage, QmpError> {
+        let line = self.read_line()?;
         let value: Value = serde_json::from_str(line.trim())
             .map_err(|error| QmpError::Transport(format!("invalid QMP message: {error}")))?;
 
@@ -193,6 +268,8 @@ impl QmpClient {
             .map_err(|error| QmpError::Transport(error.to_string()))?;
         encoded.push('\n');
         self.writer
+            .as_mut()
+            .ok_or_else(|| QmpError::Transport(CLOSED.to_string()))?
             .write_all(encoded.as_bytes())
             .map_err(|error| QmpError::Transport(error.to_string()))?;
 

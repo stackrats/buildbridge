@@ -13,8 +13,11 @@ use super::*;
 pub const DOCKUR_IMAGE: &str = "dockurr/macos:latest";
 /// The volume the image keeps every file of the machine in.
 pub(crate) const STORAGE_CONTAINER_DIR: &str = "/storage";
-/// Where QEMU is told to create its control socket inside the container.
+/// Where QEMU creates its control socket inside the container.
 pub(crate) const QMP_CONTAINER_SOCKET: &str = "/run/buildbridge-qmp.sock";
+/// The `-qmp` value the image hands QEMU. Spelled out in full: a bare path is passed through
+/// as it is by the image versions that do not normalize it, and QEMU rejects a bare path.
+const QMP_CONTAINER_CHARDEV: &str = "unix:/run/buildbridge-qmp.sock,server=on,wait=off";
 /// The image's own web viewer for the screen.
 const WEB_VIEWER_PORT: u16 = 8006;
 /// Remote Login inside the guest; the image forwards the published port to it.
@@ -82,7 +85,7 @@ pub(crate) fn create_args(
         format!("--env=CPU_CORES={}", config.cpu_cores),
         format!("--env=DISK_SIZE={}", disk::DISK_VIRTUAL_SIZE),
         "--env=DISK_FMT=qcow2".to_string(),
-        format!("--env=QMP={QMP_CONTAINER_SOCKET}"),
+        format!("--env=QMP={QMP_CONTAINER_CHARDEV}"),
     ]);
     if let Some(arguments) = qemu_arguments(usb) {
         args.push(format!("--env=ARGUMENTS={arguments}"));
@@ -256,7 +259,9 @@ mod tests {
         assert!(args.contains(&"--env=RAM_SIZE=8G".to_string()));
         assert!(args.contains(&"--env=CPU_CORES=4".to_string()));
         assert!(args.contains(&"--env=DISK_FMT=qcow2".to_string()));
-        assert!(args.contains(&format!("--env=QMP={QMP_CONTAINER_SOCKET}")));
+        assert!(args.contains(
+            &"--env=QMP=unix:/run/buildbridge-qmp.sock,server=on,wait=off".to_string()
+        ));
         assert!(args.contains(&format!(
             "--env=ARGUMENTS=-device usb-ehci,id={USB_PHONE_CONTROLLER}"
         )));
