@@ -98,7 +98,7 @@ export const projectPhaseLabel: Record<AppleProjectPhase, string> = {
     transferring: 'Transferring source',
     extracting: 'Preparing the guest workspace',
     preparing_tools: 'Preparing Node, pnpm, Ruby, and CocoaPods',
-    preparing_platform: 'Installing the iOS Simulator platform',
+    preparing_platform: 'Installing the iOS platform',
     installing_dependencies: 'Installing locked dependencies',
     building_web_assets: 'Building web assets',
     syncing_ios: 'Synchronizing Capacitor iOS',

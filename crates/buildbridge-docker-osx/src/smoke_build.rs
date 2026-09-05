@@ -51,7 +51,9 @@ fi
 phase preparing_tools
 {prepare_tools}
 platform_installed=0
-if /bin/test "{needs_simulator}" -eq 1 && ! /usr/bin/xcrun simctl list runtimes 2>/dev/null | /usr/bin/grep -q '^iOS '; then
+# Apple's iOS platform: the Simulator runtime, which since Xcode 15 is a separate download and
+# which newer Xcodes require before they accept even the generic device destination.
+install_ios_platform() {{
     phase preparing_platform
     platform_assets="/System/Library/AssetsV2/com_apple_MobileAsset_iOSSimulatorRuntime"
     platform_catalog="$platform_assets/com_apple_MobileAsset_iOSSimulatorRuntime.xml"
@@ -91,6 +93,9 @@ if /bin/test "{needs_simulator}" -eq 1 && ! /usr/bin/xcrun simctl list runtimes 
     fi
     /usr/bin/xcrun simctl list runtimes | /usr/bin/grep -q '^iOS '
     platform_installed=1
+}}
+if /bin/test "{needs_simulator}" -eq 1 && ! /usr/bin/xcrun simctl list runtimes 2>/dev/null | /usr/bin/grep -q '^iOS '; then
+    install_ios_platform
 fi
 
 phase installing_dependencies
@@ -116,8 +121,23 @@ phase building
 build_ios() {{
     /usr/bin/xcodebuild -workspace "{workspace}/ios/App/App.xcworkspace" -scheme App -configuration Debug {build_destination} -derivedDataPath "{workspace}/.buildbridge/DerivedData" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO COMPILER_INDEX_STORE_ENABLE=NO build
 }}
+build_log="{tools}/apple-build.log"
+build_status_file="{tools}/apple-build.status"
+# The output streams on while the exit status lands in a file, whichever shell runs this.
+build_and_log() {{
+    /bin/rm -f "$build_status_file"
+    ( build_ios 2>&1; /bin/echo "$?" > "$build_status_file" ) | /usr/bin/tee "$build_log"
+    build_status=$(/bin/cat "$build_status_file" 2>/dev/null || /bin/echo 1)
+}}
 build_status=0
-build_ios || build_status=$?
+build_and_log
+if /bin/test "$build_status" -ne 0 && /bin/test "$platform_installed" -eq 0 && /usr/bin/grep -q 'is not installed' "$build_log"; then
+    /usr/bin/printf '__BUILDBRIDGE_BUILD_RETRY__:platform_missing\n'
+    install_ios_platform
+    build_status=0
+    build_and_log
+fi
+/bin/rm -f "$build_log" "$build_status_file"
 if /bin/test "$build_status" -ne 0 && /bin/test "$platform_installed" -eq 1; then
     /usr/bin/printf '__BUILDBRIDGE_BUILD_RETRY__:platform\n'
     readiness_attempt=0
@@ -208,7 +228,11 @@ phase completed"#
             continue;
         }
         if let Some(retry_detail) = apple_build_retry_detail(&line) {
-            let message = "The first compile started before the new Simulator runtime had settled. BuildBridge is verifying CoreSimulator and retrying once.".to_string();
+            let message = if line.ends_with(":platform_missing") {
+                "Xcode refused the device destination because its iOS platform is not installed. BuildBridge is downloading the platform once, then building again.".to_string()
+            } else {
+                "The first compile started before the new Simulator runtime had settled. BuildBridge is verifying CoreSimulator and retrying once.".to_string()
+            };
             output_tail.push(message.clone());
             on_progress(apple_progress(
                 AppleProjectPhase::Building,

@@ -74,7 +74,10 @@ const downloadsSimulator = computed(
     () => target.value === 'simulator' && simulatorRuntime.value === null,
 );
 const targetOptions = computed(() => [
-    { value: 'device_sdk', label: 'iOS device SDK · no download' },
+    {
+        value: 'device_sdk',
+        label: 'iOS device SDK · downloads the iOS platform only if Xcode asks',
+    },
     {
         value: 'simulator',
         label: simulatorRuntime.value
@@ -101,7 +104,7 @@ const targetOptions = computed(() => [
                 :title="
                     downloadsSimulator
                         ? 'Downloads Apple\'s iOS Simulator platform into the guest first, then builds'
-                        : 'Compiles the App scheme with signing disabled'
+                        : 'Compiles the App scheme with signing disabled; installs the iOS platform first only if Xcode refuses to build without it'
                 "
                 @click="machines.testBuild(session.id, target)"
             >
@@ -170,8 +173,9 @@ const targetOptions = computed(() => [
                 title="This target downloads Apple's iOS Simulator platform"
             >
                 About 8 GB from Apple into the guest disk, once per machine, with byte progress
-                shown here. Nothing else in BuildBridge needs it: signed archives and phone builds
-                use the SDK inside Xcode. Choose the device SDK if you only want those.
+                shown here. Signed archives and phone builds use the SDK inside Xcode, but newer
+                Xcodes refuse even those until the platform is installed; the device SDK target then
+                installs it the same way, once, and only when Xcode insists.
             </Callout>
             <Callout
                 v-if="workspace?.lastNativeLockUpdated"

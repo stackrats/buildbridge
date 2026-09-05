@@ -148,6 +148,9 @@ pub(crate) fn apple_build_retry_detail(value: &str) -> Option<&'static str> {
         "__BUILDBRIDGE_BUILD_RETRY__:platform" => {
             Some("Verifying the new Simulator runtime before one automatic retry")
         }
+        "__BUILDBRIDGE_BUILD_RETRY__:platform_missing" => {
+            Some("Installing the iOS platform Xcode asked for, then building again")
+        }
         _ => None,
     }
 }
