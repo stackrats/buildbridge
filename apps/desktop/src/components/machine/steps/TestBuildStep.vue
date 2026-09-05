@@ -237,11 +237,12 @@ const targetOptions = computed(() => [
         <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
             Compiles the App scheme with signing disabled, proving the toolchain before any
             certificate is involved. The device SDK ships inside Xcode and is what the signed
-            archive and the phone build use, so it downloads nothing; the Simulator is the only
-            target that can run on screen inside the guest, and it needs Apple's iOS Simulator
-            platform first. The first run on a machine bootstraps pinned Node, pnpm, Ruby, and
-            CocoaPods and installs locked dependencies. If this desktop restarts mid-build, running
-            it again reattaches to the job instead of starting a second one.
+            archive and the phone build use; newer Xcodes still ask for Apple's iOS platform before
+            building for it, and it is installed once only if they do. The Simulator is the only
+            target that can run on screen inside the guest, and it always needs that platform first.
+            The first run on a machine bootstraps pinned Node, pnpm, Ruby, and CocoaPods and
+            installs locked dependencies. If this desktop restarts mid-build, running it again
+            reattaches to the job instead of starting a second one.
         </p>
     </StepPanel>
 </template>
