@@ -86,7 +86,7 @@ export interface Backend {
     /** The webview's inspector: console, network and elements of this desktop itself. */
     openDeveloperTools(): Promise<void>;
     /** Opens a machine's screen, which its provider serves as a web page, in its own window. */
-    openMachineScreen(url: string, title: string): Promise<void>;
+    openMachineScreen(machineId: string, url: string, title: string): Promise<void>;
     /** `envSetId` null builds without an env set; the step defaults it to the attached one. */
     runSignedArchive(machineId: string, envSetId: string | null): Promise<T.RunAppleArchiveResult>;
     revealArchive(machineId: string): Promise<void>;
@@ -253,22 +253,8 @@ async function createTauriBackend(): Promise<Backend> {
             invoke('run_apple_smoke_build', { machineId, input: { target } }),
         adoptGuestPodfileLock: (machineId) => invoke('adopt_guest_podfile_lock', { machineId }),
         openDeveloperTools: () => invoke('open_developer_tools'),
-        openMachineScreen: async (url, title) => {
-            const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
-            const label = `screen-${title.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`;
-            const existing = await WebviewWindow.getByLabel(label);
-            if (existing) {
-                await existing.setFocus();
-                return;
-            }
-            const screen = new WebviewWindow(label, {
-                url,
-                title: `${title} · screen`,
-                width: 1280,
-                height: 800,
-            });
-            await screen.once('tauri://created', () => undefined);
-        },
+        openMachineScreen: (machineId, url, title) =>
+            invoke('open_machine_screen', { machineId, url, title }),
         runSignedArchive: (machineId, envSetId) =>
             invoke('run_apple_signed_archive', { machineId, envSetId }),
         revealArchive: (machineId) => invoke('reveal_apple_archive', { machineId }),

@@ -1193,7 +1193,7 @@ export function createMockBackend(): Backend {
                 };
             });
         },
-        async openMachineScreen(url) {
+        async openMachineScreen(_machineId, url) {
             window.open(url, '_blank', 'noopener');
         },
         async openDeveloperTools() {

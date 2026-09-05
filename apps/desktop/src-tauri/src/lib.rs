@@ -34,6 +34,47 @@ impl EventSink for WindowSink {
 
 /// Opens the webview's own inspector — console, network, elements — which a development build
 /// of Tauri carries. A release build does not, and says so rather than doing nothing.
+/// Opens a machine's screen, which some providers serve as a web page on this host's
+/// loopback, in a window of its own named by the machine; a second click focuses it, and a
+/// closed one is created again. Only loopback addresses are accepted, because the page gets
+/// a window of this app.
+#[tauri::command]
+fn open_machine_screen(
+    app: AppHandle,
+    machine_id: String,
+    url: String,
+    title: String,
+) -> Result<(), String> {
+    let valid_label = !machine_id.is_empty()
+        && machine_id.len() <= 64
+        && machine_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid_label {
+        return Err("The machine identifier is invalid.".to_string());
+    }
+    let parsed = tauri::Url::parse(&url)
+        .map_err(|error| format!("The screen address is invalid: {error}"))?;
+    let loopback = parsed.scheme() == "http"
+        && matches!(parsed.host_str(), Some("127.0.0.1") | Some("localhost"));
+    if !loopback {
+        return Err("The screen is only opened from this host's loopback address.".to_string());
+    }
+    let label = format!("screen-{machine_id}");
+    if let Some(existing) = app.get_webview_window(&label) {
+        existing.show().map_err(|error| error.to_string())?;
+        existing.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(parsed))
+        .title(format!("{title} · screen"))
+        .inner_size(1280.0, 800.0)
+        .build()
+        .map_err(|error| format!("The screen window could not be opened: {error}"))?;
+
+    Ok(())
+}
+
 #[tauri::command]
 fn open_developer_tools(window: tauri::WebviewWindow) -> Result<(), String> {
     #[cfg(debug_assertions)]
@@ -587,6 +628,7 @@ pub fn run() {
             discard_machine_container,
             get_mac_builder_status,
             open_developer_tools,
+            open_machine_screen,
             open_safari_web_inspector,
             list_machine_templates,
             save_machine_template,

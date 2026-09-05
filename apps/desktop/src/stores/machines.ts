@@ -980,9 +980,15 @@ export function useMachinesStore() {
         },
         /** Opens the machine's screen when its provider serves one as a web page. */
         openMachineScreen: async (id: string): Promise<void> => {
-            const view = session(id).view;
-            if (view?.displayUrl) {
-                await useBackend().openMachineScreen(view.displayUrl, view.profile.name);
+            const target = session(id);
+            const view = target.view;
+            if (!view?.displayUrl) {
+                return;
+            }
+            try {
+                await useBackend().openMachineScreen(id, view.displayUrl, view.profile.name);
+            } catch (caught) {
+                target.error = caught instanceof Error ? caught.message : String(caught);
             }
         },
         clearDeviceRun: (id: string) =>
