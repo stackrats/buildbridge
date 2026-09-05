@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue';
 
 import { describeError } from '../../lib/utils';
+import { recommendedRelease } from '../../model/providers';
 import { useMachinesStore } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
 import type { MacBuilderConfig } from '../../types/backend';
@@ -11,7 +12,7 @@ import Field from '../ui/Field.vue';
 import Modal from '../ui/Modal.vue';
 import Select from '../ui/Select.vue';
 import Spinner from '../ui/Spinner.vue';
-import MachineProfileForm, { recommendedRelease } from './MachineProfileForm.vue';
+import MachineProfileForm from './MachineProfileForm.vue';
 
 const open = defineModel<boolean>('open', { default: false });
 const machines = useMachinesStore();

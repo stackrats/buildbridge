@@ -79,12 +79,6 @@ const releases = computed((): { value: MacOsRelease; label: string }[] =>
               { value: 'ventura', label: 'macOS Ventura · no Xcode 26' },
           ],
 );
-
-/** The release each provider does best with; applied when the provider is chosen. */
-export const recommendedRelease: Record<MachineProvider, MacOsRelease> = {
-    docker_osx: 'tahoe',
-    dockur_macos: 'sequoia',
-};
 </script>
 
 <template>
