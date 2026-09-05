@@ -933,7 +933,9 @@ pub fn guest_diagnostics(
         username,
         identity_path,
         known_hosts_path,
-        "/usr/bin/xcodebuild -version",
+        // Through the shim only once a developer directory with Xcode is selected: on a guest
+        // without one, the shim itself asks the console to install the command line tools.
+        &format!("{XCODE_SELECTED_GUARD}/usr/bin/xcodebuild -version"),
     );
 
     let mut ios_simulator_runtime = None;
@@ -1024,7 +1026,10 @@ pub fn guest_diagnostics(
 
 /// The first iOS runtime CoreSimulator lists, or nothing; `true` keeps the exit status clean when
 /// there is none. Fixed text, so it can be handed to the guest shell as is.
-const SIMULATOR_RUNTIME_PROBE: &str = "/usr/bin/xcrun simctl list runtimes 2>/dev/null | /usr/bin/grep '^iOS ' | /usr/bin/head -1; /usr/bin/true";
+/// Runs a shimmed Apple tool only when a developer directory holding Xcode is selected; the
+/// shim otherwise asks the guest's console to install the command line tools.
+const XCODE_SELECTED_GUARD: &str = "p=$(/usr/bin/xcode-select --print-path 2>/dev/null) && /bin/test -x \"$p/usr/bin/xcodebuild\" && ";
+const SIMULATOR_RUNTIME_PROBE: &str = "p=$(/usr/bin/xcode-select --print-path 2>/dev/null) && /bin/test -x \"$p/usr/bin/xcodebuild\" && /usr/bin/xcrun simctl list runtimes 2>/dev/null | /usr/bin/grep '^iOS ' | /usr/bin/head -1; /usr/bin/true";
 
 /// `iOS 26.0 (26.0 - 23A339) - com.apple.CoreSimulator.SimRuntime.iOS-26-0` → `26.0`. Anything
 /// that is not a dotted version is dropped rather than shown.
