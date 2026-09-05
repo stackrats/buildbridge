@@ -58,17 +58,17 @@ pub use device_run::{
     DeveloperModeState, GuestDevice, PairingState, TransportType, TunnelState, list_guest_devices,
 };
 pub use disk::{
-    ContainerLayout, ContainerRebuildPhase, ContainerRebuildProgress, DISK_IMAGE_NAME, DiskLayout,
-    DISK_NVRAM_NAME, DiskMigrationPhase, DiskMigrationProgress, MachineDisk, ensure_machine_disk,
-    inspect_container_layout, migrate_disk_to_host, rebuild_container, remove_machine_disk,
-    required_free_bytes, validate_bind_path,
+    ContainerLayout, ContainerRebuildPhase, ContainerRebuildProgress, DISK_IMAGE_NAME,
+    DISK_NVRAM_NAME, DiskLayout, DiskMigrationPhase, DiskMigrationProgress, MachineDisk,
+    ensure_machine_disk, inspect_container_layout, migrate_disk_to_host, rebuild_container,
+    remove_machine_disk, required_free_bytes, validate_bind_path,
 };
 use qmp::USB_PHONE_CONTROLLER;
 pub use qmp::{QMP_CONTAINER_DIR, QMP_SOCKET_NAME, QmpEndpoint, guest_reset_for_macos};
 use ts_rs::TS;
 pub use usb::{
     AttachedUsbDevice, ContainerUsbOptions, HostUsbDevice, HostUsbStatus, MachineUsbStatus,
-    USB_UDEV_RULE, USB_UDEV_RULE_PATH, UdevRuleState, UsbHolder, attach_usb_device,
+    USB_UDEV_RULE, USB_UDEV_RULE_PATH, UdevRuleState, UsbAttachRoute, UsbHolder, attach_usb_device,
     attached_usb_device, detach_usb_device, host_usb_status, install_iphone_udev_rule,
     is_apple_mobile_product, machine_usb_status, remove_iphone_udev_rule, resolve_usb_options,
     valid_usb_port_path,

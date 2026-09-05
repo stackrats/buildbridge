@@ -203,7 +203,8 @@ pub async fn attach_usb_device(
     );
     let guard = begin_machine_operation(app, &machine_id, "attaching_usb")?;
     let container_name = paths.container_name.clone();
-    let socket = paths.qmp_endpoint(profile.provider);
+    let provider = profile.provider;
+    let socket = paths.qmp_endpoint(provider);
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
@@ -221,8 +222,14 @@ pub async fn attach_usb_device(
                 "No Apple device is plugged into that port. Plug the phone in and refresh."
                     .to_string()
             })?;
-        buildbridge_docker_osx::attach_usb_device(&socket, &container_name, &device, guest_reset)
-            .map_err(|error| error.to_string())
+        buildbridge_docker_osx::attach_usb_device(
+            &socket,
+            &container_name,
+            &device,
+            guest_reset,
+            buildbridge_docker_osx::UsbAttachRoute::for_provider(provider),
+        )
+        .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string());
@@ -237,10 +244,41 @@ pub async fn attach_usb_device(
         _ => clear_usb_attach_issue(app, &machine_id),
     }
     if attached.enumerated {
-        settle_attached_phone(app, &machine_id, &paths, profile.ssh_port, &access.username).await?;
+        settle_attached_phone(
+            app,
+            &machine_id,
+            &paths,
+            profile.ssh_port,
+            &access.username,
+            PhoneHandover {
+                provider: profile.provider,
+                bus: attached.bus,
+                port: attached.port.clone(),
+                guest_reset,
+            },
+        )
+        .await?;
     }
 
     build_mac_builder_view(app, &paths).await
+}
+
+/// What the settling loop needs to hand a phone over again: an iPhone re-enumerates itself
+/// once when a host first configures it, and a QEMU that receives no hot-plug events keeps a
+/// dead handle unless the phone's new node is given to it.
+pub(crate) struct PhoneHandover {
+    pub(crate) provider: MachineProvider,
+    pub(crate) bus: u8,
+    pub(crate) port: String,
+    pub(crate) guest_reset: bool,
+}
+
+/// The host kernel's device number for the phone on this port; it changes each time the phone
+/// re-enumerates.
+fn host_device_number(bus: u8, port: &str) -> Option<u32> {
+    std::fs::read_to_string(format!("/sys/bus/usb/devices/{bus}-{port}/devnum"))
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
 }
 
 /// After QEMU holds the phone: wait for macOS to register it, then pair with it, which raises
@@ -252,10 +290,14 @@ pub(crate) async fn settle_attached_phone(
     paths: &MachinePaths,
     ssh_port: u16,
     username: &str,
+    handover: PhoneHandover,
 ) -> Result<(), String> {
     let guard = begin_machine_operation(app, machine_id, "settling_phone")?;
     let identity_path = paths.guest_identity();
     let known_hosts_path = paths.known_hosts();
+    let endpoint = paths.qmp_endpoint(handover.provider);
+    let container_name = paths.container_name.clone();
+    let route = buildbridge_docker_osx::UsbAttachRoute::for_provider(handover.provider);
     let event_app = app.clone();
     let event_machine_id = machine_id.to_string();
     let username = username.to_string();
@@ -281,6 +323,7 @@ pub(crate) async fn settle_attached_phone(
             "macOS is enumerating the phone; this can take a minute and a half",
         );
         let mut devices = Vec::new();
+        let mut device_number = host_device_number(handover.bus, &handover.port);
         while started.elapsed() < std::time::Duration::from_secs(90) {
             devices = buildbridge_docker_osx::list_guest_devices(
                 ssh_port,
@@ -294,6 +337,33 @@ pub(crate) async fn settle_attached_phone(
                 .any(|device| device.transport_type == buildbridge_docker_osx::TransportType::Wired)
             {
                 break;
+            }
+            // By node, a phone that re-enumerated on the host is handed over again by its new
+            // node; QEMU would otherwise keep a dead handle and macOS would never see it.
+            if route == buildbridge_docker_osx::UsbAttachRoute::DeviceNode {
+                let current = host_device_number(handover.bus, &handover.port);
+                if current.is_some() && current != device_number {
+                    device_number = current;
+                    if let Some(device) = buildbridge_docker_osx::host_usb_status(None)
+                        .devices
+                        .into_iter()
+                        .find(|device| device.bus == handover.bus && device.port == handover.port)
+                    {
+                        report(
+                            UsbAttachPhase::WaitingForMacos,
+                            "The phone re-enumerated; handing it to QEMU again by its new device node",
+                        );
+                        if let Err(error) = buildbridge_docker_osx::attach_usb_device(
+                            &endpoint,
+                            &container_name,
+                            &device,
+                            handover.guest_reset,
+                            route,
+                        ) {
+                            report(UsbAttachPhase::WaitingForMacos, &error.to_string());
+                        }
+                    }
+                }
             }
             std::thread::sleep(std::time::Duration::from_secs(5));
         }

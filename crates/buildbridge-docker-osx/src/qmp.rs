@@ -164,8 +164,7 @@ impl QmpClient {
                             "could not reach the container's QEMU control socket: {error}"
                         ))
                     })?;
-                let (Some(stdout), Some(stdin)) = (relay.stdout.take(), relay.stdin.take())
-                else {
+                let (Some(stdout), Some(stdin)) = (relay.stdout.take(), relay.stdin.take()) else {
                     return Err(ProviderError::UsbPassthrough(
                         "the control socket relay has no pipes".to_string(),
                     ));
@@ -296,6 +295,16 @@ impl QmpClient {
             .map_err(|error| map_qmp_failure("device attach", error))
     }
 
+    pub fn add_usb_host_by_node(
+        &mut self,
+        node: &str,
+        guest_reset: bool,
+    ) -> Result<(), ProviderError> {
+        self.execute(&device_add_by_node_request(node, guest_reset))
+            .map(|_| ())
+            .map_err(|error| map_qmp_failure("device attach", error))
+    }
+
     /// Removes the device object; a device that is already gone counts as removed.
     pub fn delete_device(&mut self, id: &str) -> Result<(), ProviderError> {
         match self.execute(&device_del_request(id)) {
@@ -371,6 +380,23 @@ pub(crate) fn capabilities_request() -> Value {
 /// only the first time it opens it in a process, so a phone that has been detached must be
 /// unplugged and plugged in again before it is attached again, and a phone QEMU has lost track
 /// of needs the machine restarted.
+/// The same device handed over by its device node. QEMU opens the node itself and never
+/// consults libusb's device list, which matters in a container whose libusb learns of a phone
+/// only through hot-plug events it never receives: after the phone re-enumerates itself, which
+/// an iPhone does once when a host first configures it, the node is the only way to reach it.
+pub(crate) fn device_add_by_node_request(node: &str, guest_reset: bool) -> Value {
+    json!({
+        "execute": "device_add",
+        "arguments": {
+            "driver": "usb-host",
+            "id": IPHONE_QMP_DEVICE_ID,
+            "bus": format!("{USB_PHONE_CONTROLLER}.0"),
+            "hostdevice": node,
+            "guest-reset": guest_reset
+        }
+    })
+}
+
 pub(crate) fn device_add_request(bus: u8, port: &str, guest_reset: bool) -> Value {
     json!({
         "execute": "device_add",
@@ -552,6 +578,19 @@ mod tests {
                     "bus": "buildbridge-phone-usb.0",
                     "hostbus": 3,
                     "hostport": "2.3.1",
+                    "guest-reset": false
+                }
+            })
+        );
+        assert_eq!(
+            device_add_by_node_request("/dev/bus/usb/003/012", false),
+            json!({
+                "execute": "device_add",
+                "arguments": {
+                    "driver": "usb-host",
+                    "id": "buildbridge-iphone",
+                    "bus": "buildbridge-phone-usb.0",
+                    "hostdevice": "/dev/bus/usb/003/012",
                     "guest-reset": false
                 }
             })

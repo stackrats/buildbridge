@@ -14,8 +14,10 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::disk::inspect_container_layout;
-use crate::qmp::{IPHONE_QMP_DEVICE_ID, QmpClient, UsbAttachment, usb_attachment, QmpEndpoint};
-use crate::{ContainerState, ProviderError, TrackedCommand, clean_output, recent_logs};
+use crate::qmp::{IPHONE_QMP_DEVICE_ID, QmpClient, QmpEndpoint, UsbAttachment, usb_attachment};
+use crate::{
+    ContainerState, MachineProvider, ProviderError, TrackedCommand, clean_output, recent_logs,
+};
 use ts_rs::TS;
 
 /// Sorted after `39-usbmuxd.rules`, whose ownership and systemd activation it overrides, and
@@ -425,6 +427,25 @@ pub fn remove_iphone_udev_rule() -> Result<HostUsbStatus, ProviderError> {
     Ok(host_usb_status(None))
 }
 
+/// How QEMU is told which phone to take. Docker-OSX's QEMU learns of USB hot-plug through
+/// libusb and is given the port, so a replug on it re-attaches by itself; dockur/macos's QEMU
+/// runs where libusb receives no hot-plug events, so it is given the device node, which QEMU
+/// opens directly, and a phone that re-enumerates is handed over again by its new node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsbAttachRoute {
+    BusPort,
+    DeviceNode,
+}
+
+impl UsbAttachRoute {
+    pub fn for_provider(provider: MachineProvider) -> Self {
+        match provider {
+            MachineProvider::DockerOsx => Self::BusPort,
+            MachineProvider::DockurMacos => Self::DeviceNode,
+        }
+    }
+}
+
 /// Hands one host port to the guest. `device_add` returns before QEMU opens the device, and an
 /// open failure only reaches QEMU's own stderr, so the call waits for the guest to enumerate
 /// the phone and otherwise reports the last USB line the container logged.
@@ -433,6 +454,7 @@ pub fn attach_usb_device(
     container_name: &str,
     device: &HostUsbDevice,
     guest_reset: bool,
+    route: UsbAttachRoute,
 ) -> Result<AttachedUsbDevice, ProviderError> {
     if !valid_usb_port_path(&device.port)
         || !is_apple_mobile_product(&device.vendor_id, &device.product_id)
@@ -456,10 +478,23 @@ pub fn attach_usb_device(
         .iter()
         .any(|id| id == IPHONE_QMP_DEVICE_ID)
     {
-        let held = match client.usb_summary()? {
+        let mut held = match client.usb_summary()? {
             Some(text) => usb_attachment(&text, IPHONE_QMP_DEVICE_ID),
             None => UsbAttachment::Absent,
         };
+        // By node, a held phone whose node is no longer this one has re-enumerated on the host:
+        // QEMU still shows the old attachment as live, but it is a dead handle. Release it and
+        // hand the new node over, which is the one thing that brings the phone back there.
+        if route == UsbAttachRoute::DeviceNode
+            && client
+                .device_property(IPHONE_QMP_DEVICE_ID, "hostdevice")
+                .ok()
+                .flatten()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .is_some_and(|node| node != device.device_node)
+        {
+            held = UsbAttachment::Absent;
+        }
         match held {
             UsbAttachment::Live => {
                 return Ok(AttachedUsbDevice {
@@ -478,7 +513,12 @@ pub fn attach_usb_device(
             UsbAttachment::Absent => client.delete_device(IPHONE_QMP_DEVICE_ID)?,
         }
     }
-    client.add_usb_host(device.bus, &device.port, guest_reset)?;
+    match route {
+        UsbAttachRoute::BusPort => client.add_usb_host(device.bus, &device.port, guest_reset)?,
+        UsbAttachRoute::DeviceNode => {
+            client.add_usb_host_by_node(&device.device_node, guest_reset)?
+        }
+    }
 
     let started = Instant::now();
     let mut attachment = UsbAttachment::Absent;
@@ -556,6 +596,25 @@ fn probe_qmp(qmp_endpoint: &QmpEndpoint) -> (bool, Option<AttachedUsbDevice>) {
         .flatten()
         .and_then(|value| value.as_str().map(str::to_string))
         .filter(|port| valid_usb_port_path(port));
+    // A phone handed over by its node carries no bus or port in QEMU; the host's own view of
+    // that node says which port it is on.
+    let (bus, port) = match (bus, port) {
+        (Some(bus), Some(port)) => (Some(bus), Some(port)),
+        _ => client
+            .device_property(IPHONE_QMP_DEVICE_ID, "hostdevice")
+            .ok()
+            .flatten()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .filter(|node| !node.is_empty())
+            .and_then(|node| {
+                host_usb_status(None)
+                    .devices
+                    .into_iter()
+                    .find(|device| device.device_node == node)
+            })
+            .map(|device| (Some(device.bus), Some(device.port)))
+            .unwrap_or((None, None)),
+    };
     let (Some(bus), Some(port)) = (bus, port) else {
         return (true, None);
     };
