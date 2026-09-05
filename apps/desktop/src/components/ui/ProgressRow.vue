@@ -2,6 +2,7 @@
 // The live operation strip: what is happening, for how long, how far along, and the last
 // diagnostic line, so a build that is working reads differently from one that has stalled.
 import { Square } from '@lucide/vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 import { formatBytes, formatElapsed } from '../../lib/format';
 import Button from './Button.vue';
@@ -38,6 +39,38 @@ const {
 }>();
 
 const emit = defineEmits<{ stop: [] }>();
+
+// The elapsed figure arrives with each progress event, and a phase that prints nothing sends
+// none for minutes: the row keeps counting from the last figure it was given, on its own clock,
+// so a build that is working never reads as one that has stalled.
+const anchor = ref(Date.now());
+const now = ref(Date.now());
+let ticker: ReturnType<typeof setInterval> | null = null;
+watch(
+    () => elapsedSeconds,
+    () => {
+        anchor.value = Date.now();
+    },
+);
+onMounted(() => {
+    ticker = setInterval(() => {
+        now.value = Date.now();
+    }, 1000);
+});
+onBeforeUnmount(() => {
+    if (ticker !== null) {
+        clearInterval(ticker);
+    }
+});
+const shownElapsed = computed(() => {
+    if (elapsedSeconds === null) {
+        return null;
+    }
+    if (state !== 'running') {
+        return elapsedSeconds;
+    }
+    return elapsedSeconds + Math.max(0, Math.floor((now.value - anchor.value) / 1000));
+});
 </script>
 
 <template>
@@ -54,10 +87,10 @@ const emit = defineEmits<{ stop: [] }>();
                 >
             </p>
             <span
-                v-if="elapsedSeconds !== null"
+                v-if="shownElapsed !== null"
                 class="shrink-0 text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
             >
-                {{ formatElapsed(elapsedSeconds) }}
+                {{ formatElapsed(shownElapsed) }}
             </span>
             <Button
                 v-if="stoppable && state === 'running'"
