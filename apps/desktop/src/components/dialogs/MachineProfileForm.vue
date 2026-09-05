@@ -1,5 +1,7 @@
 <script setup lang="ts">
 // The machine profile fields, shared by the new-machine and edit-machine dialogs.
+import { computed } from 'vue';
+
 import type { MacBuilderConfig, MacOsRelease, MachineProvider } from '../../types/backend';
 import Field from '../ui/Field.vue';
 import Input from '../ui/Input.vue';
@@ -60,12 +62,29 @@ const differences: Record<MachineProvider, { label: string; detail: string }[]> 
 
 // Newest first. Xcode 26 does not run on Sonoma or Ventura, so a machine built on either
 // cannot reach a signed archive; say so here rather than letting it fail at the Xcode step.
-const releases: { value: MacOsRelease; label: string }[] = [
-    { value: 'tahoe', label: 'macOS Tahoe (recommended)' },
-    { value: 'sequoia', label: 'macOS Sequoia' },
-    { value: 'sonoma', label: 'macOS Sonoma · no Xcode 26' },
-    { value: 'ventura', label: 'macOS Ventura · no Xcode 26' },
-];
+// dockur/macos's own authors do not recommend Tahoe on it yet ("runs very slow"), and the
+// first Tahoe install here hung in its second stage, so Sequoia is the recommendation there.
+const releases = computed((): { value: MacOsRelease; label: string }[] =>
+    model.value.provider === 'dockur_macos'
+        ? [
+              { value: 'sequoia', label: 'macOS Sequoia (recommended)' },
+              { value: 'tahoe', label: 'macOS Tahoe · very slow on dockur/macos, its authors say' },
+              { value: 'sonoma', label: 'macOS Sonoma · no Xcode 26' },
+              { value: 'ventura', label: 'macOS Ventura · no Xcode 26' },
+          ]
+        : [
+              { value: 'tahoe', label: 'macOS Tahoe (recommended)' },
+              { value: 'sequoia', label: 'macOS Sequoia' },
+              { value: 'sonoma', label: 'macOS Sonoma · no Xcode 26' },
+              { value: 'ventura', label: 'macOS Ventura · no Xcode 26' },
+          ],
+);
+
+/** The release each provider does best with; applied when the provider is chosen. */
+export const recommendedRelease: Record<MachineProvider, MacOsRelease> = {
+    docker_osx: 'tahoe',
+    dockur_macos: 'sequoia',
+};
 </script>
 
 <template>

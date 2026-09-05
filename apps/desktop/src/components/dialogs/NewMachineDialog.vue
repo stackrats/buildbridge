@@ -11,7 +11,7 @@ import Field from '../ui/Field.vue';
 import Modal from '../ui/Modal.vue';
 import Select from '../ui/Select.vue';
 import Spinner from '../ui/Spinner.vue';
-import MachineProfileForm from './MachineProfileForm.vue';
+import MachineProfileForm, { recommendedRelease } from './MachineProfileForm.vue';
 
 const open = defineModel<boolean>('open', { default: false });
 const machines = useMachinesStore();
@@ -58,11 +58,13 @@ const startOptions = computed(() => [
     })),
 ]);
 
-// The offered templates change with the provider, so the choice starts over.
+// The offered templates change with the provider, so the choice starts over, and the
+// release moves to the one that provider does best with.
 watch(
     () => profile.value.provider,
-    () => {
+    (provider) => {
         startFrom.value = '';
+        profile.value.macosRelease = recommendedRelease[provider];
     },
 );
 
