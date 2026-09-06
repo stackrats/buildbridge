@@ -108,6 +108,7 @@ pnpm check          # format, lint, type check, cargo check
 pnpm test           # Rust workspace tests
 vp test --run       # desktop unit tests, inside apps/desktop
 pnpm types:generate # regenerate the TypeScript contract from the Rust DTOs
+cargo test -p buildbridge-engine --test provider_boot -- --ignored   # boots a throwaway machine per provider; run before changing an image digest
 pnpm build
 ```
 

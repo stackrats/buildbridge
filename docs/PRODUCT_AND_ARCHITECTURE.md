@@ -972,6 +972,21 @@ The following decisions should be treated as settled until this document is deli
     Reverb channel that carries `build.queued`). A change to the wire shape lands in the contract
     crate first, with its tests, and any server follows; a JSON Schema published from the crate
     is the intended way to hold a server written in another language to it.
+48. Both provider images are pinned by digest, and each has a boot test. The two community
+    images stay, because the provider is a tenth of the system and the part neither of us wants
+    to own is keeping OpenCore, QEMU and each new macOS booting together, which dockur/macos
+    ships monthly. What is owned instead is the seam and the proof: `DOCKER_IMAGE` and
+    `DOCKUR_IMAGE` name a digest (Docker-OSX as pulled on 2026-09-05 from upstream's last
+    commit of 2025-11-11; dockur/macos v3.12), an upgrade is a deliberate commit that names
+    what changed upstream, and `crates/buildbridge-engine/tests/provider_boot.rs` boots a
+    throwaway machine per provider in directories of its own, waits for QEMU to answer on the
+    control socket and for the guest's screen to light up (a `screendump` through QMP into the
+    one directory each provider binds from the host), then removes everything. The tests are
+    ignored by default because they download Apple's recovery image and need the machine's
+    memory free; they run on purpose before a digest changes and after any change to how a
+    container is created. A BuildBridge image of its own is the fallback if an upstream breaks
+    the seam repeatedly or a single supported path is wanted; the `dockur` module is its
+    template.
 47. A machine names its provider, and dockur/macos is the second one. Docker-OSX has been
     quiet since late 2025 while dockur/macos ships monthly, and its layout matches what
     BuildBridge bolted onto Docker-OSX by hand: every file of a machine under one storage

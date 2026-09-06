@@ -64,7 +64,10 @@ pub use disk::{
     remove_machine_disk, required_free_bytes, validate_bind_path,
 };
 use qmp::USB_PHONE_CONTROLLER;
-pub use qmp::{QMP_CONTAINER_DIR, QMP_SOCKET_NAME, QmpEndpoint, guest_reset_for_macos};
+pub use qmp::{
+    QMP_CONTAINER_DIR, QMP_SOCKET_NAME, QmpEndpoint, capture_guest_screen, guest_reset_for_macos,
+    screen_has_content,
+};
 use ts_rs::TS;
 pub use usb::{
     AttachedUsbDevice, ContainerUsbOptions, HostUsbDevice, HostUsbStatus, MachineUsbStatus,
@@ -78,7 +81,11 @@ pub use usb::{
 pub const DEFAULT_MACHINE_ID: &str = "default";
 /// Container name of the legacy single builder; newer machines derive their own name.
 pub const DEFAULT_CONTAINER_NAME: &str = "buildbridge-macos-builder";
-pub const DOCKER_IMAGE: &str = "sickcodes/docker-osx:latest";
+/// Pinned by digest: the `latest` tag as pulled here on 2026-09-05, upstream's last commit of
+/// 2025-11-11. An upgrade is a deliberate commit that names what changed upstream and re-runs
+/// the provider boot tests (`cargo test -p buildbridge-engine --test provider_boot -- --ignored`).
+pub const DOCKER_IMAGE: &str =
+    "sickcodes/docker-osx@sha256:3a3c82c79bc4e73531f819ccdfa4053b3084efd7c1f645678dbf8b4b3a24369c";
 
 /// Returns whether a machine identifier is safe to use in container names and directories.
 pub fn valid_machine_id(machine_id: &str) -> bool {

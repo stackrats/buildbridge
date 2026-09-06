@@ -10,7 +10,10 @@
 
 use super::*;
 
-pub const DOCKUR_IMAGE: &str = "dockurr/macos:latest";
+/// Pinned by digest: dockur/macos v3.12 of 2026-08-21, as pulled here on 2026-09-05. The same
+/// upgrade rule as `DOCKER_IMAGE`: a deliberate commit, and the provider boot tests run again.
+pub const DOCKUR_IMAGE: &str =
+    "dockurr/macos@sha256:08d1bcaac74ad44d548b7ce683b3dded083512d2a0d26416f9a620b763f8ea3d";
 /// The volume the image keeps every file of the machine in. Inside it, everything sits under
 /// the macOS version directory, which is what `version_env` names.
 pub(crate) const STORAGE_CONTAINER_DIR: &str = "/storage";
@@ -231,7 +234,10 @@ pub(crate) fn empty_storage_with_container(storage_dir: &Path) -> Result<(), Pro
     let args = vec![
         "run".to_string(),
         "--rm".to_string(),
-        format!("--volume={}:{THROWAWAY_STORAGE_DIR}:rw", storage_dir.display()),
+        format!(
+            "--volume={}:{THROWAWAY_STORAGE_DIR}:rw",
+            storage_dir.display()
+        ),
         "--entrypoint=/usr/bin/find".to_string(),
         DOCKUR_IMAGE.to_string(),
         THROWAWAY_STORAGE_DIR.to_string(),
@@ -275,9 +281,11 @@ mod tests {
         assert!(args.contains(&"--env=RAM_SIZE=8G".to_string()));
         assert!(args.contains(&"--env=CPU_CORES=4".to_string()));
         assert!(args.contains(&"--env=DISK_FMT=qcow2".to_string()));
-        assert!(args.contains(
-            &"--env=QMP=unix:/run/buildbridge-qmp.sock,server=on,wait=off".to_string()
-        ));
+        assert!(
+            args.contains(
+                &"--env=QMP=unix:/run/buildbridge-qmp.sock,server=on,wait=off".to_string()
+            )
+        );
         assert!(args.contains(&format!(
             "--env=ARGUMENTS=-device usb-ehci,id={USB_PHONE_CONTROLLER}"
         )));
@@ -293,7 +301,11 @@ mod tests {
         let args = create_args("c", &profile(), &disk, None);
 
         assert!(!args.iter().any(|arg| arg.starts_with("--env=ARGUMENTS=")));
-        assert!(!args.iter().any(|arg| arg.starts_with("--device-cgroup-rule")));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.starts_with("--device-cgroup-rule"))
+        );
         assert!(!args.iter().any(|arg| arg.contains("/buildbridge-template")));
     }
 
@@ -306,7 +318,9 @@ mod tests {
         )
         .unwrap();
         let args = create_args("c", &profile(), &disk, None);
-        assert!(args.contains(&"--volume=/tmp/templates/base:/buildbridge-template:ro".to_string()));
+        assert!(
+            args.contains(&"--volume=/tmp/templates/base:/buildbridge-template:ro".to_string())
+        );
     }
 
     #[test]

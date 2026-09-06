@@ -91,6 +91,41 @@ impl Drop for QmpClient {
     }
 }
 
+/// Writes the guest's display to `path_in_qemu`, a path as QEMU sees it: for Docker-OSX the
+/// bound control directory, for dockur/macos the bound storage directory, so that the host can
+/// read the result. Used by the provider boot tests to tell a lit screen from a dark one.
+pub fn capture_guest_screen(
+    endpoint: &QmpEndpoint,
+    path_in_qemu: &str,
+) -> Result<(), ProviderError> {
+    QmpClient::connect(endpoint)?.screendump(path_in_qemu)
+}
+
+/// Whether a QEMU screendump (binary PPM) shows anything at all: a booting guest is dark until
+/// the OpenCore picker or the installer draws, and a hung one stays dark.
+pub fn screen_has_content(ppm: &[u8]) -> bool {
+    // P6, then width height, then maxval, each separated by whitespace, then the pixels.
+    let mut fields = 0;
+    let mut index = 0;
+    let mut in_field = false;
+    while index < ppm.len() && fields < 4 {
+        let byte = ppm[index];
+        if byte.is_ascii_whitespace() {
+            if in_field {
+                fields += 1;
+                in_field = false;
+            }
+        } else {
+            in_field = true;
+        }
+        index += 1;
+    }
+    if fields < 4 || !ppm.starts_with(b"P6") {
+        return false;
+    }
+    ppm[index..].iter().any(|byte| *byte != 0)
+}
+
 fn not_running() -> ProviderError {
     ProviderError::UsbPassthrough(
         "the machine is not running, so its QEMU control socket is closed".to_string(),
@@ -303,6 +338,13 @@ impl QmpClient {
         self.execute(&device_add_by_node_request(node, guest_reset))
             .map(|_| ())
             .map_err(|error| map_qmp_failure("device attach", error))
+    }
+
+    /// Asks QEMU to write the guest's display to a file at a path inside QEMU's own filesystem.
+    pub fn screendump(&mut self, path: &str) -> Result<(), ProviderError> {
+        self.execute(&json!({ "execute": "screendump", "arguments": { "filename": path } }))
+            .map(|_| ())
+            .map_err(|error| map_qmp_failure("screen capture", error))
     }
 
     /// Removes the device object; a device that is already gone counts as removed.
@@ -603,6 +645,16 @@ mod tests {
         assert!(!guest_reset_for_macos(Some("27.0")));
         assert!(!guest_reset_for_macos(None));
         assert!(!guest_reset_for_macos(Some("garbage")));
+    }
+
+    #[test]
+    fn a_screendump_counts_as_content_only_when_a_pixel_is_lit() {
+        let dark = b"P6\n2 1\n255\n\0\0\0\0\0\0".to_vec();
+        let lit = b"P6\n2 1\n255\n\0\0\0\x10\0\0".to_vec();
+        assert!(!screen_has_content(&dark));
+        assert!(screen_has_content(&lit));
+        assert!(!screen_has_content(b"P5\n1 1\n255\n\xff"));
+        assert!(!screen_has_content(b"P6\n1 1"));
         assert_eq!(
             device_del_request("buildbridge-iphone"),
             json!({ "execute": "device_del", "arguments": { "id": "buildbridge-iphone" } })
