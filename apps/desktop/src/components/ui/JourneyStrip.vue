@@ -17,6 +17,9 @@ const segmentClass: Record<StepStatus, string> = {
     pending: 'bg-zinc-200 dark:bg-zinc-700',
 };
 
+// A live step pulses in the status colour rather than in ink: it is up, not on its way.
+const liveSegmentClass = 'bg-emerald-500 animate-pulse motion-reduce:animate-none';
+
 const statusWord: Record<StepStatus, string> = {
     done: 'done',
     active: 'next',
@@ -43,8 +46,8 @@ const caption = computed(() =>
                     v-for="step in group.steps"
                     :key="step.id"
                     class="h-1.5 w-3 rounded-[2px] transition-colors duration-500 motion-reduce:transition-none"
-                    :class="segmentClass[step.status]"
-                    v-tip="`${step.title} · ${statusWord[step.status]}`"
+                    :class="step.live ? liveSegmentClass : segmentClass[step.status]"
+                    v-tip="`${step.title} · ${step.live ? 'live' : statusWord[step.status]}`"
                 />
             </div>
         </div>

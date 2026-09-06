@@ -89,7 +89,7 @@ pub struct TemplatePaths {
 
 impl TemplatePaths {
     pub(crate) fn resolve(app: &Engine, template_id: &str) -> Result<Self, String> {
-        if !buildbridge_docker_osx::valid_machine_id(template_id) {
+        if !buildbridge_machines::valid_machine_id(template_id) {
             return Err("The template identifier is invalid.".to_string());
         }
         Ok(Self {
@@ -165,7 +165,7 @@ pub(crate) fn list_templates(app: &Engine) -> Result<Vec<StoredMachineTemplate>,
         let Some(id) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
-        if !buildbridge_docker_osx::valid_machine_id(&id) {
+        if !buildbridge_machines::valid_machine_id(&id) {
             continue;
         }
         if let Some(template) = load_template(app, &id)? {
@@ -215,7 +215,7 @@ fn summarize_template(
     template: &StoredMachineTemplate,
 ) -> Result<MachineTemplateSummary, String> {
     let paths = TemplatePaths::resolve(app, &template.id)?;
-    let files = buildbridge_docker_osx::MachineTemplateFiles::new(&paths.files_dir())
+    let files = buildbridge_machines::MachineTemplateFiles::new(&paths.files_dir())
         .map_err(|error| error.to_string())?;
     Ok(MachineTemplateSummary {
         id: template.id.clone(),
@@ -277,6 +277,12 @@ pub async fn save_machine_template(
     let paths = MachinePaths::resolve(app, &machine_id)?;
     let registry = machines::load_registry(app)?;
     let machine = registry.find(&machine_id)?.clone();
+    if !machine.config.provider.is_macos() {
+        return Err(
+            "An Android toolchain has no disk to save; templates are for macOS machines."
+                .to_string(),
+        );
+    }
     if !paths.known_hosts().is_file() {
         return Err(
             "Pin the guest identity first; a template carries it so clones need no comparison."
@@ -294,7 +300,7 @@ pub async fn save_machine_template(
     let source_dir = paths.disk_dir();
     let source_template_dir = template_dir_for(app, &machine_id)?;
     let source_config = machine.config.clone();
-    let source_disk = buildbridge_docker_osx::MachineDisk::for_machine(
+    let source_disk = buildbridge_machines::MachineDisk::for_machine(
         &source_config,
         &source_dir,
         source_template_dir.as_deref(),
@@ -311,7 +317,7 @@ pub async fn save_machine_template(
         .trim()
         .to_string();
     // Read while the guest may still be up; the copy needs it stopped.
-    let current = build_mac_builder_view(app, &paths).await?;
+    let current = build_machine_view(app, &paths).await?;
     let diagnostics = current.guest.diagnostics;
 
     let existing = list_templates(app)?;
@@ -338,16 +344,16 @@ pub async fn save_machine_template(
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
-        let source = buildbridge_docker_osx::MachineDisk::for_machine(
+        let _operation = buildbridge_machines::enter_operation(scope);
+        let source = buildbridge_machines::MachineDisk::for_machine(
             &source_config,
             &source_dir,
             source_template_dir.as_deref(),
         )
         .map_err(|error| error.to_string())?;
-        let files = buildbridge_docker_osx::MachineTemplateFiles::new(&files_dir)
+        let files = buildbridge_machines::MachineTemplateFiles::new(&files_dir)
             .map_err(|error| error.to_string())?;
-        buildbridge_docker_osx::save_template(
+        buildbridge_machines::save_template(
             &container_name,
             &qmp_socket,
             &source,
@@ -429,10 +435,7 @@ pub async fn delete_machine_template(
 /// Makes a fresh clone reachable: pins the host key the template recorded, installs the
 /// clone's own access key through the template's and retires the template's, and records the
 /// guest username. Safe to run again; every step checks before it acts.
-pub async fn adopt_template_guest(
-    app: &Engine,
-    machine_id: String,
-) -> Result<MacBuilderView, String> {
+pub async fn adopt_template_guest(app: &Engine, machine_id: String) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     let machine = machines::load_registry(app)?.find(&machine_id)?.clone();
     let template_id = machine
@@ -452,10 +455,10 @@ pub async fn adopt_template_guest(
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
-        let expected = buildbridge_docker_osx::fingerprint_host_key_line(&template.known_hosts_line)
+        let _operation = buildbridge_machines::enter_operation(scope);
+        let expected = buildbridge_machines::fingerprint_host_key_line(&template.known_hosts_line)
             .map_err(|error| error.to_string())?;
-        let scanned = buildbridge_docker_osx::scan_guest_host_key(ssh_port)
+        let scanned = buildbridge_machines::scan_guest_host_key(ssh_port)
             .map_err(|error| error.to_string())?;
         if scanned.fingerprint != expected {
             return Err(format!(
@@ -465,7 +468,7 @@ pub async fn adopt_template_guest(
         }
         match fs::read_to_string(&known_hosts_path) {
             Ok(pinned) => {
-                let pinned = buildbridge_docker_osx::fingerprint_host_key_line(pinned.trim())
+                let pinned = buildbridge_machines::fingerprint_host_key_line(pinned.trim())
                     .map_err(|error| error.to_string())?;
                 if pinned != expected {
                     return Err(
@@ -484,7 +487,7 @@ pub async fn adopt_template_guest(
         }
         let public_key = ensure_mac_guest_keypair(&machine_identity)?;
         let template_public_key = read_mac_guest_public_key(&template_public_key_path)?;
-        buildbridge_docker_osx::adopt_guest_key(
+        buildbridge_machines::adopt_guest_key(
             ssh_port,
             &template.guest_username,
             &template_identity,
@@ -493,7 +496,7 @@ pub async fn adopt_template_guest(
             &template_public_key,
         )
         .map_err(|error| error.to_string())?;
-        let diagnostics = buildbridge_docker_osx::guest_diagnostics(
+        let diagnostics = buildbridge_machines::guest_diagnostics(
             ssh_port,
             &template.guest_username,
             &machine_identity,
@@ -515,7 +518,7 @@ pub async fn adopt_template_guest(
     let username = finish_operation(&cancel_probe, joined)?;
     save_mac_guest_access(&paths, &StoredMacGuestAccess { username })?;
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 
 #[cfg(test)]

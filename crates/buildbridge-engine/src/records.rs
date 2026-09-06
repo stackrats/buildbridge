@@ -4,6 +4,77 @@ use super::*;
 use ts_rs::TS;
 
 pub(crate) fn prepare_apple_archive_output_dir(paths: &MachinePaths) -> Result<PathBuf, String> {
+    prepare_artifact_output_dir(paths, "archive")
+}
+
+pub(crate) fn prepare_android_release_output_dir(paths: &MachinePaths) -> Result<PathBuf, String> {
+    prepare_artifact_output_dir(paths, "release")
+}
+
+pub(crate) fn prepare_android_debug_output_dir(paths: &MachinePaths) -> Result<PathBuf, String> {
+    prepare_artifact_output_dir(paths, "debug")
+}
+
+/// Removes every retained debug build of a machine: the directories this engine named
+/// `debug-…` directly under its artifacts, and nothing else there.
+pub(crate) fn remove_android_debug_outputs(paths: &MachinePaths) -> Result<(), String> {
+    let root = paths.artifacts_dir();
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let name = entry.file_name();
+        let is_debug = name.to_str().is_some_and(|name| name.starts_with("debug-"));
+        if is_debug
+            && entry
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_dir()
+        {
+            fs::remove_dir_all(entry.path())
+                .map_err(|error| format!("Could not remove the previous debug APK: {error}"))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// The directory holding one retained artifact, once it is proven to be a regular file directly
+/// under a `prefix`-named directory of this machine's managed artifacts.
+pub(crate) fn validated_android_artifact_directory(
+    paths: &MachinePaths,
+    artifact_path: &str,
+    prefix: &str,
+) -> Result<PathBuf, String> {
+    let root = fs::canonicalize(paths.artifacts_dir())
+        .map_err(|error| format!("The managed artifact directory is unavailable: {error}"))?;
+    let artifact = fs::canonicalize(artifact_path)
+        .map_err(|error| format!("The retained artifact is unavailable: {error}"))?;
+    if !artifact.is_file() {
+        return Err("The retained artifact is no longer a regular file.".to_string());
+    }
+    let directory = artifact
+        .parent()
+        .ok_or_else(|| "The retained artifact has no parent directory.".to_string())?;
+    let named = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(prefix));
+    if directory.parent() != Some(root.as_path()) || !named {
+        return Err("The artifact record is outside BuildBridge's managed directory.".to_string());
+    }
+
+    Ok(directory.to_path_buf())
+}
+
+/// A fresh owner-only directory under the machine's artifacts for one build's outputs.
+pub(crate) fn prepare_artifact_output_dir(
+    paths: &MachinePaths,
+    prefix: &str,
+) -> Result<PathBuf, String> {
     let root = paths.artifacts_dir();
     fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     set_restricted_directory_permissions(&root)?;
@@ -11,11 +82,189 @@ pub(crate) fn prepare_apple_archive_output_dir(paths: &MachinePaths) -> Result<P
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "The system clock is earlier than the Unix epoch.".to_string())?
         .as_millis();
-    let directory = root.join(format!("archive-{operation_id}-{}", std::process::id()));
+    let directory = root.join(format!("{prefix}-{operation_id}-{}", std::process::id()));
     fs::create_dir(&directory).map_err(|error| error.to_string())?;
     set_restricted_directory_permissions(&directory)?;
 
     Ok(directory)
+}
+
+pub(crate) fn load_android_workspace(
+    paths: &MachinePaths,
+) -> Result<Option<StoredAndroidWorkspace>, String> {
+    match fs::read(paths.android_workspace()) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+            format!("The approved Android project configuration is invalid: {error}")
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+pub(crate) fn save_android_workspace(
+    paths: &MachinePaths,
+    workspace: &StoredAndroidWorkspace,
+) -> Result<(), String> {
+    let encoded = serde_json::to_vec_pretty(workspace).map_err(|error| error.to_string())?;
+
+    write_restricted_file(&paths.android_workspace(), &encoded)
+}
+
+pub(crate) fn load_android_release(
+    paths: &MachinePaths,
+) -> Result<Option<StoredAndroidRelease>, String> {
+    match fs::read(paths.android_release_record()) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| format!("The retained Android release record is invalid: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+pub(crate) fn save_android_release(
+    paths: &MachinePaths,
+    release: &StoredAndroidRelease,
+) -> Result<(), String> {
+    let encoded = serde_json::to_vec_pretty(release).map_err(|error| error.to_string())?;
+
+    write_restricted_file(&paths.android_release_record(), &encoded)
+}
+
+pub(crate) fn remove_android_release_record(paths: &MachinePaths) -> Result<(), String> {
+    remove_file_if_present(&paths.android_release_record())
+}
+
+pub(crate) fn save_android_release_error(paths: &MachinePaths, error: &str) -> Result<(), String> {
+    let error = error
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .take(8_000)
+        .collect::<String>();
+    write_restricted_file(&paths.android_release_error(), error.as_bytes())
+}
+
+pub(crate) fn remove_android_release_error(paths: &MachinePaths) -> Result<(), String> {
+    remove_file_if_present(&paths.android_release_error())
+}
+
+/// The directory a retained release's two files share, once both are proven to be regular
+/// files directly under this machine's managed artifact directory.
+pub(crate) fn validated_android_release_directory(
+    paths: &MachinePaths,
+    result: &AndroidReleaseResult,
+) -> Result<PathBuf, String> {
+    let root = fs::canonicalize(paths.artifacts_dir())
+        .map_err(|error| format!("The managed artifact directory is unavailable: {error}"))?;
+    let aab = fs::canonicalize(&result.aab.path)
+        .map_err(|error| format!("The retained app bundle is unavailable: {error}"))?;
+    let apk = fs::canonicalize(&result.apk.path)
+        .map_err(|error| format!("The retained APK is unavailable: {error}"))?;
+    if !aab.is_file() || !apk.is_file() {
+        return Err("The retained signed artifacts are no longer regular files.".to_string());
+    }
+    let directory = aab
+        .parent()
+        .ok_or_else(|| "The retained app bundle has no parent directory.".to_string())?;
+    if apk.parent() != Some(directory) || directory.parent() != Some(root.as_path()) {
+        return Err(
+            "The signed artifact record is outside BuildBridge's managed directory.".to_string(),
+        );
+    }
+
+    Ok(directory.to_path_buf())
+}
+
+/// Approves a Capacitor project for an Android machine: the same package and lock the iOS
+/// side requires, plus the Android platform with its committed Gradle wrapper.
+pub(crate) fn inspect_android_workspace(path: &str) -> Result<StoredAndroidWorkspace, String> {
+    if path.is_empty() {
+        return Err("Choose an absolute local project directory.".to_string());
+    }
+    let requested = std::path::Path::new(path);
+    if !requested.is_absolute() {
+        return Err("The approved project path must be absolute.".to_string());
+    }
+    let canonical = fs::canonicalize(requested)
+        .map_err(|error| format!("The selected project directory is unavailable: {error}"))?;
+    if !canonical.is_dir() {
+        return Err("The selected project path is not a directory.".to_string());
+    }
+    for required in [
+        "package.json",
+        "pnpm-lock.yaml",
+        "capacitor.config.ts",
+        "android/gradlew",
+    ] {
+        if !canonical.join(required).is_file() {
+            return Err(format!("This project is missing {required}."));
+        }
+    }
+    let app_script = ["android/app/build.gradle", "android/app/build.gradle.kts"]
+        .into_iter()
+        .map(|relative| canonical.join(relative))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| "This project is missing android/app/build.gradle.".to_string())?;
+    if !canonical.join("android/settings.gradle").is_file()
+        && !canonical.join("android/settings.gradle.kts").is_file()
+    {
+        return Err("This project is missing android/settings.gradle.".to_string());
+    }
+
+    let package: serde_json::Value = serde_json::from_slice(
+        &fs::read(canonical.join("package.json"))
+            .map_err(|error| format!("Could not read package.json: {error}"))?,
+    )
+    .map_err(|error| format!("package.json is invalid: {error}"))?;
+    let name = package
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.trim().is_empty() && name.len() <= 120)
+        .map(str::to_string)
+        .or_else(|| {
+            canonical
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
+        .ok_or_else(|| "The selected project name is invalid.".to_string())?;
+    let local_path = canonical
+        .to_str()
+        .filter(|path| path.len() <= 4_096)
+        .ok_or_else(|| "The selected project path is not valid UTF-8.".to_string())?
+        .to_string();
+    let script = fs::read_to_string(&app_script)
+        .map_err(|error| format!("Could not read the app module's Gradle script: {error}"))?;
+
+    Ok(StoredAndroidWorkspace {
+        local_path,
+        name,
+        application_id: gradle_application_id(&script),
+        last_snapshot_sha256: None,
+        last_sync_file_count: None,
+        last_sync_bytes: None,
+        last_build_succeeded: false,
+        last_build: None,
+        last_source: None,
+    })
+}
+
+/// The `applicationId` an app module's Gradle script declares as a literal, in either the
+/// Groovy or the Kotlin spelling. A computed value is left unknown rather than guessed.
+pub(crate) fn gradle_application_id(script: &str) -> Option<String> {
+    script.lines().find_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix("applicationId")?;
+        let rest = rest.trim_start().strip_prefix('=').unwrap_or(rest).trim();
+        let quote = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+        let value = rest[1..].split(quote).next()?;
+        let valid = !value.is_empty()
+            && value.len() <= 255
+            && value.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '_')
+            });
+        valid.then(|| value.to_string())
+    })
 }
 
 pub(crate) fn remove_file_if_present(path: &std::path::Path) -> Result<(), String> {
@@ -311,7 +560,7 @@ pub(crate) fn load_mac_guest_access(
             let access: StoredMacGuestAccess = serde_json::from_slice(&bytes).map_err(|error| {
                 format!("The macOS guest access configuration is invalid: {error}")
             })?;
-            if !buildbridge_docker_osx::valid_guest_username(&access.username) {
+            if !buildbridge_machines::valid_guest_username(&access.username) {
                 return Err("The stored macOS guest username is invalid.".to_string());
             }
             Ok(Some(access))

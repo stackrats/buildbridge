@@ -1,7 +1,7 @@
-//! System-tray lifecycle controls for the paired runner and every managed macOS machine.
+//! System-tray lifecycle controls for the paired runner and every managed machine.
 
-use buildbridge_docker_osx::ContainerState;
 use buildbridge_engine::{Engine, MachineRuntime, machine_runtimes};
+use buildbridge_machines::ContainerState;
 use tauri::{AppHandle, Manager};
 
 use crate::Desktop;
@@ -35,6 +35,13 @@ pub(crate) fn setup(app: &tauri::App) -> tauri::Result<()> {
         .tooltip(tooltip(app.handle()));
     if let Some(icon) = icon {
         builder = builder.icon(icon);
+    }
+    // The bundled icon is the bare mark, light on transparent, which suits the dark panels Linux
+    // desktops almost always have. macOS menu bars go either way, so there the mark's alpha is a
+    // template shape and the system paints it to match. Windows gets the tiled .ico either way.
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.icon_as_template(true);
     }
 
     builder
@@ -88,7 +95,7 @@ fn menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let mut builder = MenuBuilder::new(app);
 
     if states.is_empty() {
-        let empty = MenuItemBuilder::with_id("no-machines", "No macOS machines yet")
+        let empty = MenuItemBuilder::with_id("no-machines", "No machines yet")
             .enabled(false)
             .build(app)?;
         builder = builder.item(&empty);
@@ -166,14 +173,14 @@ fn tooltip(app: &AppHandle) -> String {
     let running = states.iter().filter(|entry| is_live(entry.state)).count();
 
     match states.len() {
-        0 => "BuildBridge — no macOS machines".to_string(),
-        total => format!("BuildBridge — {running} of {total} macOS machines running"),
+        0 => "BuildBridge — no machines".to_string(),
+        total => format!("BuildBridge — {running} of {total} machines running"),
     }
 }
 
 fn start_machine(app: AppHandle, machine_id: String) {
     tauri::async_runtime::spawn(async move {
-        let result = buildbridge_engine::launch_mac_builder(&engine(&app), machine_id).await;
+        let result = buildbridge_engine::launch_machine(&engine(&app), machine_id).await;
         refresh(&app);
         if result.is_err() {
             reveal_window(&app);
@@ -183,7 +190,7 @@ fn start_machine(app: AppHandle, machine_id: String) {
 
 fn stop_machine(app: AppHandle, machine_id: String, quit_after_stop: bool) {
     tauri::async_runtime::spawn(async move {
-        let result = buildbridge_engine::stop_mac_builder(&engine(&app), machine_id).await;
+        let result = buildbridge_engine::stop_machine(&engine(&app), machine_id).await;
         refresh(&app);
 
         if result.is_ok() && quit_after_stop {
@@ -199,7 +206,7 @@ fn stop_all_and_quit(app: AppHandle) {
         let mut failed = false;
         for entry in machine_states(&app) {
             if is_live(entry.state)
-                && buildbridge_engine::stop_mac_builder(&engine(&app), entry.id.clone())
+                && buildbridge_engine::stop_machine(&engine(&app), entry.id.clone())
                     .await
                     .is_err()
             {

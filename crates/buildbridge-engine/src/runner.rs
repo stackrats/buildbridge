@@ -143,7 +143,11 @@ pub(crate) async fn run_once_inner(app: &Engine) -> Result<RunOnceResult, String
     // The runner crate runs what it can by itself; anything that needs a managed machine is
     // executed here, where the machines live.
     let Some(execution) = execute(&build) else {
-        return execute_apple_archive_build(app, &client, &build).await;
+        return match build.kind {
+            BuildKind::AppleArchive => execute_apple_archive_build(app, &client, &build).await,
+            BuildKind::AndroidRelease => execute_android_release_build(app, &client, &build).await,
+            BuildKind::Diagnostics => Err("the runner declined a diagnostics build".to_string()),
+        };
     };
     client
         .append_logs(&build.id, execution.logs)
@@ -211,9 +215,8 @@ impl LogForwarder {
         if payload.get("machineId").and_then(serde_json::Value::as_str) != Some(machine_id) {
             return;
         }
-        let Some(progress) = payload.get("progress") else {
-            return;
-        };
+        // The progress is flattened beside `machineId`; older payloads nested it.
+        let progress = payload.get("progress").unwrap_or(payload);
         let phase = progress
             .get("phase")
             .and_then(serde_json::Value::as_str)
@@ -376,6 +379,231 @@ pub(crate) async fn execute_apple_archive_build(
     })
 }
 
+/// Runs a claimed `android_release` build on one of this host's Android machines and reports
+/// it, the same way an Apple archive is.
+pub(crate) async fn execute_android_release_build(
+    app: &Engine,
+    client: &ApiClient,
+    build: &ClaimedBuild,
+) -> Result<RunOnceResult, String> {
+    let payload = AndroidReleasePayload::from_value(&build.payload)?;
+    let forwarder = Arc::new(Mutex::new(LogForwarder::new(build.next_log_sequence)));
+    let stop = Arc::new(AtomicBool::new(false));
+    let pump = spawn_log_pump(
+        tokio::runtime::Handle::current(),
+        client.clone(),
+        build.id.clone(),
+        Arc::clone(&forwarder),
+        Arc::clone(&stop),
+    );
+    let listeners: Vec<ListenerId> = [ANDROID_BUILD_PROGRESS_EVENT, ANDROID_RELEASE_PROGRESS_EVENT]
+        .into_iter()
+        .map(|event| {
+            let forwarder = Arc::clone(&forwarder);
+            let machine_id = payload.machine_id.clone();
+            app.listen(event, move |value| {
+                if let Ok(mut forwarder) = forwarder.lock() {
+                    forwarder.observe(event, value, &machine_id);
+                }
+            })
+        })
+        .collect();
+
+    let outcome = run_remote_android_release(app, &payload, &forwarder).await;
+    let env_set_name = match payload.env_set.clone() {
+        Some(name) => Some(name),
+        None => match attached_env_set_id(app, &payload.machine_id) {
+            Ok(Some(id)) => read_env_sets()
+                .await
+                .ok()
+                .and_then(|stored| stored.sets.into_iter().find(|set| set.id == id))
+                .map(|set| set.name),
+            _ => None,
+        },
+    };
+
+    for id in listeners {
+        app.unlisten(id);
+    }
+    if let Err(error) = &outcome
+        && let Ok(mut forwarder) = forwarder.lock()
+    {
+        forwarder.push(LogStream::Stderr, error.clone());
+    }
+    stop.store(true, Ordering::Release);
+    let pump_failure = pump.join().ok().flatten();
+
+    let request = match &outcome {
+        Ok(release) => CompleteBuildRequest {
+            status: CompletionStatus::Succeeded,
+            exit_code: Some(0),
+            error: pump_failure,
+            result: Some(android_result_json(release, env_set_name.as_deref())),
+        },
+        Err(error) => CompleteBuildRequest {
+            status: CompletionStatus::Failed,
+            exit_code: Some(1),
+            error: Some(error.clone()),
+            result: None,
+        },
+    };
+    client
+        .complete(&build.id, &request)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    Ok(match outcome {
+        Ok(release) => RunOnceResult {
+            state: RunState::Completed,
+            build_id: Some(build.id.clone()),
+            message: format!(
+                "Signed Android release {} ({}) built and reported to the control plane.",
+                release.version_name, release.version_code
+            ),
+        },
+        Err(error) => RunOnceResult {
+            state: RunState::Failed,
+            build_id: Some(build.id.clone()),
+            message: format!("Signed Android release failed: {error}"),
+        },
+    })
+}
+
+/// The Android pipeline: synchronize, debug build, signed release — on the approved folder or
+/// on a fetched revision of the same project.
+pub(crate) async fn run_remote_android_release(
+    app: &Engine,
+    payload: &AndroidReleasePayload,
+    forwarder: &Arc<Mutex<LogForwarder>>,
+) -> Result<AndroidReleaseResult, String> {
+    let log = |stream: LogStream, message: String| {
+        if let Ok(mut forwarder) = forwarder.lock() {
+            forwarder.push(stream, message);
+        }
+    };
+    let machine = machines::load_registry(app)?
+        .find(&payload.machine_id)?
+        .clone();
+    if machine.config.provider.is_macos() {
+        return Err(
+            "That machine is a macOS machine; queue an Apple archive on it instead.".to_string(),
+        );
+    }
+    let paths = MachinePaths::resolve(app, &payload.machine_id)?;
+    let approved = load_android_workspace(&paths)?.ok_or_else(|| {
+        "No project is approved on this machine. Approve one in the desktop first.".to_string()
+    })?;
+    log(
+        LogStream::System,
+        format!(
+            "BuildBridge {} · signed Android release of {} on {}",
+            env!("CARGO_PKG_VERSION"),
+            approved.name,
+            machine.config.name
+        ),
+    );
+
+    let source = match payload.git_ref.as_deref() {
+        Some(git_ref) => {
+            let remote = project_remote_url(&approved.local_path).ok_or_else(|| {
+                "The approved project has no git remote, so only its folder as-is can be built."
+                    .to_string()
+            })?;
+            log(
+                LogStream::System,
+                format!("$ git fetch {} {git_ref}", redact_remote(&remote)),
+            );
+            let checkout = paths.checkout_dir();
+            let fetch_ref = git_ref.to_string();
+            let fetch_dir = checkout.clone();
+            let commit = tokio::task::spawn_blocking(move || {
+                checkout_project_ref(&remote, &fetch_ref, &fetch_dir)
+            })
+            .await
+            .map_err(|error| error.to_string())??;
+            log(
+                LogStream::System,
+                format!("Checked out {git_ref} at {commit}"),
+            );
+            let inspected = inspect_android_workspace(&checkout.to_string_lossy())?;
+            if inspected.application_id != approved.application_id {
+                return Err(
+                    "That revision declares a different application identifier than the approved project."
+                        .to_string(),
+                );
+            }
+            Some((
+                checkout,
+                WorkspaceSource {
+                    kind: "git".to_string(),
+                    git_ref: Some(git_ref.to_string()),
+                    commit: Some(commit),
+                },
+            ))
+        }
+        None => None,
+    };
+
+    let env_set_id = match payload.env_set.as_deref() {
+        Some(name) => Some(
+            read_env_sets()
+                .await?
+                .sets
+                .into_iter()
+                .find(|set| set.name == name)
+                .map(|set| set.id)
+                .ok_or_else(|| format!("No environment named {name} is stored on this host."))?,
+        ),
+        None => attached_env_set_id(app, &payload.machine_id)?,
+    };
+    log(
+        LogStream::System,
+        match &env_set_id {
+            Some(_) => format!(
+                "Environment: {}",
+                payload
+                    .env_set
+                    .clone()
+                    .unwrap_or_else(|| "attached to the machine".to_string())
+            ),
+            None => "Environment: none".to_string(),
+        },
+    );
+
+    sync_android_workspace_from(app, &payload.machine_id, source).await?;
+    run_android_debug_build(app, payload.machine_id.clone()).await?;
+    let released = run_android_signed_release(app, payload.machine_id.clone(), env_set_id).await?;
+
+    Ok(released.release)
+}
+
+/// What the control plane keeps about a finished Android release: names, sizes and checksums.
+pub(crate) fn android_result_json(
+    release: &AndroidReleaseResult,
+    env_set: Option<&str>,
+) -> serde_json::Value {
+    let artifact = |artifact: &AndroidArtifact| {
+        serde_json::json!({
+            "name": std::path::Path::new(&artifact.path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| artifact.path.clone()),
+            "bytes": artifact.bytes,
+            "sha256": artifact.sha256,
+        })
+    };
+
+    serde_json::json!({
+        "version": release.version_name,
+        "build_number": release.version_code,
+        "application_id": release.application_id,
+        "key_alias": release.key_alias,
+        "certificate_sha256": release.certificate_sha256,
+        "env_set": env_set,
+        "artifacts": [artifact(&release.aab), artifact(&release.apk)],
+    })
+}
+
 /// The remote pipeline is the Build tab's own steps in order — synchronize, test build, signed
 /// archive — on the approved folder or on a fetched revision of the same project.
 pub(crate) async fn run_remote_apple_archive(
@@ -458,7 +686,7 @@ pub(crate) async fn run_remote_apple_archive(
                 .into_iter()
                 .find(|set| set.name == name)
                 .map(|set| set.id)
-                .ok_or_else(|| format!("No env set named {name} is stored on this host."))?,
+                .ok_or_else(|| format!("No environment named {name} is stored on this host."))?,
         ),
         None => attached_env_set_id(app, &payload.machine_id)?,
     };
@@ -466,13 +694,13 @@ pub(crate) async fn run_remote_apple_archive(
         LogStream::System,
         match &env_set_id {
             Some(_) => format!(
-                "Env set: {}",
+                "Environment: {}",
                 payload
                     .env_set
                     .clone()
                     .unwrap_or_else(|| "attached to the machine".to_string())
             ),
-            None => "Env set: none".to_string(),
+            None => "Environment: none".to_string(),
         },
     );
 
@@ -516,7 +744,11 @@ pub(crate) fn runner_capabilities() -> Vec<String> {
 
     match std::env::consts::OS {
         "macos" => capabilities.push("xcode".to_string()),
-        "linux" | "windows" => capabilities.push("docker".to_string()),
+        "linux" | "windows" => {
+            capabilities.push("docker".to_string());
+            // The Android toolchain needs nothing of the host but Docker.
+            capabilities.push("android".to_string());
+        }
         _ => {}
     }
 
@@ -546,28 +778,56 @@ pub(crate) async fn machine_reports(app: &Engine) -> Vec<MachineReport> {
     view.machines
         .into_iter()
         .map(|summary| {
-            let workspace = MachinePaths::resolve(app, &summary.id)
-                .ok()
-                .and_then(|paths| load_apple_workspace(&paths).ok().flatten());
+            let paths = MachinePaths::resolve(app, &summary.id).ok();
+            // The project's name, identifier and folder, whichever platform it is for.
+            let project = match summary.platform {
+                MachinePlatform::Ios => paths
+                    .as_ref()
+                    .and_then(|paths| load_apple_workspace(paths).ok().flatten())
+                    .map(|workspace| {
+                        (
+                            workspace.name,
+                            workspace.bundle_identifier,
+                            workspace.local_path,
+                        )
+                    }),
+                MachinePlatform::Android => paths
+                    .as_ref()
+                    .and_then(|paths| load_android_workspace(paths).ok().flatten())
+                    .map(|workspace| {
+                        (
+                            workspace.name,
+                            workspace.application_id,
+                            workspace.local_path,
+                        )
+                    }),
+            };
             let ready = summary.state == ContainerState::Running
-                && summary.trust_pinned
+                && (summary.platform == MachinePlatform::Android || summary.trust_pinned)
                 && summary.signing_provisioned
-                && workspace.is_some();
+                && project.is_some();
 
             MachineReport {
                 id: summary.id,
                 name: summary.config.name,
                 ready,
-                project: workspace.as_ref().map(|workspace| workspace.name.clone()),
-                bundle_identifier: workspace
+                project: project.as_ref().map(|(name, _, _)| name.clone()),
+                bundle_identifier: project
                     .as_ref()
-                    .and_then(|workspace| workspace.bundle_identifier.clone()),
-                repository: workspace
+                    .and_then(|(_, identifier, _)| identifier.clone()),
+                repository: project
                     .as_ref()
-                    .and_then(|workspace| project_remote_url(&workspace.local_path))
+                    .and_then(|(_, _, local_path)| project_remote_url(local_path))
                     .map(|remote| redact_remote(&remote)),
                 env_set: summary.env_set_name,
                 env_sets: env_set_names.clone(),
+                platform: Some(
+                    match summary.platform {
+                        MachinePlatform::Ios => "ios",
+                        MachinePlatform::Android => "android",
+                    }
+                    .to_string(),
+                ),
             }
         })
         .collect()

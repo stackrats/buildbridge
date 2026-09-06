@@ -24,7 +24,7 @@ const envCount = computed(() => envs.sets.value.length);
 
 // The selected row carries a primary rule on its leading edge; nothing else in the app does.
 const itemBase =
-    'relative flex w-full items-center gap-2.5 rounded-md py-1.5 pr-2 pl-2.5 text-left text-xs transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300';
+    'relative flex w-full items-center gap-2.5 rounded-md py-1.5 pr-2 pl-2.5 text-left text-xs focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300';
 const itemIdle =
     'text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-50';
 const itemActive =
@@ -42,6 +42,19 @@ function machineSecondary(machine: MachineSummary): string {
 }
 
 const machineCount = computed(() => machines.machines.value.length);
+
+// A template being saved shows on the Templates entry as well as on its machine, since the
+// save outlives its dialog and the page it started on; the first one names the tooltip.
+const templateSaves = computed(() => machines.templateSaves());
+const templateSavePercent = computed(() => templateSaves.value[0]?.progress?.percent ?? null);
+const templateSaveTip = computed(() => {
+    const [save] = templateSaves.value;
+    if (!save) {
+        return null;
+    }
+    const what = save.name ? `Saving ${save.name}` : `Saving a template from ${save.machineName}`;
+    return templateSavePercent.value === null ? what : `${what} · ${templateSavePercent.value}%`;
+});
 
 // Drag-to-resize, persisted between launches.
 let dragging = false;
@@ -86,12 +99,12 @@ onBeforeUnmount(() => {
 
             <div class="mt-4 flex h-6 items-center justify-between pr-1 pl-2.5">
                 <span class="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
-                    macOS machines
+                    Machines
                     <span v-if="machineCount" class="tabular-nums">· {{ machineCount }}</span>
                 </span>
                 <button
                     type="button"
-                    class="flex h-5 w-5 items-center justify-center rounded-[5px] text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50 dark:focus-visible:outline-zinc-300"
+                    class="flex h-5 w-5 items-center justify-center rounded-[5px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50 dark:focus-visible:outline-zinc-300"
                     v-tip="'New machine'"
                     @click="ui.state.newMachineOpen = true"
                 >
@@ -119,7 +132,14 @@ onBeforeUnmount(() => {
                                 {{ machineSecondary(machine) }}
                             </span>
                         </span>
-                        <Spinner v-if="machine.busyOperation" size="h-3 w-3" />
+                        <!-- An app live on the phone is up, not loading: the dot pulses in
+                             the status colour instead of spinning. -->
+                        <StatusDot
+                            v-if="machine.busyOperation && machines.runningLive(machine.id)"
+                            color="bg-emerald-500 animate-pulse motion-reduce:animate-none"
+                            label="live on the phone"
+                        />
+                        <Spinner v-else-if="machine.busyOperation" size="h-3 w-3" />
                         <StatusDot
                             v-else
                             :color="machineStateDot[machine.state]"
@@ -143,7 +163,7 @@ onBeforeUnmount(() => {
                 @click="ui.navigate({ kind: 'signing' })"
             >
                 <KeyRound class="h-4 w-4 shrink-0" />
-                <span class="flex-1">Signing kits</span>
+                <span class="flex-1">Signing</span>
                 <span
                     v-if="kitCount"
                     class="text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
@@ -156,7 +176,7 @@ onBeforeUnmount(() => {
                 @click="ui.navigate({ kind: 'envs' })"
             >
                 <Variable class="h-4 w-4 shrink-0" />
-                <span class="flex-1">Env sets</span>
+                <span class="flex-1">Environments</span>
                 <span
                     v-if="envCount"
                     class="text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
@@ -171,7 +191,15 @@ onBeforeUnmount(() => {
                 <Layers class="h-4 w-4 shrink-0" />
                 <span class="flex-1">Templates</span>
                 <span
-                    v-if="machines.state.templates.length"
+                    v-if="templateSaves.length"
+                    class="flex items-center gap-1 text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
+                    v-tip="templateSaveTip"
+                >
+                    <Spinner size="h-3 w-3" />
+                    <span v-if="templateSavePercent !== null">{{ templateSavePercent }}%</span>
+                </span>
+                <span
+                    v-else-if="machines.state.templates.length"
                     class="text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
                     >{{ machines.state.templates.length }}</span
                 >

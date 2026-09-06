@@ -15,4 +15,13 @@ developmentCertificatePath: string | null, developmentCertificatePassword: strin
  * Apple's serial for the development `.p12` BuildBridge created; derived with OpenSSL for
  * a hand-supplied file and cached here.
  */
-developmentCertificateSerialNumber: string | null, };
+developmentCertificateSerialNumber: string | null, 
+/**
+ * The Android upload key: a keystore on this host, the alias of the key in it, and the
+ * two passwords. A kit may hold this beside its Apple material or on its own.
+ */
+androidKeystorePath: string | null, androidKeystorePassword: string | null, androidKeyAlias: string | null, 
+/**
+ * `None` means the key password is the keystore password, which a PKCS12 keystore requires.
+ */
+androidKeyPassword: string | null, };

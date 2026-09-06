@@ -47,11 +47,10 @@ watch(attachedEnvSet, (set, previous) => {
 });
 onMounted(() => void envs.load());
 const envOptions = computed(() => [
-    { value: '', label: 'No env set' },
+    { value: '', label: 'No environment' },
     ...envs.sets.value.map((set) => ({
         value: set.id,
-        label:
-            set.id === attachedEnvSet.value?.id ? `env ${set.name} · attached` : `env ${set.name}`,
+        label: set.id === attachedEnvSet.value?.id ? `${set.name} · attached` : `${set.name}`,
     })),
 ]);
 const chosenEnvName = computed(() => envs.setById(envSetId.value)?.name ?? null);
@@ -96,13 +95,13 @@ async function clear(): Promise<void> {
             <span
                 v-if="envs.sets.value.length"
                 class="w-56 max-w-full"
-                title="The env set the web assets are rebuilt with for this archive; the set attached at the sync step is the default"
+                title="The environment the web assets are rebuilt with for this archive; the one attached at the sync step is the default"
             >
                 <Select
                     v-model="envSetId"
                     :options="envOptions"
                     size="sm"
-                    placeholder="No env set"
+                    placeholder="No environment"
                     :disabled="busy"
                 />
             </span>
@@ -284,7 +283,7 @@ async function clear(): Promise<void> {
         >
             <p>
                 The retained IPA, the packaged Xcode archive, and the last failure diagnostic are
-                deleted from this host. The guest and the signing kit are not affected.
+                deleted from this host. The guest and the signing credentials are not affected.
             </p>
         </ConfirmDialog>
     </StepPanel>

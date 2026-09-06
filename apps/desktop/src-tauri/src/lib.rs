@@ -2,10 +2,15 @@
 //! engine function a command line or a daemon would call; the only things the desktop owns are
 //! the window, the tray, and forwarding the engine's events to the webview.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use buildbridge_engine::*;
+use serde::Serialize;
 use serde_json::Value;
+use tauri::webview::DownloadEvent;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod tray;
@@ -75,6 +80,205 @@ fn open_machine_screen(
     Ok(())
 }
 
+/// Where the Xcode archives downloaded through the app land, under the desktop's data.
+const XCODE_DOWNLOADS_DIRECTORY: &str = "xcode";
+const XCODE_DOWNLOAD_PROGRESS_EVENT: &str = "xcode-download-progress";
+const APPLE_DOWNLOADS_URL: &str = "https://developer.apple.com/download/all/";
+
+/// One Xcode archive on its way from Apple into BuildBridge's folder. `total_bytes` is unknown
+/// while the download runs: the webview reports a request and an end, and the file's size in
+/// between is what there is to show.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct XcodeDownloadProgress {
+    machine_id: String,
+    path: String,
+    file_name: String,
+    bytes: u64,
+    /// `downloading`, `finished` or `failed`.
+    state: &'static str,
+}
+
+/// The downloads this process is watching, by destination, each with the flag that stops its
+/// size poll once the webview says the download ended.
+#[derive(Default)]
+struct XcodeDownloads(Arc<Mutex<HashMap<PathBuf, Arc<AtomicBool>>>>);
+
+fn emit_xcode_download(
+    app: &AppHandle,
+    machine_id: &str,
+    path: &std::path::Path,
+    state: &'static str,
+) {
+    let bytes = std::fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let _ = app.emit(
+        XCODE_DOWNLOAD_PROGRESS_EVENT,
+        XcodeDownloadProgress {
+            machine_id: machine_id.to_string(),
+            path: path.to_string_lossy().to_string(),
+            file_name: path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            bytes,
+            state,
+        },
+    );
+}
+
+/// Opens Apple's downloads page in a window of this app, so the person signs in with Apple
+/// directly and the Xcode `.xip` they download lands in BuildBridge's folder with its progress
+/// shown in the step, ready to import the moment it is complete. Only `.xip` downloads are
+/// captured; the page gets no access to this app. BuildBridge sees no Apple credential: the
+/// sign-in happens on Apple's page, as it would in any browser.
+#[tauri::command]
+fn download_xcode(
+    app: AppHandle,
+    downloads: State<'_, XcodeDownloads>,
+    machine_id: String,
+    query: String,
+) -> Result<(), String> {
+    let valid_label = !machine_id.is_empty()
+        && machine_id.len() <= 64
+        && machine_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid_label {
+        return Err("The machine identifier is invalid.".to_string());
+    }
+    let query = query.trim();
+    if query.is_empty()
+        || query.len() > 40
+        || !query
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.'))
+    {
+        return Err("The Xcode search is invalid.".to_string());
+    }
+    let directory = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?
+        .join(XCODE_DOWNLOADS_DIRECTORY);
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+
+    let label = format!("xcode-download-{machine_id}");
+    if let Some(existing) = app.get_webview_window(&label) {
+        existing.show().map_err(|error| error.to_string())?;
+        existing.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let mut url = tauri::Url::parse(APPLE_DOWNLOADS_URL).map_err(|error| error.to_string())?;
+    url.query_pairs_mut().append_pair("q", query);
+
+    let watched = Arc::clone(&downloads.0);
+    let handler_app = app.clone();
+    let handler_machine = machine_id.clone();
+    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(url))
+        .title(format!("Download {query} from Apple"))
+        .inner_size(1180.0, 820.0)
+        .on_download(move |webview, event| {
+            match event {
+                DownloadEvent::Requested {
+                    url: _,
+                    destination,
+                } => {
+                    let file_name = destination
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let is_xip = file_name.to_ascii_lowercase().ends_with(".xip")
+                        && !file_name.contains('/')
+                        && !file_name.starts_with('.');
+                    if !is_xip {
+                        // Anything else the page hands out goes where the webview would put it.
+                        return true;
+                    }
+                    let target = directory.join(&file_name);
+                    let _ = std::fs::remove_file(&target);
+                    *destination = target.clone();
+                    let stop = Arc::new(AtomicBool::new(false));
+                    if let Ok(mut map) = watched.lock() {
+                        map.insert(target.clone(), Arc::clone(&stop));
+                    }
+                    emit_xcode_download(&handler_app, &handler_machine, &target, "downloading");
+                    // The webview reports no progress of its own; the file growing is it.
+                    let poll_app = handler_app.clone();
+                    let poll_machine = handler_machine.clone();
+                    std::thread::spawn(move || {
+                        while !stop.load(Ordering::Acquire) {
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            if !stop.load(Ordering::Acquire) {
+                                emit_xcode_download(
+                                    &poll_app,
+                                    &poll_machine,
+                                    &target,
+                                    "downloading",
+                                );
+                            }
+                        }
+                    });
+                    true
+                }
+                DownloadEvent::Finished {
+                    url: _,
+                    path,
+                    success,
+                } => {
+                    let Some(path) = path else {
+                        return true;
+                    };
+                    let stop = watched.lock().ok().and_then(|mut map| map.remove(&path));
+                    let Some(stop) = stop else {
+                        return true;
+                    };
+                    stop.store(true, Ordering::Release);
+                    if success {
+                        emit_xcode_download(&handler_app, &handler_machine, &path, "finished");
+                        // The archive is here; the window has done its job.
+                        let _ = webview.window().close();
+                    } else {
+                        let _ = std::fs::remove_file(&path);
+                        emit_xcode_download(&handler_app, &handler_machine, &path, "failed");
+                    }
+                    true
+                }
+                _ => true,
+            }
+        })
+        .build()
+        .map_err(|error| format!("The download window could not be opened: {error}"))?;
+
+    Ok(())
+}
+
+/// Opens a page in this host's browser rather than in a window of this app: a provider's
+/// repository is someone else's page, read best where the person's browser already is. Only
+/// `https` addresses with a host are accepted, since any script in the webview can call this,
+/// and the address is one fixed argument to the platform's opener.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    let parsed =
+        tauri::Url::parse(&url).map_err(|error| format!("The address is invalid: {error}"))?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+        return Err("Only https addresses are opened in the browser.".to_string());
+    }
+    let mut command = if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else if cfg!(target_os = "windows") {
+        std::process::Command::new("explorer")
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    command
+        .arg(parsed.as_str())
+        .spawn()
+        .map_err(|error| format!("Could not open the browser: {error}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 fn open_developer_tools(window: tauri::WebviewWindow) -> Result<(), String> {
     #[cfg(debug_assertions)]
@@ -140,7 +344,7 @@ async fn list_machines(desktop: State<'_, Desktop>) -> Result<MachineListView, S
 #[tauri::command]
 async fn create_machine(
     desktop: State<'_, Desktop>,
-    profile: MacBuilderConfig,
+    profile: MachineConfig,
     template_id: Option<String>,
 ) -> Result<MachineListView, String> {
     buildbridge_engine::create_machine(&desktop.engine, profile, template_id).await
@@ -160,16 +364,16 @@ async fn discard_machine_container(
     desktop: State<'_, Desktop>,
     machine_id: String,
     input: ConfirmInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::discard_machine_container(&desktop.engine, machine_id, input).await
 }
 
 #[tauri::command]
-async fn get_mac_builder_status(
+async fn get_machine(
     desktop: State<'_, Desktop>,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
-    buildbridge_engine::get_mac_builder_status(&desktop.engine, machine_id).await
+) -> Result<MachineView, String> {
+    buildbridge_engine::get_machine(&desktop.engine, machine_id).await
 }
 
 #[tauri::command]
@@ -209,46 +413,46 @@ async fn delete_machine_template(
 async fn adopt_template_guest(
     desktop: State<'_, Desktop>,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::adopt_template_guest(&desktop.engine, machine_id).await
 }
 
 #[tauri::command]
-async fn configure_mac_builder(
+async fn configure_machine(
     desktop: State<'_, Desktop>,
     machine_id: String,
-    profile: MacBuilderConfig,
-) -> Result<MacBuilderView, String> {
-    buildbridge_engine::configure_mac_builder(&desktop.engine, machine_id, profile).await
+    profile: MachineConfig,
+) -> Result<MachineView, String> {
+    buildbridge_engine::configure_machine(&desktop.engine, machine_id, profile).await
 }
 
 #[tauri::command]
-async fn launch_mac_builder(
+async fn launch_machine(
     desktop: State<'_, Desktop>,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
-    buildbridge_engine::launch_mac_builder(&desktop.engine, machine_id).await
+) -> Result<MachineView, String> {
+    buildbridge_engine::launch_machine(&desktop.engine, machine_id).await
 }
 
 #[tauri::command]
-async fn stop_mac_builder(
+async fn stop_machine(
     desktop: State<'_, Desktop>,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
-    buildbridge_engine::stop_mac_builder(&desktop.engine, machine_id).await
+) -> Result<MachineView, String> {
+    buildbridge_engine::stop_machine(&desktop.engine, machine_id).await
 }
 
 #[tauri::command]
 async fn install_usb_release_rule(
     desktop: State<'_, Desktop>,
-) -> Result<buildbridge_docker_osx::HostUsbStatus, String> {
+) -> Result<buildbridge_machines::HostUsbStatus, String> {
     buildbridge_engine::install_usb_release_rule(&desktop.engine).await
 }
 
 #[tauri::command]
 async fn remove_usb_release_rule(
     desktop: State<'_, Desktop>,
-) -> Result<buildbridge_docker_osx::HostUsbStatus, String> {
+) -> Result<buildbridge_machines::HostUsbStatus, String> {
     buildbridge_engine::remove_usb_release_rule(&desktop.engine).await
 }
 
@@ -257,7 +461,7 @@ async fn migrate_machine_for_usb(
     desktop: State<'_, Desktop>,
     machine_id: String,
     input: ConfirmInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::migrate_machine_for_usb(&desktop.engine, machine_id, input).await
 }
 
@@ -266,7 +470,7 @@ async fn attach_usb_device(
     desktop: State<'_, Desktop>,
     machine_id: String,
     input: AttachUsbDeviceInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::attach_usb_device(&desktop.engine, machine_id, input).await
 }
 
@@ -275,7 +479,7 @@ async fn rebuild_machine_container(
     desktop: State<'_, Desktop>,
     machine_id: String,
     input: ConfirmInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::rebuild_machine_container(&desktop.engine, machine_id, input).await
 }
 
@@ -283,7 +487,7 @@ async fn rebuild_machine_container(
 async fn detach_usb_device(
     desktop: State<'_, Desktop>,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::detach_usb_device(&desktop.engine, machine_id).await
 }
 
@@ -291,7 +495,7 @@ async fn detach_usb_device(
 async fn list_guest_devices(
     desktop: State<'_, Desktop>,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::list_guest_devices(&desktop.engine, machine_id).await
 }
 
@@ -300,7 +504,7 @@ async fn pair_guest_device(
     desktop: State<'_, Desktop>,
     machine_id: String,
     input: PairGuestDeviceInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::pair_guest_device(&desktop.engine, machine_id, input).await
 }
 
@@ -326,7 +530,7 @@ async fn run_apple_device_build(
 async fn clear_apple_device_run(
     desktop: State<'_, Desktop>,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::clear_apple_device_run(&desktop.engine, machine_id).await
 }
 
@@ -366,7 +570,7 @@ async fn attach_signing_kit(
     desktop: State<'_, Desktop>,
     machine_id: String,
     input: AttachSigningKitInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::attach_signing_kit(&desktop.engine, machine_id, input).await
 }
 
@@ -464,7 +668,7 @@ async fn attach_env_set(
     desktop: State<'_, Desktop>,
     machine_id: String,
     input: AttachEnvSetInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::attach_env_set(&desktop.engine, machine_id, input).await
 }
 
@@ -478,7 +682,7 @@ async fn configure_mac_guest_access(
     desktop: State<'_, Desktop>,
     machine_id: String,
     input: MacGuestAccessInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::configure_mac_guest_access(&desktop.engine, machine_id, input).await
 }
 
@@ -487,25 +691,25 @@ async fn authorize_mac_guest_key(
     desktop: State<'_, Desktop>,
     machine_id: String,
     input: AuthorizeMacGuestKeyInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::authorize_mac_guest_key(&desktop.engine, machine_id, input).await
 }
 
 #[tauri::command]
-async fn trust_mac_builder_guest(
+async fn trust_mac_guest(
     desktop: State<'_, Desktop>,
     machine_id: String,
     input: TrustMacGuestInput,
-) -> Result<MacBuilderView, String> {
-    buildbridge_engine::trust_mac_builder_guest(&desktop.engine, machine_id, input).await
+) -> Result<MachineView, String> {
+    buildbridge_engine::trust_mac_guest(&desktop.engine, machine_id, input).await
 }
 
 #[tauri::command]
-async fn forget_mac_builder_guest_trust(
+async fn forget_mac_guest_trust(
     desktop: State<'_, Desktop>,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
-    buildbridge_engine::forget_mac_builder_guest_trust(&desktop.engine, machine_id).await
+) -> Result<MachineView, String> {
+    buildbridge_engine::forget_mac_guest_trust(&desktop.engine, machine_id).await
 }
 
 #[tauri::command]
@@ -522,7 +726,7 @@ async fn activate_mac_xcode(
     desktop: State<'_, Desktop>,
     machine_id: String,
     input: ActivateMacXcodeInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::activate_mac_xcode(&desktop.engine, machine_id, input).await
 }
 
@@ -530,7 +734,7 @@ async fn activate_mac_xcode(
 async fn provision_mac_signing(
     desktop: State<'_, Desktop>,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::provision_mac_signing(&desktop.engine, machine_id).await
 }
 
@@ -538,7 +742,7 @@ async fn provision_mac_signing(
 async fn clear_mac_guest_signing(
     desktop: State<'_, Desktop>,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::clear_mac_guest_signing(&desktop.engine, machine_id).await
 }
 
@@ -547,7 +751,7 @@ async fn approve_apple_workspace(
     desktop: State<'_, Desktop>,
     machine_id: String,
     input: ApproveAppleWorkspaceInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::approve_apple_workspace(&desktop.engine, machine_id, input).await
 }
 
@@ -555,7 +759,7 @@ async fn approve_apple_workspace(
 async fn clear_apple_workspace(
     desktop: State<'_, Desktop>,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::clear_apple_workspace(&desktop.engine, machine_id).await
 }
 
@@ -605,8 +809,83 @@ async fn reveal_apple_archive(
 async fn clear_apple_archive(
     desktop: State<'_, Desktop>,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     buildbridge_engine::clear_apple_archive(&desktop.engine, machine_id).await
+}
+
+#[tauri::command]
+async fn approve_android_workspace(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+    input: ApproveAndroidWorkspaceInput,
+) -> Result<MachineView, String> {
+    buildbridge_engine::approve_android_workspace(&desktop.engine, machine_id, input).await
+}
+
+#[tauri::command]
+async fn clear_android_workspace(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+) -> Result<MachineView, String> {
+    buildbridge_engine::clear_android_workspace(&desktop.engine, machine_id).await
+}
+
+#[tauri::command]
+async fn sync_android_workspace(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+) -> Result<SyncAndroidWorkspaceResult, String> {
+    buildbridge_engine::sync_android_workspace(&desktop.engine, machine_id).await
+}
+
+#[tauri::command]
+async fn run_android_debug_build(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+) -> Result<RunAndroidBuildResult, String> {
+    buildbridge_engine::run_android_debug_build(&desktop.engine, machine_id).await
+}
+
+#[tauri::command]
+async fn run_android_signed_release(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+    env_set_id: Option<String>,
+) -> Result<RunAndroidReleaseResult, String> {
+    buildbridge_engine::run_android_signed_release(&desktop.engine, machine_id, env_set_id).await
+}
+
+#[tauri::command]
+async fn reveal_android_release(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+) -> Result<(), String> {
+    buildbridge_engine::reveal_android_release(&desktop.engine, machine_id).await
+}
+
+#[tauri::command]
+async fn clear_android_release(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+) -> Result<MachineView, String> {
+    buildbridge_engine::clear_android_release(&desktop.engine, machine_id).await
+}
+
+#[tauri::command]
+async fn reveal_android_debug_apk(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+) -> Result<(), String> {
+    buildbridge_engine::reveal_android_debug_apk(&desktop.engine, machine_id).await
+}
+
+#[tauri::command]
+async fn create_android_keystore(
+    desktop: State<'_, Desktop>,
+    kit_id: String,
+    input: CreateAndroidKeystoreInput,
+) -> Result<CreateAndroidKeystoreResult, String> {
+    buildbridge_engine::create_android_keystore(&desktop.engine, kit_id, input).await
 }
 
 pub fn run() {
@@ -626,17 +905,18 @@ pub fn run() {
             create_machine,
             delete_machine,
             discard_machine_container,
-            get_mac_builder_status,
+            get_machine,
             open_developer_tools,
             open_machine_screen,
+            open_url,
             open_safari_web_inspector,
             list_machine_templates,
             save_machine_template,
             delete_machine_template,
             adopt_template_guest,
-            configure_mac_builder,
-            launch_mac_builder,
-            stop_mac_builder,
+            configure_machine,
+            launch_machine,
+            stop_machine,
             install_usb_release_rule,
             remove_usb_release_rule,
             migrate_machine_for_usb,
@@ -668,8 +948,8 @@ pub fn run() {
             reveal_env_secrets,
             configure_mac_guest_access,
             authorize_mac_guest_key,
-            trust_mac_builder_guest,
-            forget_mac_builder_guest_trust,
+            trust_mac_guest,
+            forget_mac_guest_trust,
             import_mac_xcode_package,
             activate_mac_xcode,
             provision_mac_signing,
@@ -681,7 +961,17 @@ pub fn run() {
             adopt_guest_podfile_lock,
             run_apple_signed_archive,
             reveal_apple_archive,
-            clear_apple_archive
+            clear_apple_archive,
+            approve_android_workspace,
+            clear_android_workspace,
+            sync_android_workspace,
+            run_android_debug_build,
+            run_android_signed_release,
+            reveal_android_release,
+            clear_android_release,
+            reveal_android_debug_apk,
+            create_android_keystore,
+            download_xcode
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -702,6 +992,7 @@ pub fn run() {
             app.manage(Desktop {
                 engine: Engine::new(deps),
             });
+            app.manage(XcodeDownloads::default());
             let _ = tray::setup(app);
             Ok(())
         })

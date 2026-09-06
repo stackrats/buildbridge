@@ -2,8 +2,9 @@
 import { Play, Square } from '@lucide/vue';
 import { computed } from 'vue';
 
+import { isAndroid } from '../../../model/providers';
 import type { JourneyStep } from '../../../model/steps';
-import { launchPhaseLabel } from '../../../model/phases';
+import { launchPhaseLabel, templateSavePhaseLabel } from '../../../model/phases';
 import { isLive } from '../../../lib/status';
 import { activityLabel, useMachinesStore, type MachineSession } from '../../../stores/machines';
 import Button from '../../ui/Button.vue';
@@ -19,15 +20,26 @@ const view = computed(() => session.view!);
 const live = computed(() => isLive(view.value.runtime.state));
 const busy = computed(() => session.operation !== null || view.value.busyOperation !== null);
 const dockur = computed(() => view.value.profile.provider === 'dockur_macos');
+const android = computed(() => isAndroid(view.value.profile.provider));
 const running = computed(() => step.status === 'running');
 const failure = computed(() =>
     session.lastFailure?.operation === 'launch' ? session.lastFailure : null,
 );
 
-// Starting is the step's own operation, with phases and a Stop. A stop, a discard or a delete
-// runs on this step too, and each says so rather than borrowing the start's strip, whose Stop
-// would cancel the stop itself.
-const strip = computed(() => {
+interface Strip {
+    label: string;
+    detail: string | null;
+    elapsed: number | null;
+    /** 0–1 when the operation says how far it is. */
+    value: number | null;
+    stoppable: boolean;
+    stopTitle?: string;
+}
+
+// Starting is the step's own operation, with phases and a Stop. A stop, a discard, a delete or
+// a template save runs on this step too, and each says so rather than borrowing the start's
+// strip, whose Stop would cancel the stop itself.
+const strip = computed<Strip>(() => {
     const operation = session.operation ?? view.value.busyOperation;
     if (operation === 'launch' || operation === 'starting') {
         const progress = session.launch;
@@ -35,21 +47,41 @@ const strip = computed(() => {
             label: progress ? launchPhaseLabel[progress.phase] : 'Starting',
             detail: progress?.detail ?? null,
             elapsed: progress?.elapsedSeconds ?? null,
+            value: null,
             stoppable: true,
         };
     }
     if (operation === 'stop' || operation === 'stopping') {
         return {
-            label: 'Stopping the machine safely',
-            detail: 'the container and its macOS disk are kept',
+            label: android.value ? 'Stopping the toolchain' : 'Stopping the machine safely',
+            detail: android.value
+                ? 'the container and its home on this host are kept'
+                : 'the container and its macOS disk are kept',
             elapsed: null,
+            value: null,
             stoppable: false,
+        };
+    }
+    if (operation === 'save-template' || operation === 'saving_template') {
+        // The save runs with the machine stopped and its dialog gone, so this strip is where
+        // it is followed. Only a save this client started can be stopped from here.
+        const progress = session.templateSave;
+        return {
+            label: progress
+                ? templateSavePhaseLabel[progress.phase]
+                : 'Saving the machine as a template',
+            detail: progress?.detail ?? null,
+            elapsed: progress?.elapsedSeconds ?? null,
+            value: progress?.percent == null ? null : progress.percent / 100,
+            stoppable: session.operation === 'save-template',
+            stopTitle: 'Stop the save. The partial template is removed; the machine stays stopped.',
         };
     }
     return {
         label: activityLabel(operation) ?? 'Working',
         detail: null,
         elapsed: null,
+        value: null,
         stoppable: false,
     };
 });
@@ -63,7 +95,9 @@ const strip = computed(() => {
                 size="sm"
                 :title="
                     view.runtime.state === 'missing'
-                        ? `The first start pulls the ${dockur ? 'dockur/macos' : 'Docker-OSX'} image`
+                        ? android
+                            ? 'The first start pulls the JDK image, a few hundred megabytes'
+                            : `The first start pulls the ${dockur ? 'dockur/macos' : 'Docker-OSX'} image`
                         : undefined
                 "
                 :disabled="busy || !view.runtime.prerequisites.ready"
@@ -80,7 +114,11 @@ const strip = computed(() => {
                 v-else
                 variant="outline"
                 size="sm"
-                title="Keeps the container and its disk"
+                :title="
+                    android
+                        ? 'Keeps the container and its home'
+                        : 'Keeps the container and its disk'
+                "
                 :disabled="busy"
                 @click="machines.stop(session.id)"
             >
@@ -96,8 +134,10 @@ const strip = computed(() => {
                 :label="strip.label"
                 :detail="strip.detail"
                 :elapsed-seconds="strip.elapsed"
+                :value="strip.value"
                 :stoppable="strip.stoppable"
                 :stopping="session.cancelling"
+                :stop-title="strip.stopTitle"
                 @stop="machines.cancelOperation(session.id)"
             />
             <FailureBlock
@@ -112,7 +152,14 @@ const strip = computed(() => {
             />
         </template>
 
-        <p v-if="dockur" class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
+        <p v-if="android" class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
+            The first start pulls the pinned JDK image and creates a container that does nothing but
+            wait, with a memory and CPU limit on its builds and its home bound from this host. No
+            virtual machine, no KVM, no ports. The Android SDK, Node and the Gradle caches are
+            downloaded into that home by the first build and survive stops; only the explicit
+            discard action in the machine menu removes them.
+        </p>
+        <p v-else-if="dockur" class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
             The first start pulls the dockur/macos image and creates the container with fixed,
             non-privileged arguments; the machine then downloads macOS from Apple into its storage
             directory on this host and generates its own identity. Its screen is a web page, opened

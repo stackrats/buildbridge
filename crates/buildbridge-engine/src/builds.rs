@@ -18,7 +18,7 @@ pub async fn import_mac_xcode_package(
         .clone();
     let access = load_mac_guest_access(&paths)?
         .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
-    let current = build_mac_builder_view(app, &paths).await?;
+    let current = build_machine_view(app, &paths).await?;
     if current.runtime.state != ContainerState::Running {
         return Err("Start the macOS machine before importing Xcode.".to_string());
     }
@@ -42,8 +42,8 @@ pub async fn import_mac_xcode_package(
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
-        buildbridge_docker_osx::import_xcode_package(
+        let _operation = buildbridge_machines::enter_operation(scope);
+        buildbridge_machines::import_xcode_package(
             &package_path,
             profile.ssh_port,
             &access.username,
@@ -64,7 +64,7 @@ pub async fn import_mac_xcode_package(
     .map_err(|error| error.to_string());
     drop(guard);
     let imported = finish_operation(&cancel_probe, joined)?;
-    let view = build_mac_builder_view(app, &paths).await?;
+    let view = build_machine_view(app, &paths).await?;
 
     Ok(ImportMacXcodeResult {
         view,
@@ -76,7 +76,7 @@ pub async fn activate_mac_xcode(
     app: &Engine,
     machine_id: String,
     input: ActivateMacXcodeInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     let profile = machines::load_registry(app)?
         .find(&machine_id)?
@@ -84,7 +84,7 @@ pub async fn activate_mac_xcode(
         .clone();
     let access = load_mac_guest_access(&paths)?
         .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
-    let current = build_mac_builder_view(app, &paths).await?;
+    let current = build_machine_view(app, &paths).await?;
     if current.runtime.state != ContainerState::Running {
         return Err("Start the macOS machine before activating Xcode.".to_string());
     }
@@ -112,7 +112,7 @@ pub async fn activate_mac_xcode(
     let cancel_probe = Arc::clone(&scope);
     let password = input.password.filter(|value| !value.is_empty());
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        let _operation = buildbridge_machines::enter_operation(scope);
         let mut report = |progress: XcodeImportProgress| {
             emit_machine_progress(
                 &event_app,
@@ -122,7 +122,7 @@ pub async fn activate_mac_xcode(
             );
         };
         match password {
-            Some(password) => buildbridge_docker_osx::activate_xcode_with_password(
+            Some(password) => buildbridge_machines::activate_xcode_with_password(
                 profile.ssh_port,
                 &access.username,
                 &identity_path,
@@ -130,7 +130,7 @@ pub async fn activate_mac_xcode(
                 &password,
                 &mut report,
             ),
-            None => buildbridge_docker_osx::activate_xcode(
+            None => buildbridge_machines::activate_xcode(
                 profile.ssh_port,
                 &access.username,
                 &identity_path,
@@ -145,12 +145,12 @@ pub async fn activate_mac_xcode(
     drop(guard);
     finish_operation(&cancel_probe, joined)?;
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 pub async fn provision_mac_signing(
     app: &Engine,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     let secrets = resolve_signing_kit_for(app, &machine_id).await?;
     provision_with_kit(app, &machine_id, secrets).await
 }
@@ -163,7 +163,7 @@ pub(crate) async fn provision_with_kit(
     app: &Engine,
     machine_id: &str,
     mut secrets: StoredSigningKit,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, machine_id)?;
     let profile = machines::load_registry(app)?
         .find(machine_id)?
@@ -186,7 +186,7 @@ pub(crate) async fn provision_with_kit(
         "BuildBridge could not detect one release bundle identifier. Re-approve the project after setting PRODUCT_BUNDLE_IDENTIFIER in Xcode."
             .to_string()
     })?;
-    let current = build_mac_builder_view(app, &paths).await?;
+    let current = build_machine_view(app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let container_id = current
         .runtime
@@ -208,7 +208,7 @@ pub(crate) async fn provision_with_kit(
     let guard = begin_machine_operation(app, machine_id, "provisioning_signing")?;
     if !kit_has_distribution_set(&secrets) && kit_has_team_key(&secrets) {
         let started = std::time::Instant::now();
-        let report = |phase: buildbridge_docker_osx::SigningProvisioningPhase, detail: &str| {
+        let report = |phase: buildbridge_machines::SigningProvisioningPhase, detail: &str| {
             emit_machine_progress(
                 app,
                 SIGNING_PROGRESS_EVENT,
@@ -265,7 +265,7 @@ pub(crate) async fn provision_with_kit(
     };
     if distribution_certificate.is_none() && development_certificate.is_none() {
         return Err(
-            "This kit holds no signing identity. Store a distribution identity with its App Store profile, or a development identity for phone builds, first."
+            "These credentials hold no signing identity. Store a distribution identity with its App Store profile, or a development identity for phone builds, first."
                 .to_string(),
         );
     }
@@ -301,9 +301,9 @@ pub(crate) async fn provision_with_kit(
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        let _operation = buildbridge_machines::enter_operation(scope);
         if !previous_profile_uuids.is_empty() {
-            buildbridge_docker_osx::clear_signing(
+            buildbridge_machines::clear_signing(
                 &previous_profile_uuids,
                 profile.ssh_port,
                 &access.username,
@@ -312,7 +312,7 @@ pub(crate) async fn provision_with_kit(
             )
             .map_err(|error| error.to_string())?;
         }
-        let material = buildbridge_docker_osx::SigningMaterial {
+        let material = buildbridge_machines::SigningMaterial {
             distribution_certificate: distribution_certificate
                 .as_ref()
                 .map(|(path, password)| (path.as_path(), password.as_str())),
@@ -323,7 +323,7 @@ pub(crate) async fn provision_with_kit(
             keychain_password: &keychain_password,
             extra_bundle_identifiers: &extra_bundle_identifiers,
         };
-        buildbridge_docker_osx::provision_signing(
+        buildbridge_machines::provision_signing(
             &material,
             &development_team,
             &bundle_identifier,
@@ -354,12 +354,12 @@ pub(crate) async fn provision_with_kit(
         },
     )?;
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 pub async fn clear_mac_guest_signing(
     app: &Engine,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     let guest = guest_context(app, &machine_id).await?;
     let paths = guest.paths.clone();
     let profile_uuids = guest
@@ -372,7 +372,7 @@ pub async fn clear_mac_guest_signing(
         .map(|profile| profile.uuid.clone())
         .collect::<Vec<_>>();
     run_machine_operation(app, &machine_id, "clearing_signing", move || {
-        buildbridge_docker_osx::clear_signing(
+        buildbridge_machines::clear_signing(
             &profile_uuids,
             guest.ssh_port(),
             &guest.username,
@@ -384,15 +384,24 @@ pub async fn clear_mac_guest_signing(
     .await?;
     remove_signing_provisioning_record(&paths)?;
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 pub async fn approve_apple_workspace(
     app: &Engine,
     machine_id: String,
     input: ApproveAppleWorkspaceInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
-    machines::load_registry(app)?.find(&machine_id)?;
+    if !machines::load_registry(app)?
+        .find(&machine_id)?
+        .config
+        .provider
+        .is_macos()
+    {
+        return Err(
+            "This is an Android machine; approve the project as an Android project.".to_string(),
+        );
+    }
     let approved = inspect_apple_workspace(input.path.trim())?;
     let workspace = match load_apple_workspace(&paths)? {
         Some(existing) if existing.local_path == approved.local_path => StoredAppleWorkspace {
@@ -407,16 +416,16 @@ pub async fn approve_apple_workspace(
     };
     save_apple_workspace(&paths, &workspace)?;
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 pub async fn clear_apple_workspace(
     app: &Engine,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     remove_file_if_present(&paths.apple_workspace())?;
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 pub async fn sync_apple_workspace(
     app: &Engine,
@@ -441,7 +450,7 @@ pub(crate) async fn sync_apple_workspace_from(
         .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
     let mut workspace = load_apple_workspace(&paths)?
         .ok_or_else(|| "Approve a local Apple project first.".to_string())?;
-    let current = build_mac_builder_view(app, &paths).await?;
+    let current = build_machine_view(app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let identity_path = paths.guest_identity();
     let known_hosts_path = paths.known_hosts();
@@ -459,8 +468,8 @@ pub(crate) async fn sync_apple_workspace_from(
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
-        buildbridge_docker_osx::sync_apple_workspace(
+        let _operation = buildbridge_machines::enter_operation(scope);
+        buildbridge_machines::sync_apple_workspace(
             &workspace_path,
             env_files.as_ref(),
             profile.ssh_port,
@@ -492,7 +501,7 @@ pub(crate) async fn sync_apple_workspace_from(
     workspace.last_build_target = None;
     workspace.last_source = Some(source);
     save_apple_workspace(&paths, &workspace)?;
-    let view = build_mac_builder_view(app, &paths).await?;
+    let view = build_machine_view(app, &paths).await?;
 
     Ok(SyncAppleWorkspaceResult { view, sync })
 }
@@ -514,7 +523,7 @@ pub async fn run_apple_smoke_build(
     if workspace.last_snapshot_sha256.is_none() {
         return Err("Synchronize the approved project before running a test build.".to_string());
     }
-    let current = build_mac_builder_view(app, &paths).await?;
+    let current = build_machine_view(app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let identity_path = paths.guest_identity();
     let known_hosts_path = paths.known_hosts();
@@ -533,8 +542,8 @@ pub async fn run_apple_smoke_build(
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
-        buildbridge_docker_osx::run_apple_smoke_build(
+        let _operation = buildbridge_machines::enter_operation(scope);
+        buildbridge_machines::run_apple_smoke_build(
             profile.ssh_port,
             &access.username,
             &identity_path,
@@ -561,7 +570,7 @@ pub async fn run_apple_smoke_build(
     workspace.last_native_lock_updated = build.native_lockfile_updated;
     workspace.last_build_target = Some(build.target);
     save_apple_workspace(&paths, &workspace)?;
-    let view = build_mac_builder_view(app, &paths).await?;
+    let view = build_machine_view(app, &paths).await?;
 
     Ok(RunAppleSmokeBuildResult { view, build })
 }
@@ -592,14 +601,14 @@ pub async fn run_apple_signed_archive(
                 .to_string(),
         );
     }
-    let current = build_mac_builder_view(app, &paths).await?;
+    let current = build_machine_view(app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let signing = current
         .signing
         .clone()
         .ok_or_else(|| "Provision and verify signing in macOS first.".to_string())?;
     let distribution = signing.distribution_identity.clone().ok_or_else(|| {
-        "The provisioned kit holds only a development identity. A signed archive needs a distribution identity and an App Store profile; add them to the kit and provision again."
+        "The provisioned credentials hold only a development identity. A signed archive needs a distribution identity and an App Store profile; add them to the credentials and provision again."
             .to_string()
     })?;
     if workspace.development_team.as_deref() != Some(&signing.development_team)
@@ -642,8 +651,8 @@ pub async fn run_apple_signed_archive(
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
-        buildbridge_docker_osx::run_signed_apple_archive(
+        let _operation = buildbridge_machines::enter_operation(scope);
+        buildbridge_machines::run_signed_apple_archive(
             profile.ssh_port,
             &access.username,
             &identity_path,
@@ -692,7 +701,7 @@ pub async fn run_apple_signed_archive(
         return Err(error);
     }
     remove_apple_archive_error(&paths)?;
-    let view = build_mac_builder_view(app, &paths).await?;
+    let view = build_machine_view(app, &paths).await?;
 
     Ok(RunAppleArchiveResult { view, archive })
 }
@@ -715,10 +724,7 @@ pub async fn reveal_apple_archive(app: &Engine, machine_id: String) -> Result<()
 
     Ok(())
 }
-pub async fn clear_apple_archive(
-    app: &Engine,
-    machine_id: String,
-) -> Result<MacBuilderView, String> {
+pub async fn clear_apple_archive(app: &Engine, machine_id: String) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     if let Some(stored) = load_apple_archive(&paths)? {
         let directory = validated_apple_archive_directory(&paths, &stored.result)?;
@@ -728,5 +734,5 @@ pub async fn clear_apple_archive(
     remove_apple_archive_record(&paths)?;
     remove_apple_archive_error(&paths)?;
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }

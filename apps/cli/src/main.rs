@@ -19,7 +19,7 @@ const APP_IDENTIFIER: &str = "dev.buildbridge.desktop";
 #[command(
     name = "buildbridge",
     version,
-    about = "Build, sign and run iOS apps on a managed macOS machine, from the terminal"
+    about = "Build and sign iOS and Android apps on managed machines, from the terminal"
 )]
 struct Cli {
     /// Print results and progress as JSON.
@@ -51,13 +51,13 @@ enum Command {
     /// Builds: the unsigned test build and the signed archive.
     #[command(subcommand)]
     Build(BuildCommand),
-    /// Signing kits and provisioning.
+    /// Signing credentials and provisioning.
     #[command(subcommand)]
     Signing(SigningCommand),
     /// A phone plugged into this host: attach, pair, prepare, run.
     #[command(subcommand)]
     Device(DeviceCommand),
-    /// Env sets stored on this host.
+    /// Environments stored on this host.
     #[command(subcommand)]
     Env(EnvCommand),
     /// The control plane this host is paired with.
@@ -81,11 +81,18 @@ enum MachineCommand {
         /// Clone a saved template instead of installing macOS.
         #[arg(long)]
         from_template: Option<String>,
-        /// Which image runs macOS. docker-osx shows the screen in a window on this host's
-        /// display; dockur-macos serves it as a web page on the port after the SSH port and
-        /// needs /dev/net/tun and the machine's memory free. Either builds and clones the same.
-        #[arg(long, value_enum, default_value_t = ProviderArg::DockerOsx)]
-        provider: ProviderArg,
+        /// What the machine builds for: ios (a macOS machine) or android (a toolchain
+        /// container). Picks that platform's recommended provider unless --provider names one.
+        #[arg(long, value_enum)]
+        platform: Option<PlatformArg>,
+        /// Which provider, within the platform. docker-osx runs macOS and shows its screen in a
+        /// window on this host's display; dockur-macos runs macOS and serves the screen as a web
+        /// page on the port after the SSH port, needing /dev/net/tun and the machine's memory
+        /// free; the two build and clone the same. android-toolchain is a JDK container with the
+        /// Android SDK, Gradle and Node prepared inside it: no macOS, no KVM, no ports, and
+        /// memory and cores are limits on its builds.
+        #[arg(long, value_enum)]
+        provider: Option<ProviderArg>,
     },
     Start {
         machine: String,
@@ -169,6 +176,8 @@ enum XcodeCommand {
 
 #[derive(Subcommand)]
 enum ProjectCommand {
+    /// Approve a Capacitor project folder: its iOS platform for a macOS machine, its Android
+    /// platform for an Android one.
     Approve {
         machine: String,
         path: String,
@@ -184,14 +193,21 @@ enum ProjectCommand {
 
 #[derive(Subcommand)]
 enum BuildCommand {
-    /// The unsigned test build.
+    /// The unsigned test build on a macOS machine, or the debug build on an Android one.
     Test {
         machine: String,
+        /// macOS machines only: device_sdk or simulator.
         #[arg(long, default_value = "device_sdk")]
         target: String,
     },
-    /// The signed archive and IPA.
+    /// The signed archive and IPA, on a macOS machine.
     Archive {
+        machine: String,
+        #[arg(long)]
+        env: Option<String>,
+    },
+    /// The signed app bundle and APK, on an Android machine.
+    Release {
         machine: String,
         #[arg(long)]
         env: Option<String>,
@@ -201,8 +217,26 @@ enum BuildCommand {
 #[derive(Subcommand)]
 enum SigningCommand {
     Kits,
-    Attach { machine: String, kit: String },
-    Provision { machine: String },
+    Attach {
+        machine: String,
+        kit: String,
+    },
+    Provision {
+        machine: String,
+    },
+    /// Create an Android upload key for stored signing credentials; the keystore password is read from stdin and is
+    /// yours to keep, because neither Google Play nor BuildBridge can recover it.
+    Keystore {
+        kit: String,
+        /// The alias of the key inside the keystore.
+        #[arg(long, default_value = "upload")]
+        alias: String,
+        /// The name in the certificate; the credentials' name when omitted.
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        password_stdin: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -245,7 +279,7 @@ enum DeviceCommand {
 #[derive(Subcommand)]
 enum EnvCommand {
     List,
-    /// Change values in a stored set: KEY=VALUE pairs; every other variable keeps its value.
+    /// Change values in a stored environment: KEY=VALUE pairs; every other variable keeps its value.
     Set {
         set: String,
         #[arg(required = true, value_name = "KEY=VALUE")]
@@ -327,8 +361,8 @@ impl EventSink for Printer {
                 .unwrap_or_default();
             self.line(format!("{}{percent}{detail}", phase.replace('_', " ")));
         }
-        if let Some(last) = payload.get("lastLine").and_then(Value::as_str) {
-            self.line(format!("  {last}"));
+        if let Some(line) = payload.get("logLine").and_then(Value::as_str) {
+            self.line(format!("  {line}"));
         }
     }
 }
@@ -376,7 +410,7 @@ where
     }
 }
 
-/// The complete save payload for one stored set with some values changed: the engine removes
+/// The complete save payload for one stored environment with some values changed: the engine removes
 /// any key it is not handed, so every stored variable is listed, a missing value keeping the one
 /// in the vault and secrets staying secret.
 async fn env_set_update(
@@ -391,7 +425,7 @@ async fn env_set_update(
         .into_iter()
         .flatten()
         .find(|set| set["id"] == set_id)
-        .ok_or_else(|| format!("No env set is stored as {set_id}; `env list` names them."))?;
+        .ok_or_else(|| format!("No environment is stored as {set_id}; `env list` names them."))?;
     let changed = |key: &str| {
         changes
             .iter()
@@ -528,9 +562,16 @@ fn machine_rows(list: &Value) -> Vec<Vec<String>> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum PlatformArg {
+    Ios,
+    Android,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ProviderArg {
     DockerOsx,
     DockurMacos,
+    AndroidToolchain,
 }
 
 impl ProviderArg {
@@ -538,8 +579,49 @@ impl ProviderArg {
         match self {
             Self::DockerOsx => "docker_osx",
             Self::DockurMacos => "dockur_macos",
+            Self::AndroidToolchain => "android_toolchain",
         }
     }
+
+    fn platform(self) -> PlatformArg {
+        match self {
+            Self::DockerOsx | Self::DockurMacos => PlatformArg::Ios,
+            Self::AndroidToolchain => PlatformArg::Android,
+        }
+    }
+
+    /// The provider a machine gets from the two flags: the named one, else the platform's
+    /// recommended one, else the original. The two must agree when both are given.
+    fn resolve(
+        platform: Option<PlatformArg>,
+        provider: Option<ProviderArg>,
+    ) -> Result<Self, String> {
+        match (platform, provider) {
+            (Some(platform), Some(provider)) if provider.platform() != platform => Err(format!(
+                "--provider {} builds {:?}, not {:?}; drop one of the two flags",
+                provider.value(),
+                provider.platform(),
+                platform
+            )),
+            (_, Some(provider)) => Ok(provider),
+            (Some(PlatformArg::Android), None) => Ok(Self::AndroidToolchain),
+            (Some(PlatformArg::Ios), None) | (None, None) => Ok(Self::DockerOsx),
+        }
+    }
+}
+
+/// Whether a registered machine is an Android toolchain, from the machine list rather than a
+/// full probe of the machine.
+async fn machine_is_android(engine: &Engine, machine: &str) -> Result<bool, String> {
+    let list = serde_json::to_value(buildbridge_engine::list_machines(engine).await?)
+        .map_err(|error| error.to_string())?;
+    let found = list["machines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| entry["id"].as_str() == Some(machine))
+        .ok_or_else(|| "This machine is no longer registered.".to_string())?;
+    Ok(found["platform"].as_str() == Some("android"))
 }
 
 fn print_machine_list(list: &Value) {
@@ -557,13 +639,42 @@ fn print_machine_list(list: &Value) {
         println!("No machines yet. `buildbridge machine create <name>` makes one.");
     } else {
         table(
-            &["id", "name", "state", "busy", "project", "kit", "template"],
+            &["id", "name", "state", "busy", "project", "credentials", "template"],
             rows,
         );
     }
 }
 
 fn print_machine(view: &Value) {
+    if view["profile"]["provider"].as_str() == Some("android_toolchain") {
+        let android = &view["android"];
+        let last_build = &android["workspace"]["lastBuild"];
+        let rows = vec![
+            ("machine", text(&view["machineId"])),
+            ("name", text(&view["profile"]["name"])),
+            ("state", text(&view["runtime"]["state"])),
+            ("busy", text(&view["busyOperation"]).replace('_', " ")),
+            ("provider", "android toolchain".to_string()),
+            ("project", text(&android["workspace"]["name"])),
+            ("app id", text(&android["workspace"]["applicationId"])),
+            (
+                "last build",
+                match last_build["versionName"].as_str() {
+                    Some(version) => format!("{version} ({})", text(&last_build["versionCode"])),
+                    None => String::new(),
+                },
+            ),
+            ("jdk", text(&last_build["toolchain"]["jdkVersion"])),
+            ("credentials", text(&view["signingKit"]["name"])),
+            ("signing", text(&view["signingHealth"])),
+            ("bundle", text(&android["release"]["aab"]["path"])),
+            ("apk", text(&android["release"]["apk"]["path"])),
+        ];
+        for (label, value) in rows {
+            println!("{label:<12} {value}");
+        }
+        return;
+    }
     let diagnostics = &view["guest"]["diagnostics"];
     let rows = vec![
         ("machine", text(&view["machineId"])),
@@ -587,7 +698,7 @@ fn print_machine(view: &Value) {
         ("Xcode", text(&diagnostics["xcodeVersion"])),
         ("project", text(&view["appleWorkspace"]["name"])),
         ("bundle", text(&view["appleWorkspace"]["bundleIdentifier"])),
-        ("kit", text(&view["signingKit"]["name"])),
+        ("credentials", text(&view["signingKit"]["name"])),
         ("signing", text(&view["signingHealth"])),
         ("archive", text(&view["archive"]["ipa"]["path"])),
     ];
@@ -620,8 +731,10 @@ async fn run(cli: Cli) -> Result<(), String> {
             cores,
             port,
             from_template,
+            platform,
             provider,
         }) => {
+            let provider = ProviderArg::resolve(platform, provider)?;
             let used = serde_json::to_value(e::list_machines(engine).await?)
                 .map_err(|error| error.to_string())?;
             let port = port.unwrap_or_else(|| {
@@ -656,31 +769,19 @@ async fn run(cli: Cli) -> Result<(), String> {
         }
         Command::Machine(MachineCommand::Start { machine }) => report(
             json,
-            &on_machine(
-                engine,
-                &machine,
-                e::launch_mac_builder(engine, machine.clone()),
-            )
-            .await?,
+            &on_machine(engine, &machine, e::launch_machine(engine, machine.clone())).await?,
             print_done,
         ),
         Command::Machine(MachineCommand::Stop { machine }) => report(
             json,
-            &on_machine(
-                engine,
-                &machine,
-                e::stop_mac_builder(engine, machine.clone()),
-            )
-            .await?,
+            &on_machine(engine, &machine, e::stop_machine(engine, machine.clone())).await?,
             print_done,
         ),
-        Command::Machine(MachineCommand::Show { machine }) => report(
-            json,
-            &e::get_mac_builder_status(engine, machine).await?,
-            print_machine,
-        ),
+        Command::Machine(MachineCommand::Show { machine }) => {
+            report(json, &e::get_machine(engine, machine).await?, print_machine)
+        }
         Command::Machine(MachineCommand::Screen { machine, open }) => {
-            let view = serde_json::to_value(e::get_mac_builder_status(engine, machine).await?)
+            let view = serde_json::to_value(e::get_machine(engine, machine).await?)
                 .map_err(|error| error.to_string())?;
             let Some(url) = view["displayUrl"].as_str().map(str::to_string) else {
                 return Err(
@@ -806,7 +907,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             fingerprint,
         }) => report(
             json,
-            &e::trust_mac_builder_guest(
+            &e::trust_mac_guest(
                 engine,
                 machine,
                 input(json!({ "fingerprint": fingerprint }))?,
@@ -892,32 +993,70 @@ async fn run(cli: Cli) -> Result<(), String> {
                 },
             )
         }
-        Command::Project(ProjectCommand::Approve { machine, path }) => report(
-            json,
-            &e::approve_apple_workspace(engine, machine, input(json!({ "path": path }))?).await?,
-            |view| {
-                println!(
-                    "Approved {} ({})",
-                    text(&view["appleWorkspace"]["name"]),
-                    text(&view["appleWorkspace"]["bundleIdentifier"])
+        Command::Project(ProjectCommand::Approve { machine, path }) => {
+            if machine_is_android(engine, &machine).await? {
+                report(
+                    json,
+                    &e::approve_android_workspace(engine, machine, input(json!({ "path": path }))?)
+                        .await?,
+                    |view| {
+                        println!(
+                            "Approved {} ({})",
+                            text(&view["android"]["workspace"]["name"]),
+                            text(&view["android"]["workspace"]["applicationId"])
+                        )
+                    },
                 )
-            },
-        ),
-        Command::Project(ProjectCommand::Sync { machine }) => report(
-            json,
-            &on_machine(
-                engine,
-                &machine,
-                e::sync_apple_workspace(engine, machine.clone()),
-            )
-            .await?,
-            |view| {
-                println!(
-                    "Synchronized snapshot {}",
-                    text(&view["appleWorkspace"]["lastSnapshotSha256"])
+            } else {
+                report(
+                    json,
+                    &e::approve_apple_workspace(engine, machine, input(json!({ "path": path }))?)
+                        .await?,
+                    |view| {
+                        println!(
+                            "Approved {} ({})",
+                            text(&view["appleWorkspace"]["name"]),
+                            text(&view["appleWorkspace"]["bundleIdentifier"])
+                        )
+                    },
                 )
-            },
-        ),
+            }
+        }
+        Command::Project(ProjectCommand::Sync { machine }) => {
+            if machine_is_android(engine, &machine).await? {
+                report(
+                    json,
+                    &on_machine(
+                        engine,
+                        &machine,
+                        e::sync_android_workspace(engine, machine.clone()),
+                    )
+                    .await?,
+                    |result| {
+                        println!(
+                            "Synchronized snapshot {}",
+                            text(&result["sync"]["snapshotSha256"])
+                        )
+                    },
+                )
+            } else {
+                report(
+                    json,
+                    &on_machine(
+                        engine,
+                        &machine,
+                        e::sync_apple_workspace(engine, machine.clone()),
+                    )
+                    .await?,
+                    |result| {
+                        println!(
+                            "Synchronized snapshot {}",
+                            text(&result["sync"]["snapshotSha256"])
+                        )
+                    },
+                )
+            }
+        }
         Command::Project(ProjectCommand::AdoptLock { machine }) => report(
             json,
             &on_machine(
@@ -948,23 +1087,71 @@ async fn run(cli: Cli) -> Result<(), String> {
                 }
             },
         ),
-        Command::Build(BuildCommand::Test { machine, target }) => report(
+        Command::Build(BuildCommand::Test { machine, target }) => {
+            if machine_is_android(engine, &machine).await? {
+                report(
+                    json,
+                    &on_machine(
+                        engine,
+                        &machine,
+                        e::run_android_debug_build(engine, machine.clone()),
+                    )
+                    .await?,
+                    |result| {
+                        let build = &result["build"];
+                        println!(
+                            "Debug build passed: {} {} ({}) with {}",
+                            text(&build["applicationId"]),
+                            text(&build["versionName"]),
+                            text(&build["versionCode"]),
+                            text(&build["toolchain"]["jdkVersion"])
+                        )
+                    },
+                )
+            } else {
+                report(
+                    json,
+                    &on_machine(
+                        engine,
+                        &machine,
+                        e::run_apple_smoke_build(
+                            engine,
+                            machine.clone(),
+                            input(json!({ "target": target }))?,
+                        ),
+                    )
+                    .await?,
+                    |result| {
+                        println!(
+                            "Test build passed with Xcode {}",
+                            text(&result["view"]["guest"]["diagnostics"]["xcodeVersion"])
+                        )
+                    },
+                )
+            }
+        }
+        Command::Build(BuildCommand::Release { machine, env }) => report(
             json,
             &on_machine(
                 engine,
                 &machine,
-                e::run_apple_smoke_build(
-                    engine,
-                    machine.clone(),
-                    input(json!({ "target": target }))?,
-                ),
+                e::run_android_signed_release(engine, machine.clone(), env),
             )
             .await?,
             |result| {
+                let release = &result["release"];
                 println!(
-                    "Test build passed with Xcode {}",
-                    text(&result["view"]["guest"]["diagnostics"]["xcodeVersion"])
-                )
+                    "{} {} ({}) · bundle {:.2} MB · APK {:.2} MB · key {} · certificate {}",
+                    text(&release["applicationId"]),
+                    text(&release["versionName"]),
+                    text(&release["versionCode"]),
+                    release["aab"]["bytes"].as_f64().unwrap_or(0.0) / 1_000_000.0,
+                    release["apk"]["bytes"].as_f64().unwrap_or(0.0) / 1_000_000.0,
+                    text(&release["keyAlias"]),
+                    text(&release["certificateSha256"])
+                );
+                println!("Bundle: {}", text(&release["aab"]["path"]));
+                println!("APK: {}", text(&release["apk"]["path"]));
             },
         ),
         Command::Build(BuildCommand::Archive { machine, env }) => report(
@@ -1000,6 +1187,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                             text(&kit["name"]),
                             text(&kit["appStoreConnectKeyId"]),
                             text(&kit["signingCertificateName"]),
+                            text(&kit["androidKeystoreName"]),
                             kit["attachedMachines"]
                                 .as_array()
                                 .map(|names| names.iter().map(text).collect::<Vec<_>>().join(", "))
@@ -1008,9 +1196,12 @@ async fn run(cli: Cli) -> Result<(), String> {
                     })
                     .collect::<Vec<_>>();
                 if rows.is_empty() {
-                    println!("No signing kits. Store one in the desktop's Signing kits page.");
+                    println!("No signing credentials. Store some on the desktop's Signing page.");
                 } else {
-                    table(&["id", "name", "team key", "identity", "machines"], rows);
+                    table(
+                        &["id", "name", "team key", "identity", "keystore", "machines"],
+                        rows,
+                    );
                 }
             })
         }
@@ -1019,6 +1210,39 @@ async fn run(cli: Cli) -> Result<(), String> {
             &e::attach_signing_kit(engine, machine, input(json!({ "kitId": kit }))?).await?,
             |view| println!("Attached {}", text(&view["signingKit"]["name"])),
         ),
+        Command::Signing(SigningCommand::Keystore {
+            kit,
+            alias,
+            name,
+            password_stdin,
+        }) => {
+            let password = password_from_stdin(password_stdin)?.ok_or_else(|| {
+                "Pass --password-stdin and the keystore password on stdin.".to_string()
+            })?;
+            report(
+                json,
+                &e::create_android_keystore(
+                    engine,
+                    kit,
+                    input(json!({
+                        "password": password,
+                        "keyAlias": alias,
+                        "certificateName": name.unwrap_or_default(),
+                        "confirmed": true,
+                    }))?,
+                )
+                .await?,
+                |result| {
+                    println!(
+                        "Created {} (alias {}, certificate {})",
+                        text(&result["keystore"]["path"]),
+                        text(&result["keystore"]["keyAlias"]),
+                        text(&result["keystore"]["certificateSha256"])
+                    );
+                    println!("Keep the password: nothing can recover an upload key without it.");
+                },
+            )
+        }
         Command::Signing(SigningCommand::Provision { machine }) => report(
             json,
             &on_machine(
@@ -1176,7 +1400,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 })
                 .collect::<Vec<_>>();
             if rows.is_empty() {
-                println!("No env sets.");
+                println!("No environments.");
             } else {
                 table(&["id", "name", "variables", "secrets"], rows);
             }

@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "crates/buildbridge-docker-osx",
+    "crates/buildbridge-machines",
     "crates/buildbridge-engine",
     "apps/desktop/src-tauri",
     "apps/cli",
@@ -16,7 +16,7 @@ license = "MIT"
 
 [workspace.dependencies]
 buildbridge-contract = { path = "crates/buildbridge-contract" }
-buildbridge-docker-osx = { path = "crates/buildbridge-docker-osx" }
+buildbridge-machines = { path = "crates/buildbridge-machines" }
 buildbridge-engine = { path = "crates/buildbridge-engine" }
 buildbridge-runner = { path = "crates/buildbridge-runner" }
 jsonwebtoken = { version = "11", default-features = false, features = [

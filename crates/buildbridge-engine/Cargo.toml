@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 base64 = "0.22"
 buildbridge-contract.workspace = true
-buildbridge-docker-osx.workspace = true
+buildbridge-machines.workspace = true
 buildbridge-runner.workspace = true
 jsonwebtoken.workspace = true
 keyring = "4.2"

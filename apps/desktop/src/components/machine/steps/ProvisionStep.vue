@@ -45,7 +45,7 @@ const strip = computed(() => {
         label: activityLabel(operation) ?? 'Working',
         detail:
             operation === 'clear-signing' || operation === 'clearing_signing'
-                ? 'the guest keychain and its profiles; the host kit is kept'
+                ? 'the guest keychain and its profiles; the credentials on the host are kept'
                 : null,
         elapsed: null,
         value: null,
@@ -85,7 +85,7 @@ async function remove(): Promise<void> {
                 v-if="signing"
                 variant="ghost"
                 size="sm"
-                title="The host kit is kept"
+                title="The credentials on the host are kept"
                 :disabled="busy"
                 @click="removeOpen = true"
             >
@@ -110,36 +110,36 @@ async function remove(): Promise<void> {
                 title="Provisioning failed"
                 :cause="
                     expiredCertificate
-                        ? 'The exported identity has expired. On the Mac that owns the private key, open Keychain Access → login → My Certificates, select the unexpired Distribution identity, confirm it has a private key, and export only that item as a new .p12. Store the new path and password in the signing kit; profiles and API credentials are kept.'
+                        ? 'The exported identity has expired. On the Mac that owns the private key, open Keychain Access → login → My Certificates, select the unexpired Distribution identity, confirm it has a private key, and export only that item as a new .p12. Store the new path and password in the signing credentials; profiles and the Team key are kept.'
                         : null
                 "
                 :diagnostic="failure.message"
             >
                 <template v-if="expiredCertificate" #actions>
                     <Button variant="outline" size="sm" @click="ui.navigate({ kind: 'signing' })">
-                        Open the signing kit
+                        Open the signing credentials
                     </Button>
                 </template>
             </FailureBlock>
             <Callout
                 v-if="orphaned"
                 tone="warn"
-                title="The kit this machine was provisioned from is no longer stored"
+                title="The credentials this machine was provisioned from are no longer stored"
             >
                 The guest keychain from the earlier provisioning still exists, and this record still
                 describes it. Its password lived only in the host vault, so a signed build cannot
-                unlock it. Store the kit again and provision once more; that recreates the keychain
-                with the password you enter now.
+                unlock it. Store the credentials again and provision once more; that recreates the
+                keychain with the password you enter now.
             </Callout>
         </template>
 
         <div class="space-y-3">
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                BuildBridge creates a dedicated keychain in the guest, imports the kit's identities
-                as non-extractable, installs the matching profiles, and proves each private key
-                works by signing and strictly verifying a disposable binary. Passwords travel from
-                the vault to a fixed native helper over protected SSH input and never appear in
-                arguments or logs.
+                BuildBridge creates a dedicated keychain in the guest, imports the attached
+                identities as non-extractable, installs the matching profiles, and proves each
+                private key works by signing and strictly verifying a disposable binary. Passwords
+                travel from the vault to a fixed native helper over protected SSH input and never
+                appear in arguments or logs.
             </p>
 
             <Callout
@@ -148,7 +148,7 @@ async function remove(): Promise<void> {
                 title="Development identity only"
             >
                 The guest keychain holds a development identity and no distribution identity, so the
-                signed archive step stays locked; the signing kit step says what the kit needs.
+                signed archive step stays locked; the signing credentials step says what they need.
             </Callout>
 
             <KeyValue
@@ -203,7 +203,8 @@ async function remove(): Promise<void> {
         >
             <p>
                 The BuildBridge keychain and the installed profiles are deleted inside this machine.
-                The signing kit in the host vault is kept, so you can provision again at any time.
+                The signing credentials in the host vault are kept, so you can provision again at
+                any time.
             </p>
         </ConfirmDialog>
     </StepPanel>

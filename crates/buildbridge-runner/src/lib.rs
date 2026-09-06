@@ -193,11 +193,12 @@ pub struct ExecutionResult {
 }
 
 /// Runs a build this crate can run by itself. Kinds that need a managed machine — an Apple
-/// archive — return `None`, and the client that owns the machines executes them.
+/// archive, an Android release — return `None`, and the client that owns the machines
+/// executes them.
 pub fn execute(build: &ClaimedBuild) -> Option<ExecutionResult> {
     match build.kind {
         BuildKind::Diagnostics => Some(execute_diagnostics(build.next_log_sequence)),
-        BuildKind::AppleArchive => None,
+        BuildKind::AppleArchive | BuildKind::AndroidRelease => None,
     }
 }
 

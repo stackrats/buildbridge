@@ -15,6 +15,7 @@ const {
     acknowledgement = null,
     busy = false,
     destructive = true,
+    confirmDisabled = false,
 } = defineProps<{
     title: string;
     confirmLabel?: string;
@@ -22,6 +23,8 @@ const {
     acknowledgement?: string | null;
     busy?: boolean;
     destructive?: boolean;
+    /** The dialog's own inputs are not valid yet, so confirming would be refused. */
+    confirmDisabled?: boolean;
 }>();
 
 const emit = defineEmits<{ confirm: [] }>();
@@ -60,7 +63,9 @@ watch(open, (value) => {
                 <Button
                     :variant="destructive ? 'danger' : 'default'"
                     size="sm"
-                    :disabled="busy || (acknowledgement !== null && !acknowledged)"
+                    :disabled="
+                        busy || confirmDisabled || (acknowledgement !== null && !acknowledged)
+                    "
                     @click="emit('confirm')"
                 >
                     <Spinner v-if="busy" tone="text-white dark:text-zinc-950" />

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vite-plus/test';
 import type {
     GuestDevice,
     HostUsbDevice,
-    MacBuilderView,
+    MachineView,
     MachineUsbStatus,
     SigningProvisioningResult,
 } from '../types/backend';
@@ -82,10 +82,7 @@ function signing(devices: string[] = [UDID]): SigningProvisioningResult {
 }
 
 /** Only the facts the ladder reads; the rest of the view is not consulted. */
-function usbView(
-    usb: Partial<MachineUsbStatus>,
-    extra: Partial<MacBuilderView> = {},
-): MacBuilderView {
+function usbView(usb: Partial<MachineUsbStatus>, extra: Partial<MachineView> = {}): MachineView {
     return {
         runtime: { state: 'running' },
         guest: { devices: [] },
@@ -109,7 +106,7 @@ function usbView(
             ...usb,
         },
         ...extra,
-    } as unknown as MacBuilderView;
+    } as unknown as MachineView;
 }
 
 describe('deviceReadiness', () => {
@@ -131,24 +128,24 @@ describe('deviceReadiness', () => {
         expect(deviceReadiness(usbView(withHost)).substate).toBe('trust');
         const unpaired = usbView(withHost, {
             guest: { devices: [guestDevice({ pairingState: 'unpaired' })] },
-        } as Partial<MacBuilderView>);
+        } as Partial<MachineView>);
         expect(deviceReadiness(unpaired).substate).toBe('trust');
 
         const paired = usbView(withHost, {
             guest: { devices: [guestDevice({ developerMode: 'disabled' })] },
-        } as Partial<MacBuilderView>);
+        } as Partial<MachineView>);
         expect(deviceReadiness(paired).substate).toBe('signing');
 
         const signed = usbView(withHost, {
             guest: { devices: [guestDevice({ developerMode: 'disabled' })] },
             signing: signing(),
-        } as Partial<MacBuilderView>);
+        } as Partial<MachineView>);
         expect(deviceReadiness(signed).substate).toBe('developer-mode');
 
         const ready = usbView(withHost, {
             guest: { devices: [guestDevice()] },
             signing: signing(),
-        } as Partial<MacBuilderView>);
+        } as Partial<MachineView>);
         const readiness = deviceReadiness(ready);
         expect(readiness.substate).toBe('ready');
         expect(readiness.name).toBe('Matt’s iPhone');
@@ -160,14 +157,14 @@ describe('deviceReadiness', () => {
         const base = { host: { ...usbView({}).usb.host, devices: [hostDevice()] }, attached };
         const withoutKey = usbView(base, {
             guest: { devices: [guestDevice()] },
-        } as Partial<MacBuilderView>);
+        } as Partial<MachineView>);
         expect(deviceReadiness(withoutKey).canPrepareSigning).toBe(false);
         expect(deviceNextSummary(deviceReadiness(withoutKey), withoutKey)).toContain('Team key');
 
         const withKey = usbView(base, {
             guest: { devices: [guestDevice()] },
             signingKit: { appStoreConnectConfigured: true },
-        } as Partial<MacBuilderView>);
+        } as Partial<MachineView>);
         expect(deviceReadiness(withKey).canPrepareSigning).toBe(true);
         expect(deviceNextSummary(deviceReadiness(withKey), withKey)).toContain('Register');
     });
@@ -241,7 +238,7 @@ describe('device checks', () => {
                 host: { ...usbView({}).usb.host, devices: [hostDevice()] },
                 attached: { bus: 1, port: '3', enumerated: true, issue: null },
             },
-            { guest: { devices: [guestDevice()] } as MacBuilderView['guest'], signing: signing() },
+            { guest: { devices: [guestDevice()] } as MachineView['guest'], signing: signing() },
         );
         const readiness = deviceReadiness(ready);
 

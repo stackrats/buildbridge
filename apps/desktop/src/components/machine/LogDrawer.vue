@@ -33,11 +33,22 @@ const consoleLines = computed<LogLine[]>(() =>
     (session.view?.logs ?? []).map((text) => ({ text })),
 );
 
+const android = computed(() => session.view?.profile.provider === 'android_toolchain');
 const sources = computed<{ value: LogSource; label: string; count: number }[]>(() => [
     { value: 'activity', label: 'Activity', count: session.activity.length },
-    { value: 'build', label: 'Test build', count: session.buildLog.length },
-    { value: 'archive', label: 'Signed archive', count: session.archiveLog.length },
-    { value: 'device', label: 'Device console', count: session.deviceLog.length },
+    {
+        value: 'build',
+        label: android.value ? 'Debug build' : 'Test build',
+        count: session.buildLog.length,
+    },
+    {
+        value: 'archive',
+        label: android.value ? 'Signed release' : 'Signed archive',
+        count: session.archiveLog.length,
+    },
+    ...(android.value
+        ? []
+        : [{ value: 'device' as const, label: 'Device console', count: session.deviceLog.length }]),
     { value: 'console', label: 'Machine console', count: consoleLines.value.length },
 ]);
 
@@ -76,7 +87,7 @@ function sourceFor(step: string | null): LogSource {
     if (step === 'sync' || step === 'test-build') {
         return 'build';
     }
-    if (step === 'archive') {
+    if (step === 'archive' || step === 'release') {
         return 'archive';
     }
     if (step === 'run-device') {

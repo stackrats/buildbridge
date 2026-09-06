@@ -39,7 +39,7 @@ pub(crate) async fn create_apple_certificate_command(
         .iter()
         .find(|kit| kit.id == kit_id)
         .cloned()
-        .ok_or_else(|| "This signing kit is no longer stored.".to_string())?;
+        .ok_or_else(|| "These signing credentials are no longer stored.".to_string())?;
     let (certificate, saved_path) = create_apple_certificate_for_kit(app, &mut kit, kind)
         .await
         .map_err(|error| {
@@ -89,7 +89,7 @@ pub(crate) fn with_other_kit_hint(
         "already holds"
     };
     format!(
-        "{error} On this host, {holders} {verb} a distribution identity for this team; attach that kit to the machine instead of creating a second certificate."
+        "{error} On this host, {holders} {verb} a distribution identity for this team; attach those credentials to the machine instead of creating a second certificate."
     )
 }
 
@@ -102,17 +102,17 @@ pub(crate) async fn create_apple_certificate_for_kit(
     kind: apple_api::CertificateKind,
 ) -> Result<(apple_api::AppleCertificateSummary, String), String> {
     let key_id = kit.app_store_connect_key_id.clone().ok_or_else(|| {
-        "This kit has no App Store Connect key. Add one to the kit first; creating a certificate needs a Team key with the Admin role."
+        "These credentials have no App Store Connect key. Add one first; creating a certificate needs a Team key with the Admin role."
             .to_string()
     })?;
     let issuer_id = kit
         .app_store_connect_issuer_id
         .clone()
-        .ok_or_else(|| "This kit has no App Store Connect Issuer ID.".to_string())?;
+        .ok_or_else(|| "These credentials have no App Store Connect Issuer ID.".to_string())?;
     let private_key = kit
         .app_store_connect_private_key
         .clone()
-        .ok_or_else(|| "This kit has no App Store Connect .p8 key.".to_string())?;
+        .ok_or_else(|| "These credentials have no App Store Connect .p8 key.".to_string())?;
 
     let directory = managed_apple_certificates_dir(app)?.join(format!(
         "{}-{}",
@@ -168,7 +168,7 @@ pub(crate) async fn create_apple_certificate_for_kit(
     }
     save_signing_kit_record(kit.clone()).await.map_err(|error| {
         format!(
-            "Apple issued certificate {} and it was packaged at {}, but BuildBridge could not update the kit in the OS vault: {error}. Nothing at Apple was revoked.",
+            "Apple issued certificate {} and it was packaged at {}, but BuildBridge could not update the credentials in the OS vault: {error}. Nothing at Apple was revoked.",
             created.certificate.name, packaged.p12_path
         )
     })?;
@@ -185,7 +185,7 @@ pub(crate) fn development_certificate_serial(kit: &StoredSigningKit) -> Result<S
     let path = kit
         .development_certificate_path
         .as_deref()
-        .ok_or_else(|| "This kit has no development certificate.".to_string())?;
+        .ok_or_else(|| "These credentials have no development certificate.".to_string())?;
     let password = kit
         .development_certificate_password
         .as_deref()
@@ -264,7 +264,7 @@ pub(crate) async fn retain_profile_in_kit(
 ) -> Result<(), String> {
     if kit.provisioning_profile_paths.len() >= MAX_PROVISIONING_PROFILES {
         return Err(format!(
-            "This kit already holds {MAX_PROVISIONING_PROFILES} profiles. Remove obsolete paths before adding another."
+            "These credentials already hold {MAX_PROVISIONING_PROFILES} profiles. Remove obsolete paths before adding another."
         ));
     }
     let saved_path = save_managed_apple_profile(app, profile, content)?;
@@ -292,9 +292,9 @@ pub(crate) async fn ensure_distribution_set(
     kit: &mut StoredSigningKit,
     bundle_identifier: &str,
     workspace_name: &str,
-    report: &(dyn Fn(buildbridge_docker_osx::SigningProvisioningPhase, &str) + Sync),
+    report: &(dyn Fn(buildbridge_machines::SigningProvisioningPhase, &str) + Sync),
 ) -> Result<(), String> {
-    use buildbridge_docker_osx::SigningProvisioningPhase as Phase;
+    use buildbridge_machines::SigningProvisioningPhase as Phase;
 
     let (key_id, issuer_id, private_key) = match (
         kit.app_store_connect_key_id.clone(),
@@ -304,7 +304,7 @@ pub(crate) async fn ensure_distribution_set(
         (Some(key_id), Some(issuer_id), Some(private_key)) => (key_id, issuer_id, private_key),
         _ => {
             return Err(
-                "This kit has no App Store Connect key, so BuildBridge cannot create signing material for it. Store a distribution identity with its profile, or add a Team key."
+                "These credentials have no App Store Connect key, so BuildBridge cannot create signing material for them. Store a distribution identity with its profile, or add a Team key."
                     .to_string(),
             );
         }
@@ -326,7 +326,7 @@ pub(crate) async fn ensure_distribution_set(
     let path = kit
         .signing_certificate_path
         .clone()
-        .ok_or_else(|| "This kit has no distribution certificate.".to_string())?;
+        .ok_or_else(|| "These credentials have no distribution certificate.".to_string())?;
     let password = kit.signing_certificate_password.clone().ok_or_else(|| {
         "Store the certificate export password in the operating-system vault first.".to_string()
     })?;
@@ -345,7 +345,7 @@ pub(crate) async fn ensure_distribution_set(
     .await?
     .ok_or_else(|| {
         format!(
-            "The kit's distribution certificate (serial {serial}) is not an unexpired Apple Distribution certificate on this team. Store the .p12 of a current certificate in the kit, or store the kit again with only the Team key so BuildBridge creates one."
+            "The stored distribution certificate (serial {serial}) is not an unexpired Apple Distribution certificate on this team. Store the .p12 of a current certificate in the credentials, or store them again with only the Team key so BuildBridge creates one."
         )
     })?;
 
@@ -380,7 +380,7 @@ pub(crate) async fn ensure_distribution_set(
         }
         None if !search.other_usable.is_empty() => {
             return Err(format!(
-                "An active App Store profile for {bundle_identifier} exists at Apple ({}) but is for a different certificate, and BuildBridge does not replace a live profile it did not create. Store that certificate's .p12 in the kit, or let the profile expire or delete it in the developer portal, then provision again.",
+                "An active App Store profile for {bundle_identifier} exists at Apple ({}) but is for a different certificate, and BuildBridge does not replace a live profile it did not create. Store that certificate's .p12 in the credentials, or let the profile expire or delete it in the developer portal, then provision again.",
                 search.other_usable.join(", ")
             ));
         }

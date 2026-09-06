@@ -1,0 +1,12 @@
+[package]
+name = "buildbridge-machines"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The machines BuildBridge builds on: two macOS providers and the Android toolchain, with fixed-argv Docker and everything spoken to each"
+
+[dependencies]
+serde.workspace = true
+ts-rs.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

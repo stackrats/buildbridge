@@ -13,7 +13,7 @@ pub async fn list_env_sets(app: &Engine) -> Result<Vec<EnvSetSummary>, String> {
 pub async fn save_env_set(app: &Engine, input: EnvSetInput) -> Result<Vec<EnvSetSummary>, String> {
     let name = input.name.trim().to_string();
     if name.is_empty() || name.len() > 60 {
-        return Err("Give the env set a name of up to 60 characters.".to_string());
+        return Err("Give the environment a name of up to 60 characters.".to_string());
     }
     let mut sets = read_env_sets().await?;
 
@@ -23,7 +23,7 @@ pub async fn save_env_set(app: &Engine, input: EnvSetInput) -> Result<Vec<EnvSet
                 .sets
                 .iter()
                 .position(|set| set.id == id)
-                .ok_or_else(|| "This env set is no longer stored.".to_string())?;
+                .ok_or_else(|| "This environment is no longer stored.".to_string())?;
             let variables = merge_env_variables(Some(&sets.sets[index]), &input)?;
             sets.sets[index].name = name;
             sets.sets[index].variables = variables;
@@ -31,7 +31,7 @@ pub async fn save_env_set(app: &Engine, input: EnvSetInput) -> Result<Vec<EnvSet
         None => {
             if sets.sets.len() >= MAX_ENV_SETS {
                 return Err(format!(
-                    "BuildBridge stores at most {MAX_ENV_SETS} env sets."
+                    "BuildBridge stores at most {MAX_ENV_SETS} environments."
                 ));
             }
             let variables = merge_env_variables(None, &input)?;
@@ -59,14 +59,14 @@ pub async fn delete_env_set(
     input: ConfirmInput,
 ) -> Result<Vec<EnvSetSummary>, String> {
     if !input.confirmed {
-        return Err("Confirm removing the env set before continuing.".to_string());
+        return Err("Confirm removing the environment before continuing.".to_string());
     }
     let mut sets = read_env_sets().await?;
     let index = sets
         .sets
         .iter()
         .position(|set| set.id == set_id)
-        .ok_or_else(|| "This env set is no longer stored.".to_string())?;
+        .ok_or_else(|| "This environment is no longer stored.".to_string())?;
     sets.sets.remove(index);
     write_env_sets(sets).await?;
 
@@ -88,12 +88,12 @@ pub async fn attach_env_set(
     app: &Engine,
     machine_id: String,
     input: AttachEnvSetInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     if let Some(id) = input.set_id.as_deref() {
         let stored = read_env_sets().await?;
         if !stored.sets.iter().any(|set| set.id == id) {
-            return Err("This env set is no longer stored.".to_string());
+            return Err("This environment is no longer stored.".to_string());
         }
     }
     let mut registry = machines::load_registry(app)?;
@@ -101,7 +101,7 @@ pub async fn attach_env_set(
     registry.machines[index].env_set_id = input.set_id;
     machines::save_registry(app, &registry)?;
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 
 /// Every secret in one set with its value, for the editor to hold masked behind an eye icon. This
@@ -114,7 +114,7 @@ pub async fn reveal_env_secrets(set_id: String) -> Result<Vec<EnvVariableSummary
 }
 
 pub(crate) fn env_set_credential_entry() -> Result<Entry, String> {
-    Entry::new(ENV_SET_CREDENTIAL_SERVICE, MAC_BUILDER_CREDENTIAL_ACCOUNT)
+    Entry::new(ENV_SET_CREDENTIAL_SERVICE, SIGNING_KIT_CREDENTIAL_ACCOUNT)
         .map_err(|error| error.to_string())
 }
 
@@ -124,7 +124,7 @@ pub(crate) async fn read_env_sets() -> Result<StoredEnvSets, String> {
 
         match entry.get_password() {
             Ok(encoded) => serde_json::from_str::<StoredEnvSets>(&encoded)
-                .map_err(|error| format!("The env set vault entry is invalid: {error}")),
+                .map_err(|error| format!("The environment vault entry is invalid: {error}")),
             Err(keyring::Error::NoEntry) => Ok(StoredEnvSets::default()),
             Err(error) => Err(format!(
                 "The operating-system credential vault could not be read: {error}"
@@ -184,7 +184,7 @@ pub(crate) async fn guest_env_files_for_set(
         .into_iter()
         .find(|set| set.id == id)
         .ok_or_else(|| {
-            "That env set is no longer stored. Choose another or build without one.".to_string()
+            "That environment is no longer stored. Choose another or build without one.".to_string()
         })?;
 
     Ok(Some((
@@ -205,7 +205,7 @@ pub(crate) fn stored_env_secrets(
         .sets
         .iter()
         .find(|set| set.id == set_id)
-        .ok_or_else(|| "This env set is no longer stored.".to_string())?;
+        .ok_or_else(|| "This environment is no longer stored.".to_string())?;
 
     Ok(set
         .variables
@@ -291,7 +291,7 @@ pub(crate) fn merge_env_variables(
 ) -> Result<Vec<StoredEnvVariable>, String> {
     if input.variables.len() > MAX_ENV_VARIABLES {
         return Err(format!(
-            "An env set holds at most {MAX_ENV_VARIABLES} variables."
+            "An environment holds at most {MAX_ENV_VARIABLES} variables."
         ));
     }
     let mut seen = std::collections::HashSet::new();
@@ -337,7 +337,7 @@ pub(crate) fn merge_env_variables(
 /// single quotes when the value itself holds a double quote, which dotenv takes verbatim.
 pub(crate) fn render_dotenv(variables: &[StoredEnvVariable]) -> String {
     let mut out = String::from(
-        "# Written by BuildBridge from the attached env set. Not part of the project.\n",
+        "# Written by BuildBridge from the attached environment. Not part of the project.\n",
     );
     for variable in variables {
         out.push_str(&variable.key);
@@ -367,7 +367,7 @@ pub(crate) fn render_dotenv(variables: &[StoredEnvVariable]) -> String {
 /// The same set as a POSIX shell sources it: single-quoted, which is exact for anything but a
 /// single quote, and that is spelled `'\''`.
 pub(crate) fn render_shell_env(variables: &[StoredEnvVariable]) -> String {
-    let mut out = String::from("# Written by BuildBridge from the attached env set.\n");
+    let mut out = String::from("# Written by BuildBridge from the attached environment.\n");
     for variable in variables {
         out.push_str("export ");
         out.push_str(&variable.key);

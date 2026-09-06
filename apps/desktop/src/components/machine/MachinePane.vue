@@ -12,6 +12,7 @@ import {
     type StepPhase,
 } from '../../model/steps';
 import { formatBytes } from '../../lib/format';
+import { isAndroid } from '../../model/providers';
 import { useMachinesStore } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
 import Callout from '../ui/Callout.vue';
@@ -32,11 +33,13 @@ const view = computed(() => session.value.view);
 const now = ref(Date.now());
 const runningStep = computed(() => machines.runningStep(machineId));
 const runningOperation = computed(() => machines.runningOperation(machineId));
+const runningLive = computed(() => machines.runningLive(machineId));
 const steps = computed<JourneyStep[]>(() =>
     view.value
         ? deriveJourney(view.value, {
               runningStep: runningStep.value,
               runningOperation: runningOperation.value,
+              runningLive: runningLive.value,
               now: now.value,
           })
         : [],
@@ -51,6 +54,28 @@ const summaries = computed<Partial<Record<StepPhase, string>>>(() => {
     const current = view.value;
     if (!current) {
         return {};
+    }
+    if (isAndroid(current.profile.provider)) {
+        const lastBuild = current.android?.workspace?.lastBuild ?? null;
+        const release = current.android?.release ?? null;
+        return {
+            setup: current.runtime.state === 'running' ? 'toolchain running' : '',
+            build: [
+                lastBuild
+                    ? lastBuild.toolchain.jdkVersion
+                          .replace(/^openjdk version /, 'JDK ')
+                          .replace(/"/g, '')
+                          .split(' ')
+                          .slice(0, 2)
+                          .join(' ')
+                    : null,
+                release
+                    ? `${release.versionName} (${release.versionCode}) · bundle ${formatBytes(release.aab.bytes)}`
+                    : null,
+            ]
+                .filter(Boolean)
+                .join(' · '),
+        };
     }
     const { diagnostics, ssh } = current.guest;
     return {
@@ -117,7 +142,12 @@ function scheduleProbe(): void {
         probeTimer = null;
     }
     const current = view.value;
-    if (!current || current.runtime.state !== 'running' || current.guest.ssh.reachable) {
+    if (
+        !current ||
+        isAndroid(current.profile.provider) ||
+        current.runtime.state !== 'running' ||
+        current.guest.ssh.reachable
+    ) {
         return;
     }
     probeTimer = setTimeout(async () => {
@@ -187,7 +217,10 @@ onBeforeUnmount(() => {
                         </StepTimeline>
                     </div>
 
-                    <OptimizationsSection :session="session" />
+                    <OptimizationsSection
+                        v-if="!isAndroid(view.profile.provider)"
+                        :session="session"
+                    />
                 </template>
             </div>
         </div>

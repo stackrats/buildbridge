@@ -64,6 +64,9 @@ const workspace = computed(() => view.value.appleWorkspace);
 const live = computed(() => isLive(view.value.runtime.state));
 const busy = computed(() => session.operation !== null);
 const running = computed(() => step.status === 'running');
+// The app is up on the phone with its console streaming: the run has arrived, and nothing here
+// is waiting, so the strip, the node, and the button all say "live" rather than "loading".
+const streaming = computed(() => step.live === true);
 const lastLine = computed(() => session.deviceLog.at(-1)?.text ?? null);
 
 const stepOperations = new Set<OperationId>([
@@ -189,7 +192,9 @@ const strip = computed(() => {
     if (operation === 'device-signing' || operation === 'preparing_device_signing') {
         const progress = session.deviceSigning ?? null;
         return {
-            label: progress ? deviceSigningPhaseLabel[progress.phase] : 'Checking the signing kit',
+            label: progress
+                ? deviceSigningPhaseLabel[progress.phase]
+                : 'Checking the signing credentials',
             detail: progress?.detail ?? session.signing?.detail ?? null,
             elapsed: progress?.elapsedSeconds ?? null,
             value: null,
@@ -202,9 +207,12 @@ const strip = computed(() => {
     }
     if (operation === 'run-device' || operation === 'running_on_device') {
         const progress = session.device;
-        const streaming = progress?.phase === 'running';
         return {
-            label: progress ? devicePhaseLabel[progress.phase] : 'Preparing the recipe',
+            label: streaming.value
+                ? `Live on ${readiness.value.name}`
+                : progress
+                  ? devicePhaseLabel[progress.phase]
+                  : 'Preparing the recipe',
             detail: progress?.detail ?? null,
             elapsed: progress?.elapsedSeconds ?? null,
             value: null,
@@ -212,7 +220,7 @@ const strip = computed(() => {
             totalBytes: null,
             lastLine: lastLine.value,
             stoppable: true,
-            stopTitle: streaming
+            stopTitle: streaming.value
                 ? 'Ends the console session. The app stays installed and running on the iPhone.'
                 : undefined,
         };
@@ -371,13 +379,18 @@ const primary = computed<Primary | null>(() => {
                   };
         case 'ready':
             return {
-                label: run.value ? `Run again on ${name}` : `Build and run on ${name}`,
+                label: streaming.value
+                    ? `Running on ${name}`
+                    : run.value
+                      ? `Run again on ${name}`
+                      : `Build and run on ${name}`,
                 icon: Play,
                 outline: false,
                 operation: 'run-device',
-                disabledReason:
-                    needsLive() ??
-                    (device.value?.udid ? null : 'The guest has not read the UDID yet'),
+                disabledReason: streaming.value
+                    ? 'Stop the console session to run again'
+                    : (needsLive() ??
+                      (device.value?.udid ? null : 'The guest has not read the UDID yet')),
                 run: () => machines.runOnDevice(id, device.value?.udid ?? ''),
             };
     }
@@ -395,10 +408,12 @@ const primaryDisabled = computed(
         primary.value === null ||
         primary.value.disabledReason !== null,
 );
+// A live run is not starting: the button names it as running and does not spin.
 const primarySpinning = computed(
     () =>
         primaryRefreshing.value ||
-        (primary.value !== null &&
+        (!streaming.value &&
+            primary.value !== null &&
             primary.value.operation !== null &&
             session.operation === primary.value.operation),
 );
@@ -652,6 +667,7 @@ const runFacts = computed(() =>
                 :completed-bytes="strip.completedBytes"
                 :total-bytes="strip.totalBytes"
                 :last-line="strip.lastLine"
+                :state="streaming ? 'live' : 'running'"
                 :stoppable="strip.stoppable"
                 :stopping="session.cancelling"
                 :stop-title="strip.stopTitle"
@@ -729,10 +745,10 @@ const runFacts = computed(() =>
             <Callout
                 v-if="readiness.substate === 'signing' && !readiness.canPrepareSigning"
                 tone="warn"
-                title="The attached kit has no Team key"
+                title="The attached credentials have no Team key"
             >
                 Registering the phone and creating a development profile happen at Apple through the
-                kit's App Store Connect key. Add one to the kit under Signing kits, or store a
+                App Store Connect key in the credentials. Add one under Signing, or store a
                 development identity and a profile that already lists this phone.
             </Callout>
             <Callout
@@ -894,14 +910,14 @@ const runFacts = computed(() =>
             v-model:open="signingOpen"
             :title="`Prepare signing for ${readiness.name}`"
             confirm-label="Register and provision"
-            acknowledgement="The kit's Team key has the Admin role"
+            acknowledgement="The Team key in the credentials has the Admin role"
             @confirm="prepareSigning"
         >
             <p>
                 Registers this phone's UDID and name with the team at Apple, which counts toward the
                 yearly allowance of 100 iPhones and cannot be undone here. Creates an Apple
-                Development identity if the kit has none, creates a development profile for the
-                bundle identifier listing the phone, and provisions both into the guest keychain
+                Development identity if the credentials hold none, creates a development profile for
+                the bundle identifier listing the phone, and provisions both into the guest keychain
                 next to the distribution identity. Nothing at Apple is revoked.
             </p>
             <p>
@@ -914,7 +930,8 @@ const runFacts = computed(() =>
                 app groups or iCloud containers, are not copied; if the app uses one, enable it on
                 the new App ID in the portal once. The other route is to sign the debug build under
                 the main identifier, which replaces the store build on that phone; BuildBridge does
-                that only when the kit holds no profile for the Debug identifier, and says so.
+                that only when the credentials hold no profile for the Debug identifier, and says
+                so.
             </p>
         </ConfirmDialog>
 

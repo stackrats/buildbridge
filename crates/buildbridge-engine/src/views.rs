@@ -9,7 +9,7 @@ pub(crate) fn is_live(state: ContainerState) -> bool {
     )
 }
 
-pub(crate) fn ensure_apple_project_guest_ready(view: &MacBuilderView) -> Result<(), String> {
+pub(crate) fn ensure_apple_project_guest_ready(view: &MachineView) -> Result<(), String> {
     if view.runtime.state != ContainerState::Running {
         return Err("Start the macOS machine first.".to_string());
     }
@@ -23,12 +23,28 @@ pub(crate) fn ensure_apple_project_guest_ready(view: &MacBuilderView) -> Result<
     Ok(())
 }
 
+/// What an Android machine needs before a build touches it: a running container.
+pub(crate) fn ensure_android_container_ready(view: &MachineView) -> Result<(), String> {
+    if !view.profile.provider.is_macos() && view.android.is_none() {
+        return Err("This machine is not an Android machine.".to_string());
+    }
+    if view.runtime.state != ContainerState::Running {
+        return Err("Start the Android toolchain first.".to_string());
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn build_machine_list_view(app: &Engine) -> Result<MachineListView, String> {
     let registry = machines::load_registry(app)?;
     let mut entries = Vec::with_capacity(registry.machines.len());
     for machine in &registry.machines {
         let paths = MachinePaths::resolve(app, &machine.id)?;
-        let workspace_name = load_apple_workspace(&paths)?.map(|workspace| workspace.name);
+        let workspace_name = if machine.config.provider.is_macos() {
+            load_apple_workspace(&paths)?.map(|workspace| workspace.name)
+        } else {
+            load_android_workspace(&paths)?.map(|workspace| workspace.name)
+        };
         let signing = load_signing_provisioning(&paths)?;
         entries.push((machine.clone(), paths, workspace_name, signing));
     }
@@ -40,19 +56,19 @@ pub(crate) async fn build_machine_list_view(app: &Engine) -> Result<MachineListV
         .clone();
     let template_app = app.clone();
     let (host, machines) = tokio::task::spawn_blocking(move || {
-        let host = buildbridge_docker_osx::probe_host();
+        let host = buildbridge_machines::probe_host();
         let mut summaries = Vec::with_capacity(entries.len());
         for (machine, paths, workspace_name, signing) in entries {
-            let runtime = buildbridge_docker_osx::status_for(
-                &paths.container_name,
-                machine.config.provider,
-            )
-            .map_err(|error| error.to_string())?;
+            let runtime =
+                buildbridge_machines::status_for(&paths.container_name, machine.config.provider)
+                    .map_err(|error| error.to_string())?;
             // Signing belongs to the container it was imported into; a rebuilt container drops it.
             let signing = signing
                 .filter(|stored| runtime.container_id.as_deref() == Some(&stored.container_id));
+            let macos = machine.config.provider.is_macos();
             summaries.push(MachineSummary {
                 id: machine.id.clone(),
+                platform: machine.config.provider.platform(),
                 template_name: machine
                     .template_id
                     .as_deref()
@@ -74,14 +90,19 @@ pub(crate) async fn build_machine_list_view(app: &Engine) -> Result<MachineListV
                         .or(result.development_identity)
                         .map(|identity| identity.identity_name)
                 }),
-                archive_retained: paths.apple_archive_record().is_file(),
+                archive_retained: if macos {
+                    paths.apple_archive_record().is_file()
+                } else {
+                    paths.android_release_record().is_file()
+                },
                 env_set_name: None,
-                usb_ready: buildbridge_docker_osx::inspect_container_layout(&paths.container_name)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|layout| {
-                        layout.disk_on_host && layout.usb_access && layout.control_socket
-                    }),
+                usb_ready: macos
+                    && buildbridge_machines::inspect_container_layout(&paths.container_name)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|layout| {
+                            layout.disk_on_host && layout.usb_access && layout.control_socket
+                        }),
                 device_run_retained: paths.apple_device_run_record().is_file(),
             });
         }
@@ -106,8 +127,13 @@ pub(crate) async fn build_machine_list_view(app: &Engine) -> Result<MachineListV
             .and_then(|machine| machine.signing_kit_id.clone());
         // The same rule as the machine view: nothing is attached on a machine's behalf, not
         // even when the host holds exactly one kit, so the row and the page never disagree.
-        summary.signing_kit_name =
-            resolve_signing_kit(&kits, attached.as_deref()).map(|kit| kit.name.clone());
+        let kit = resolve_signing_kit(&kits, attached.as_deref());
+        summary.signing_kit_name = kit.map(|kit| kit.name.clone());
+        // An Android machine provisions nothing: its upload key is streamed in per release,
+        // so "provisioned" is the attached kit holding one.
+        if summary.platform == MachinePlatform::Android {
+            summary.signing_provisioned = kit.is_some_and(kit_has_android_signing);
+        }
         summary.env_set_name = attachments
             .find(&summary.id)
             .ok()
@@ -119,10 +145,10 @@ pub(crate) async fn build_machine_list_view(app: &Engine) -> Result<MachineListV
     Ok(MachineListView { host, machines })
 }
 
-pub(crate) async fn build_mac_builder_view(
+pub(crate) async fn build_machine_view(
     app: &Engine,
     paths: &MachinePaths,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     let profile = machines::load_registry(app)?
         .find(&paths.id)?
         .config
@@ -139,13 +165,20 @@ pub(crate) async fn build_mac_builder_view(
         .and_then(|devices| devices.get(&paths.id).cloned())
         .unwrap_or_default();
     let (runtime, logs, guest, mut usb) = tokio::task::spawn_blocking(move || {
-        let runtime = buildbridge_docker_osx::status_for(
-            &probe_paths.container_name,
-            probe_profile.provider,
-        )
-        .map_err(|error| error.to_string())?;
-        let logs = buildbridge_docker_osx::recent_logs(&probe_paths.container_name)
+        let runtime =
+            buildbridge_machines::status_for(&probe_paths.container_name, probe_profile.provider)
+                .map_err(|error| error.to_string())?;
+        let logs = buildbridge_machines::recent_logs(&probe_paths.container_name)
             .map_err(|error| error.to_string())?;
+        // A toolchain container has no guest to probe and no phone to hand over.
+        if !probe_profile.provider.is_macos() {
+            return Ok::<_, String>((
+                runtime,
+                logs,
+                MacGuestAccessView::default(),
+                buildbridge_machines::MachineUsbStatus::not_applicable(),
+            ));
+        }
         let guest = build_mac_guest_view(
             &probe_profile,
             &runtime,
@@ -153,7 +186,7 @@ pub(crate) async fn build_mac_builder_view(
             &probe_paths,
             cached_devices,
         )?;
-        let usb = buildbridge_docker_osx::machine_usb_status(
+        let usb = buildbridge_machines::machine_usb_status(
             &probe_paths.container_name,
             &probe_paths.qmp_endpoint(probe_profile.provider),
             runtime.state,
@@ -209,8 +242,31 @@ pub(crate) async fn build_mac_builder_view(
         .filter(|stored| runtime.container_id.as_deref() == Some(&stored.container_id))
         .map(|stored| stored.result);
     let device_run_error = read_optional_text(&paths.apple_device_run_error())?;
+    let android = if profile.provider.is_macos() {
+        None
+    } else {
+        let (release, release_env_set) = load_android_release(paths)?
+            .filter(|stored| {
+                std::path::Path::new(&stored.result.aab.path).is_file()
+                    && std::path::Path::new(&stored.result.apk.path).is_file()
+            })
+            .map(|stored| (Some(stored.result), stored.env_set_name))
+            .unwrap_or((None, None));
+        Some(AndroidMachineView {
+            workspace: load_android_workspace(paths)?,
+            release,
+            release_env_set,
+            release_error: read_optional_text(&paths.android_release_error())?,
+        })
+    };
+    let signing_health = signing_health_for(
+        profile.provider.platform(),
+        vault_issue.as_deref(),
+        resolved,
+        signing.is_some(),
+    );
 
-    Ok(MacBuilderView {
+    Ok(MachineView {
         machine_id: paths.id.clone(),
         template: template_ref_for(app, &paths.id),
         display_url: profile.display_url(),
@@ -219,7 +275,7 @@ pub(crate) async fn build_mac_builder_view(
         runtime,
         signing_kit,
         env_set,
-        signing_health: signing_health(vault_issue.as_deref(), resolved, signing.is_some()),
+        signing_health,
         vault_issue,
         guest,
         apple_workspace,
@@ -231,15 +287,16 @@ pub(crate) async fn build_mac_builder_view(
         usb,
         device_run,
         device_run_error,
+        android,
     })
 }
 
 pub(crate) fn build_mac_guest_view(
-    profile: &MacBuilderConfig,
+    profile: &MachineConfig,
     runtime: &RuntimeStatus,
     access: Option<&StoredMacGuestAccess>,
     paths: &MachinePaths,
-    devices: Vec<buildbridge_docker_osx::GuestDevice>,
+    devices: Vec<buildbridge_machines::GuestDevice>,
 ) -> Result<MacGuestAccessView, String> {
     let username = access.map(|value| value.username.clone());
     let public_key = read_optional_text(&paths.guest_public_key())?;
@@ -259,11 +316,10 @@ pub(crate) fn build_mac_guest_view(
 
     let known_hosts_path = paths.known_hosts();
     let pinned_host_key = read_optional_text(&known_hosts_path)?;
-    let ssh =
-        buildbridge_docker_osx::guest_ssh_status(profile.ssh_port, pinned_host_key.as_deref());
+    let ssh = buildbridge_machines::guest_ssh_status(profile.ssh_port, pinned_host_key.as_deref());
     let diagnostics = if ssh.trust == GuestTrustState::Trusted {
         match access {
-            Some(access) => buildbridge_docker_osx::guest_diagnostics(
+            Some(access) => buildbridge_machines::guest_diagnostics(
                 profile.ssh_port,
                 &access.username,
                 &paths.guest_identity(),
@@ -287,10 +343,10 @@ pub(crate) fn build_mac_guest_view(
     })
 }
 
-pub(crate) async fn ensure_mac_builder_profile_can_change(
+pub(crate) async fn ensure_machine_profile_can_change(
     paths: &MachinePaths,
-    stored: &MacBuilderConfig,
-    profile: &MacBuilderConfig,
+    stored: &MachineConfig,
+    profile: &MachineConfig,
 ) -> Result<(), String> {
     if stored.provider != profile.provider {
         return Err(
@@ -307,20 +363,25 @@ pub(crate) async fn ensure_mac_builder_profile_can_change(
     }
 
     let container_name = paths.container_name.clone();
-    let runtime =
-        tokio::task::spawn_blocking(move || buildbridge_docker_osx::status(&container_name))
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?;
+    let provider = stored.provider;
+    let runtime = tokio::task::spawn_blocking(move || {
+        buildbridge_machines::status_for(&container_name, provider)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
 
     if !matches!(
         runtime.state,
         ContainerState::Missing | ContainerState::Unavailable
     ) {
-        return Err(
+        return Err(if provider.is_macos() {
             "Stop the machine and discard its container before changing its hardware profile. The name can be changed at any time."
-                .to_string(),
-        );
+                .to_string()
+        } else {
+            "Stop the toolchain and discard its container before changing its limits. The name can be changed at any time."
+                .to_string()
+        });
     }
 
     Ok(())

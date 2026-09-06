@@ -25,13 +25,16 @@ const kitSummary = computed(() => {
     const kits = signing.kits.value;
     if (!kits.length) {
         return {
-            title: 'No signing kits',
+            title: 'No signing credentials',
             detail: 'Store a certificate and profile once to sign builds',
         };
     }
     const ready = kits.filter(kitIsProvisionable).length;
     return {
-        title: `${kits.length} kit${kits.length === 1 ? '' : 's'} stored`,
+        title:
+            kits.length === 1
+                ? 'Signing credentials stored'
+                : `${kits.length} signing credentials stored`,
         detail:
             ready === kits.length
                 ? 'All ready to provision into a machine'
@@ -41,49 +44,53 @@ const kitSummary = computed(() => {
 
 const phases = [
     {
-        title: 'Prepare a macOS machine once',
-        body: 'A persistent macOS guest under Docker-OSX or dockur/macos. Install macOS and Xcode in it; BuildBridge pins its SSH identity and keeps the disk between starts.',
+        title: 'Prepare a machine once',
+        body: 'For iOS, a persistent macOS guest under Docker-OSX or dockur/macos: install macOS and Xcode in it, and BuildBridge pins its SSH identity and keeps the disk between starts. For Android, a toolchain container that prepares itself.',
     },
     {
         title: 'Approve a project and test build',
-        body: 'Approve one local folder, synchronize a filtered snapshot, and run an unsigned test build on the prepared machine.',
+        body: 'Approve one local Capacitor folder, synchronize a filtered snapshot, and run an unsigned test build or a debug build on the prepared machine.',
     },
     {
-        title: 'Sign and export an IPA',
-        body: 'Store a Team key, or your certificate and profiles, once in the OS vault; provision them into the guest; export a verified App Store Connect IPA.',
+        title: 'Sign and export',
+        body: 'Store a Team key, or your certificate and profiles, and an Android upload key once in the OS vault. Export a verified App Store Connect IPA, or a signed app bundle and APK.',
     },
     {
         title: 'Optional: run it on your iPhone',
-        body: 'Hand a plugged-in iPhone to the machine over USB, and BuildBridge installs a Debug build on it and streams its console. Not one of the thirteen.',
+        body: 'Hand a plugged-in iPhone to a macOS machine over USB, and BuildBridge installs a Debug build on it and streams its console. Off the required path.',
     },
 ];
 
 const glossary = [
     {
         word: 'Machine',
-        meaning: 'a macOS virtual machine BuildBridge runs on this Linux host through Docker.',
+        meaning:
+            'a macOS virtual machine, or an Android toolchain container, BuildBridge runs on this Linux host through Docker.',
     },
     {
         word: 'Guest',
-        meaning: 'the macOS inside that machine; the console is its screen, in its own window.',
+        meaning: 'the macOS inside a macOS machine; the console is its screen, in its own window.',
     },
     {
         word: 'Pinned identity',
         meaning: "the guest's SSH fingerprint, checked once and refused if it ever changes.",
     },
     {
-        word: 'Signing kit',
+        word: 'Signing credentials',
         meaning:
-            "your Apple signing credentials, stored once in this host's OS vault and shared by every machine.",
+            "your Apple signing credentials and your Android upload key, stored once in this host's OS vault and shared by every machine.",
     },
     {
         word: 'Team key',
         meaning:
             'an App Store Connect API key; with one, BuildBridge creates certificates and profiles for you.',
     },
-    { word: 'Provision', meaning: "import a kit into a machine's own keychain, ready to sign." },
     {
-        word: 'Env set',
+        word: 'Provision',
+        meaning: "import signing credentials into a machine's own keychain, ready to sign.",
+    },
+    {
+        word: 'Environment',
         meaning: 'variables and secrets written into the project at every sync, for the web build.',
     },
     {
@@ -118,8 +125,8 @@ const wellClass =
             <div>
                 <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">Overview</h1>
                 <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-                    Build and sign iOS apps from this Linux host. Set a macOS machine up once, then
-                    point it at any project.
+                    Build and sign iOS and Android apps from this Linux host. Set a machine up once
+                    per platform, then point it at any project.
                 </p>
             </div>
             <Button
@@ -143,7 +150,7 @@ const wellClass =
         </Callout>
 
         <section v-if="machines.machines.value.length" class="space-y-2">
-            <h2 class="text-xs font-semibold text-zinc-500 dark:text-zinc-400">macOS machines</h2>
+            <h2 class="text-xs font-semibold text-zinc-500 dark:text-zinc-400">Machines</h2>
             <div class="space-y-2">
                 <MachineRow
                     v-for="machine in machines.machines.value"
@@ -158,11 +165,12 @@ const wellClass =
             class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
         >
             <h2 class="text-[15px] font-semibold text-zinc-900 dark:text-zinc-50">
-                Thirteen steps, one machine
+                One machine per platform, prepared once
             </h2>
             <p class="mt-1 max-w-xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                The machine is prepared once and then builds any number of projects. Every step says
-                who does it, and the ones that are yours come with instructions.
+                Thirteen steps for a macOS machine, seven for an Android toolchain; each is prepared
+                once and then builds any number of projects. Every step says who does it, and the
+                ones that are yours come with instructions.
             </p>
             <ol class="mt-4 space-y-3">
                 <li v-for="(phase, index) in phases" :key="phase.title" class="flex gap-3">

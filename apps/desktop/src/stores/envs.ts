@@ -49,8 +49,8 @@ export function useEnvSetsStore() {
                 state.sets = await useBackend().saveEnvSet(input);
                 state.loaded = true;
                 state.notice = input.setId
-                    ? 'Env set updated in the OS vault.'
-                    : 'Env set stored in the OS vault.';
+                    ? 'Environment updated in the OS vault.'
+                    : 'Environment stored in the OS vault.';
                 return true;
             } catch (error) {
                 state.error = describeError(error);
@@ -66,7 +66,7 @@ export function useEnvSetsStore() {
             try {
                 state.sets = await useBackend().deleteEnvSet(setId);
                 state.notice =
-                    'Env set removed from the vault. Machines using it are now detached.';
+                    'Environment removed from the vault. Machines using it are now detached.';
                 return true;
             } catch (error) {
                 state.error = describeError(error);

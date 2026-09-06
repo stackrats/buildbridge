@@ -4,4 +4,8 @@ export type SigningKitInput = {
 /**
  * Absent creates a kit; present updates that kit in place.
  */
-kitId: string | null, name: string, appStoreConnectKeyId: string, appStoreConnectIssuerId: string, appStoreConnectPrivateKeyPath: string, signingCertificatePath: string, signingCertificatePassword: string, provisioningProfilePaths: Array<string>, guestKeychainPassword: string, developmentCertificatePath: string, developmentCertificatePassword: string, };
+kitId: string | null, name: string, appStoreConnectKeyId: string, appStoreConnectIssuerId: string, appStoreConnectPrivateKeyPath: string, signingCertificatePath: string, signingCertificatePassword: string, provisioningProfilePaths: Array<string>, guestKeychainPassword: string, developmentCertificatePath: string, developmentCertificatePassword: string, 
+/**
+ * The Android upload key. Blank keeps what is stored, like every other field.
+ */
+androidKeystorePath: string, androidKeystorePassword: string, androidKeyAlias: string, androidKeyPassword: string, };

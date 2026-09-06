@@ -10,17 +10,21 @@
 //! display for its console window, the dockur/macos one the tun device. Set
 //! `BUILDBRIDGE_BOOT_TEST_DIR` to a disk-backed directory when the temp directory is tmpfs.
 //! Together they are the check that an image upgrade must pass before its digest changes.
+//!
+//! The Android toolchain's test is the same shape without a guest: it creates the container,
+//! starts it, asks the JDK inside for its version, and removes everything including the home
+//! the container wrote as root. It pulls only the JDK image.
 
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use buildbridge_docker_osx::{capture_guest_screen, screen_has_content};
 use buildbridge_engine::machines::MachinePaths;
 use buildbridge_engine::{
-    ConfirmInput, Engine, EngineDeps, MacBuilderConfig, MacOsRelease, MachineProvider, NoEvents,
+    ConfirmInput, Engine, EngineDeps, MacOsRelease, MachineConfig, MachineProvider, NoEvents,
 };
+use buildbridge_machines::{capture_guest_screen, screen_has_content};
 use serde_json::{Value, json};
 
 const QEMU_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -44,17 +48,98 @@ fn as_json<T: serde::Serialize>(value: T) -> Value {
 fn screen_paths(provider: MachineProvider, paths: &MachinePaths) -> (String, PathBuf) {
     match provider {
         MachineProvider::DockerOsx => (
-            format!(
-                "{}/boot-test.ppm",
-                buildbridge_docker_osx::QMP_CONTAINER_DIR
-            ),
+            format!("{}/boot-test.ppm", buildbridge_machines::QMP_CONTAINER_DIR),
             paths.qmp_dir().join("boot-test.ppm"),
         ),
         MachineProvider::DockurMacos => (
             "/storage/boot-test.ppm".to_string(),
             paths.disk_dir().join("boot-test.ppm"),
         ),
+        MachineProvider::AndroidToolchain => {
+            unreachable!("the toolchain container has no screen")
+        }
     }
+}
+
+/// The Android provider's boot: the container comes up, the JDK answers inside it, and the
+/// machine's home is on this host until the machine is deleted.
+async fn android_toolchain_boots() -> Result<(), String> {
+    let provider = MachineProvider::AndroidToolchain;
+    let root = test_root(provider);
+    let engine = Engine::new(EngineDeps {
+        config_dir: root.join("config"),
+        data_dir: root.join("data"),
+        events: Arc::new(NoEvents),
+    });
+    let profile = MachineConfig {
+        name: "Boot test Android".to_string(),
+        memory_gib: 4,
+        cpu_cores: 2,
+        provider,
+        ..MachineConfig::default()
+    };
+    let list = as_json(buildbridge_engine::create_machine(&engine, profile, None).await?);
+    let machine_id = list["machines"][0]["id"]
+        .as_str()
+        .ok_or("the created machine has no id")?
+        .to_string();
+    let paths = MachinePaths::resolve(&engine, &machine_id)?;
+    assert!(paths.container_name.starts_with("buildbridge-android-"));
+
+    let outcome = async {
+        let started = Instant::now();
+        let view = as_json(buildbridge_engine::launch_machine(&engine, machine_id.clone()).await?);
+        eprintln!(
+            "[Android toolchain] container {} after {:?}",
+            view["runtime"]["state"],
+            started.elapsed()
+        );
+        if view["runtime"]["state"] != "running" {
+            return Err(format!("the container is {}", view["runtime"]["state"]));
+        }
+        if view["android"].is_null() || !view["guest"]["ssh"]["reachable"].is_boolean() {
+            return Err("the view is not an Android machine's".to_string());
+        }
+        let java = std::process::Command::new("docker")
+            .args(["exec", &paths.container_name, "java", "-version"])
+            .output()
+            .map_err(|error| error.to_string())?;
+        let version = String::from_utf8_lossy(&java.stderr).to_string();
+        eprintln!(
+            "[Android toolchain] {}",
+            version.lines().next().unwrap_or_default()
+        );
+        if !java.status.success() || !version.contains("openjdk version \"17.") {
+            return Err(format!("the JDK did not answer: {version}"));
+        }
+        if !paths.android_home_dir().is_dir() {
+            return Err("the machine's home was not created on this host".to_string());
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+
+    let confirmed: ConfirmInput = serde_json::from_value(json!({ "confirmed": true })).unwrap();
+    let _ = buildbridge_engine::stop_machine(&engine, machine_id.clone()).await;
+    let discard =
+        buildbridge_engine::discard_machine_container(&engine, machine_id.clone(), confirmed)
+            .await
+            .map(|_| ());
+    let confirmed: ConfirmInput = serde_json::from_value(json!({ "confirmed": true })).unwrap();
+    let delete = buildbridge_engine::delete_machine(&engine, machine_id, confirmed)
+        .await
+        .map(|_| ());
+    let home_gone = !paths.android_home_dir().exists();
+    let _ = fs::remove_dir_all(&root);
+
+    outcome?;
+    discard.map_err(|error| format!("discarding the test machine failed: {error}"))?;
+    delete.map_err(|error| format!("deleting the test machine failed: {error}"))?;
+    if !home_gone {
+        return Err("the machine's home survived its deletion".to_string());
+    }
+
+    Ok(())
 }
 
 async fn boot_to_the_installer(
@@ -68,7 +153,7 @@ async fn boot_to_the_installer(
         data_dir: root.join("data"),
         events: Arc::new(NoEvents),
     });
-    let profile = MacBuilderConfig {
+    let profile = MachineConfig {
         name: format!("Boot test {}", provider.label()),
         macos_release,
         memory_gib: 4,
@@ -86,7 +171,7 @@ async fn boot_to_the_installer(
 
     // Whatever happened, leave nothing behind: the container, its disk, and the directories.
     let confirmed: ConfirmInput = serde_json::from_value(json!({ "confirmed": true })).unwrap();
-    let _ = buildbridge_engine::stop_mac_builder(&engine, machine_id.clone()).await;
+    let _ = buildbridge_engine::stop_machine(&engine, machine_id.clone()).await;
     let discard =
         buildbridge_engine::discard_machine_container(&engine, machine_id.clone(), confirmed)
             .await
@@ -108,8 +193,7 @@ async fn watch_boot(
     machine_id: &str,
 ) -> Result<(), String> {
     let started = Instant::now();
-    let view =
-        as_json(buildbridge_engine::launch_mac_builder(engine, machine_id.to_string()).await?);
+    let view = as_json(buildbridge_engine::launch_machine(engine, machine_id.to_string()).await?);
     eprintln!(
         "[{}] container {} after {:?}",
         provider.label(),
@@ -119,9 +203,7 @@ async fn watch_boot(
 
     // QEMU answering on the control socket is the machine being up at all.
     loop {
-        let view = as_json(
-            buildbridge_engine::get_mac_builder_status(engine, machine_id.to_string()).await?,
-        );
+        let view = as_json(buildbridge_engine::get_machine(engine, machine_id.to_string()).await?);
         let state = view["runtime"]["state"].as_str().unwrap_or_default();
         if state != "running" && state != "created" {
             return Err(format!(
@@ -209,4 +291,10 @@ fn dockur_macos_boots_to_the_installer() {
         MacOsRelease::Sequoia,
         50_980,
     ));
+}
+
+#[test]
+#[ignore = "pulls the JDK image and starts a container; run on purpose with --ignored"]
+fn android_toolchain_boots_and_answers() {
+    run(android_toolchain_boots());
 }

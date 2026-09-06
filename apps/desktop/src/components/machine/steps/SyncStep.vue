@@ -129,11 +129,11 @@ async function attachEnv(): Promise<void> {
             />
 
             <Field
-                label="Env set for this machine"
+                label="Environment for this machine"
                 :hint="
                     attachedEnvSet
                         ? `${attachedEnvSet.name} is written into the guest as .env.production.local at every sync and exported to the build shell. Synchronize again after changing it.`
-                        : 'Optional. Values the web build needs that are not in the repository; stored once on this host under Env sets, attached per machine.'
+                        : 'Optional. Values the web build needs that are not in the repository; stored once on this host under Environments, attached per machine.'
                 "
             >
                 <Select
@@ -156,7 +156,7 @@ async function attachEnv(): Promise<void> {
                 </template>
             </Field>
             <Button variant="ghost" size="sm" @click="ui.navigate({ kind: 'envs' })">
-                Manage env sets
+                Manage environments
                 <ArrowRight class="h-3 w-3" />
             </Button>
         </div>

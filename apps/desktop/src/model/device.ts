@@ -5,7 +5,7 @@
 import type {
     GuestDevice,
     HostUsbDevice,
-    MacBuilderView,
+    MachineView,
     SigningProvisioningResult,
 } from '../types/backend';
 
@@ -52,7 +52,7 @@ export function deviceSigningReady(
     );
 }
 
-export function deviceReadiness(view: MacBuilderView): DeviceReadiness {
+export function deviceReadiness(view: MachineView): DeviceReadiness {
     const { usb, guest, signing, signingKit } = view;
     const attached = usb.attached;
     const hostDevice = attached
@@ -94,7 +94,7 @@ export function deviceReadiness(view: MacBuilderView): DeviceReadiness {
 }
 
 /** The row's fact line while the step is next: what the facts say to do. */
-export function deviceNextSummary(readiness: DeviceReadiness, view: MacBuilderView): string {
+export function deviceNextSummary(readiness: DeviceReadiness, view: MachineView): string {
     switch (readiness.substate) {
         case 'host-rule':
             return 'Prepare the host: a udev rule lets usbmuxd release the iPhone to the guest';
@@ -119,7 +119,7 @@ export function deviceNextSummary(readiness: DeviceReadiness, view: MacBuilderVi
         case 'signing':
             return readiness.canPrepareSigning
                 ? `Register ${readiness.name} at Apple and provision a development identity`
-                : 'The attached kit has no Team key to register the iPhone; add one to the kit';
+                : 'The attached credentials have no Team key to register the iPhone; add one to them';
         case 'developer-mode':
             return `Turn on Developer Mode on ${readiness.name}, then refresh`;
         case 'ready':
@@ -162,7 +162,7 @@ export interface DeviceCheck {
  * disagree.
  */
 export function deviceChecks(
-    view: MacBuilderView,
+    view: MachineView,
     readiness: DeviceReadiness = deviceReadiness(view),
 ): DeviceCheck[] {
     const { usb } = view;

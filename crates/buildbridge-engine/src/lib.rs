@@ -7,18 +7,21 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use buildbridge_contract::{
-    AppleArchivePayload, BuildLogLine, ClaimedBuild, CompleteBuildRequest, CompletionStatus,
-    HeartbeatRequest, LogStream, MachineReport, PROTOCOL_VERSION, PairRunnerRequest,
-    RealtimeAuthorizationRequest, RealtimeConfiguration, valid_git_ref,
+    AndroidReleasePayload, AppleArchivePayload, BuildKind, BuildLogLine, ClaimedBuild,
+    CompleteBuildRequest, CompletionStatus, HeartbeatRequest, LogStream, MachineReport,
+    PROTOCOL_VERSION, PairRunnerRequest, RealtimeAuthorizationRequest, RealtimeConfiguration,
+    valid_git_ref,
 };
-pub use buildbridge_docker_osx::{
-    AppleArchiveArtifact, AppleArchiveProgress, AppleArchiveResult, AppleDeviceRunProgress,
-    AppleDeviceRunResult, AppleProjectProgress, AppleSmokeBuildResult, AppleWorkspaceSyncResult,
-    ContainerState, GuestDiagnostics, GuestEnvFiles, GuestOptimization, GuestSshStatus,
-    GuestTrustState, HostPrerequisites, MacBuilderConfig, MacOsRelease, MachineProvider,
-    OperationScope, PodfileLockChanges,
-    RuntimeStatus, SigningProvisioningProgress, SigningProvisioningResult, UnsignedBuildTarget,
-    XcodeImportProgress,
+pub use buildbridge_machines::{
+    AndroidArtifact, AndroidBuildPhase, AndroidBuildProgress, AndroidBuildResult,
+    AndroidKeystoreSummary, AndroidReleasePhase, AndroidReleaseProgress, AndroidReleaseResult,
+    AndroidSigningMaterial, AndroidToolchainSummary, AppleArchiveArtifact, AppleArchiveProgress,
+    AppleArchiveResult, AppleDeviceRunProgress, AppleDeviceRunResult, AppleProjectProgress,
+    AppleSmokeBuildResult, ContainerState, GuestDiagnostics, GuestEnvFiles, GuestOptimization,
+    GuestSshStatus, GuestTrustState, HostPrerequisites, MacOsRelease, MachineConfig,
+    MachinePlatform, MachineProvider, OperationScope, PodfileLockChanges, RuntimeStatus,
+    SigningProvisioningProgress, SigningProvisioningResult, UnsignedBuildTarget,
+    WorkspaceSyncResult, XcodeImportProgress,
 };
 use buildbridge_runner::{ApiClient, execute};
 use keyring::Entry;
@@ -29,6 +32,7 @@ use crate::machines::{MachinePaths, StoredMachine};
 mod engine;
 pub use engine::*;
 
+mod android_builds;
 pub mod apple_api;
 mod apple_profiles;
 mod builds;
@@ -46,6 +50,7 @@ mod signing_kits;
 mod templates;
 mod usb;
 mod views;
+pub use android_builds::*;
 pub use apple_profiles::*;
 pub use builds::*;
 pub use certificates::*;
@@ -76,10 +81,14 @@ const DEVICE_RUN_PROGRESS_EVENT: &str = "machine-device-progress";
 const CONTAINER_REBUILD_PROGRESS_EVENT: &str = "machine-container-rebuild-progress";
 const USB_ATTACH_PROGRESS_EVENT: &str = "machine-usb-attach-progress";
 const TEMPLATE_PROGRESS_EVENT: &str = "machine-template-progress";
+const ANDROID_BUILD_PROGRESS_EVENT: &str = "machine-android-build-progress";
+const ANDROID_RELEASE_PROGRESS_EVENT: &str = "machine-android-release-progress";
 
 const CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop";
-const MAC_BUILDER_CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop.macos-builder";
-const MAC_BUILDER_CREDENTIAL_ACCOUNT: &str = "default";
+/// The vault entry every signing kit lives in. The value predates the second platform and stays
+/// as it is: it is the name under which existing hosts hold their kits.
+const SIGNING_KIT_CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop.macos-builder";
+const SIGNING_KIT_CREDENTIAL_ACCOUNT: &str = "default";
 /// Identifier given to the kit migrated from the pre-registry vault record.
 const DEFAULT_SIGNING_KIT_ID: &str = "default";
 /// Upper bound on stored kits; each one holds credentials for a developer team.
@@ -135,7 +144,9 @@ pub enum SigningHealth {
 #[serde(rename_all = "camelCase")]
 pub struct MachineSummary {
     id: String,
-    config: MacBuilderConfig,
+    config: MachineConfig,
+    /// What the machine builds for, decided by its provider.
+    platform: MachinePlatform,
     #[ts(type = "number")]
     created_at_epoch_seconds: u64,
     state: ContainerState,
@@ -244,6 +255,17 @@ pub struct StoredSigningKit {
     /// a hand-supplied file and cached here.
     #[serde(default)]
     development_certificate_serial_number: Option<String>,
+    /// The Android upload key: a keystore on this host, the alias of the key in it, and the
+    /// two passwords. A kit may hold this beside its Apple material or on its own.
+    #[serde(default)]
+    android_keystore_path: Option<String>,
+    #[serde(default)]
+    android_keystore_password: Option<String>,
+    #[serde(default)]
+    android_key_alias: Option<String>,
+    /// `None` means the key password is the keystore password, which a PKCS12 keystore requires.
+    #[serde(default)]
+    android_key_password: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, TS)]
@@ -272,6 +294,15 @@ pub struct SigningKitInput {
     development_certificate_path: String,
     #[serde(default)]
     development_certificate_password: String,
+    /// The Android upload key. Blank keeps what is stored, like every other field.
+    #[serde(default)]
+    android_keystore_path: String,
+    #[serde(default)]
+    android_keystore_password: String,
+    #[serde(default)]
+    android_key_alias: String,
+    #[serde(default)]
+    android_key_password: String,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -303,6 +334,12 @@ pub struct SigningKitSummary {
     development_certificate_configured: bool,
     development_certificate_name: Option<String>,
     development_certificate_password_stored: bool,
+    /// The Android upload key, by file name and alias; its passwords only as held or not.
+    android_keystore_configured: bool,
+    android_keystore_name: Option<String>,
+    android_key_alias: Option<String>,
+    android_keystore_password_stored: bool,
+    android_key_password_stored: bool,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -602,15 +639,15 @@ pub struct MacGuestAccessView {
     ssh: GuestSshStatus,
     diagnostics: GuestDiagnostics,
     /// The phones the guest saw at its last listing; empty until one is requested.
-    devices: Vec<buildbridge_docker_osx::GuestDevice>,
+    devices: Vec<buildbridge_machines::GuestDevice>,
 }
 
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
-pub struct MacBuilderView {
+pub struct MachineView {
     machine_id: String,
-    profile: MacBuilderConfig,
+    profile: MachineConfig,
     /// Where the machine's screen is served, when its provider shows it as a web page.
     display_url: Option<String>,
     busy_operation: Option<String>,
@@ -631,13 +668,128 @@ pub struct MacBuilderView {
     archive_error: Option<String>,
     logs: Vec<String>,
     /// USB passthrough: the host's phones and rule, the container's access, the attachment.
-    usb: buildbridge_docker_osx::MachineUsbStatus,
+    usb: buildbridge_machines::MachineUsbStatus,
     /// The last run on a phone, kept until cleared; bound to the container like signing.
     device_run: Option<AppleDeviceRunResult>,
     /// The last failed device run, retained like `archive_error` until cleared.
     device_run_error: Option<String>,
     /// The template this machine was cloned from, if any: its clone bootstraps from it.
     template: Option<MachineTemplateRef>,
+    /// Everything an Android machine has instead of a guest: present only on one.
+    android: Option<AndroidMachineView>,
+}
+
+/// What an Android machine carries: the approved project and what was last built from it, the
+/// retained signed release, and the failure kept from the last release attempt.
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidMachineView {
+    workspace: Option<StoredAndroidWorkspace>,
+    release: Option<AndroidReleaseResult>,
+    /// The env set the retained release was built with, if any.
+    release_env_set: Option<String>,
+    release_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct ApproveAndroidWorkspaceInput {
+    path: String,
+}
+
+/// The project approved on an Android machine: a Capacitor project with its Android platform
+/// committed, named by its package and by the application identifier its release build type
+/// declares.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredAndroidWorkspace {
+    local_path: String,
+    name: String,
+    /// The `applicationId` of the app module, read from its Gradle script; `None` when the
+    /// script computes it.
+    application_id: Option<String>,
+    last_snapshot_sha256: Option<String>,
+    #[ts(type = "number | null")]
+    last_sync_file_count: Option<u64>,
+    #[ts(type = "number | null")]
+    last_sync_bytes: Option<u64>,
+    last_build_succeeded: bool,
+    /// What the last debug build produced and built with; `None` until one succeeds.
+    #[serde(default)]
+    last_build: Option<AndroidBuildResult>,
+    #[serde(default)]
+    last_source: Option<WorkspaceSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredAndroidRelease {
+    container_id: String,
+    snapshot_sha256: String,
+    result: AndroidReleaseResult,
+    #[serde(default)]
+    env_set_name: Option<String>,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncAndroidWorkspaceResult {
+    view: MachineView,
+    sync: WorkspaceSyncResult,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct RunAndroidBuildResult {
+    view: MachineView,
+    build: AndroidBuildResult,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct RunAndroidReleaseResult {
+    view: MachineView,
+    release: AndroidReleaseResult,
+}
+
+/// Creating an upload key for a kit: the password the person chooses (and must keep), the
+/// alias of the key, and the name that goes into its certificate.
+#[derive(Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAndroidKeystoreInput {
+    password: String,
+    #[serde(default)]
+    key_alias: String,
+    #[serde(default)]
+    certificate_name: String,
+    confirmed: bool,
+}
+
+impl std::fmt::Debug for CreateAndroidKeystoreInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreateAndroidKeystoreInput")
+            .field("key_alias", &self.key_alias)
+            .field("certificate_name", &self.certificate_name)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAndroidKeystoreResult {
+    keystore: AndroidKeystoreSummary,
+    kit: SigningKitSummary,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -652,7 +804,7 @@ pub struct AttachUsbDeviceInput {
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportMacXcodeResult {
-    view: MacBuilderView,
+    view: MachineView,
     installed_path: String,
     activation_commands: Vec<String>,
 }
@@ -661,8 +813,8 @@ pub struct ImportMacXcodeResult {
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncAppleWorkspaceResult {
-    view: MacBuilderView,
-    sync: AppleWorkspaceSyncResult,
+    view: MachineView,
+    sync: WorkspaceSyncResult,
 }
 
 /// The guest's refreshed Podfile.lock adopted into the approved project: what changed, where it
@@ -671,7 +823,7 @@ pub struct SyncAppleWorkspaceResult {
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct AdoptPodfileLockResult {
-    view: MacBuilderView,
+    view: MachineView,
     changes: PodfileLockChanges,
     host_path: String,
     backup_path: String,
@@ -696,7 +848,7 @@ pub struct RunAppleSmokeBuildInput {
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct RunAppleSmokeBuildResult {
-    view: MacBuilderView,
+    view: MachineView,
     build: AppleSmokeBuildResult,
 }
 
@@ -704,7 +856,7 @@ pub struct RunAppleSmokeBuildResult {
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct RunAppleArchiveResult {
-    view: MacBuilderView,
+    view: MachineView,
     archive: AppleArchiveResult,
 }
 
@@ -755,10 +907,10 @@ fn credential_entry(runner_id: &str) -> Result<Entry, String> {
     Entry::new(CREDENTIAL_SERVICE, runner_id).map_err(|error| error.to_string())
 }
 
-fn mac_builder_credential_entry() -> Result<Entry, String> {
+fn signing_kit_credential_entry() -> Result<Entry, String> {
     Entry::new(
-        MAC_BUILDER_CREDENTIAL_SERVICE,
-        MAC_BUILDER_CREDENTIAL_ACCOUNT,
+        SIGNING_KIT_CREDENTIAL_SERVICE,
+        SIGNING_KIT_CREDENTIAL_ACCOUNT,
     )
     .map_err(|error| error.to_string())
 }
@@ -780,6 +932,10 @@ mod tests {
             guest_keychain_password: String::new(),
             development_certificate_path: String::new(),
             development_certificate_password: String::new(),
+            android_keystore_path: String::new(),
+            android_keystore_password: String::new(),
+            android_key_alias: String::new(),
+            android_key_password: String::new(),
         }
     }
 
@@ -816,7 +972,7 @@ mod tests {
         );
         assert!(hinted.starts_with(&refusal));
         assert!(hinted.contains("Dist kit already holds a distribution identity"));
-        assert!(hinted.contains("attach that kit"));
+        assert!(hinted.contains("attach those credentials"));
 
         let two = with_other_kit_hint(
             refusal.clone(),
@@ -979,6 +1135,10 @@ mod tests {
             development_certificate_path: None,
             development_certificate_password: None,
             development_certificate_serial_number: None,
+            android_keystore_path: None,
+            android_keystore_password: None,
+            android_key_alias: None,
+            android_key_password: None,
         };
 
         let summary = summarize_signing_kit(&secrets);
@@ -1016,6 +1176,10 @@ mod tests {
             development_certificate_path: None,
             development_certificate_password: None,
             development_certificate_serial_number: None,
+            android_keystore_path: None,
+            android_keystore_password: None,
+            android_key_alias: None,
+            android_key_password: None,
         };
         let incoming = StoredSigningKit {
             id: String::new(),
@@ -1044,6 +1208,31 @@ mod tests {
     }
 
     #[test]
+    fn a_kit_saved_without_a_keychain_password_gets_one_invented() {
+        let mut kit = StoredSigningKit {
+            id: "team".to_string(),
+            name: "Team".to_string(),
+            ..StoredSigningKit::default()
+        };
+        invent_keychain_password(&mut kit).expect("the random source is readable");
+        let invented = kit.guest_keychain_password.clone().expect("invented");
+        assert_eq!(invented.len(), 32);
+        assert!(invented.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(kit_is_complete(&StoredSigningKit {
+            app_store_connect_key_id: Some("KEYID12345".to_string()),
+            app_store_connect_issuer_id: Some("issuer".to_string()),
+            app_store_connect_private_key: Some("-----BEGIN PRIVATE KEY-----".to_string()),
+            ..kit.clone()
+        }));
+
+        // One someone typed is theirs and stays.
+        kit.guest_keychain_password = Some("typed".to_string());
+        invent_keychain_password(&mut kit).expect("nothing to invent");
+        assert_eq!(kit.guest_keychain_password.as_deref(), Some("typed"));
+        assert_ne!(generated_password().unwrap(), generated_password().unwrap());
+    }
+
+    #[test]
     fn a_kit_needs_a_name() {
         let input = SigningKitInput {
             name: "   ".to_string(),
@@ -1052,7 +1241,7 @@ mod tests {
 
         assert_eq!(
             normalize_signing_kit(input).expect_err("a blank name must fail"),
-            "Give the signing kit a name of 1 to 60 characters."
+            "Give the signing credentials a name of 1 to 60 characters."
         );
     }
 
@@ -1386,7 +1575,7 @@ mod tests {
 
         assert_eq!(kits.kits.len(), 1);
         assert_eq!(kits.kits[0].id, DEFAULT_SIGNING_KIT_ID);
-        assert_eq!(kits.kits[0].name, "Signing kit");
+        assert_eq!(kits.kits[0].name, "Signing credentials");
         assert_eq!(
             kits.kits[0].signing_certificate_path.as_deref(),
             Some("/secure/dist.p12"),
@@ -1419,7 +1608,7 @@ mod tests {
             kits.kits[1].id, DEFAULT_SIGNING_KIT_ID,
             "a blank id is filled in"
         );
-        assert_eq!(kits.kits[1].name, "Signing kit");
+        assert_eq!(kits.kits[1].name, "Signing credentials");
     }
 
     #[test]

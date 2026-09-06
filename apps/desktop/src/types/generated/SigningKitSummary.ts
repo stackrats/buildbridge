@@ -7,4 +7,8 @@ export type SigningKitSummary = { id: string, name: string, appStoreConnectConfi
 /**
  * Machines currently attached to this kit, by display name.
  */
-attachedMachines: Array<string>, developmentCertificateConfigured: boolean, developmentCertificateName: string | null, developmentCertificatePasswordStored: boolean, };
+attachedMachines: Array<string>, developmentCertificateConfigured: boolean, developmentCertificateName: string | null, developmentCertificatePasswordStored: boolean, 
+/**
+ * The Android upload key, by file name and alias; its passwords only as held or not.
+ */
+androidKeystoreConfigured: boolean, androidKeystoreName: string | null, androidKeyAlias: string | null, androidKeystorePasswordStored: boolean, androidKeyPasswordStored: boolean, };

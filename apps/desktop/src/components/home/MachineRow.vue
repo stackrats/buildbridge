@@ -5,6 +5,7 @@ import { ArrowRight, Play } from '@lucide/vue';
 import { computed } from 'vue';
 
 import { machineStateBadge, machineStateLabel } from '../../lib/status';
+import { platformLabel } from '../../model/providers';
 import { focusStep } from '../../model/steps';
 import { busyKeyLabel, useMachinesStore } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
@@ -21,7 +22,10 @@ const machines = useMachinesStore();
 const host = computed(() => machines.host.value);
 const steps = computed(() => machines.journey(machine.id));
 const focus = computed(() => focusStep(steps.value));
-const archive = computed(() => steps.value.find((step) => step.id === 'archive') ?? null);
+// The signed output: the archive on a macOS machine, the release on an Android one.
+const archive = computed(
+    () => steps.value.find((step) => step.id === 'archive' || step.id === 'release') ?? null,
+);
 
 const canStart = computed(
     () =>
@@ -88,7 +92,7 @@ const primary = computed(() => {
         label: 'Build again',
         ink: false,
         start: false,
-        action: () => ui.openMachine(machine.id, 'archive'),
+        action: () => ui.openMachine(machine.id, archive.value?.id ?? 'archive'),
     };
 });
 
@@ -119,7 +123,8 @@ async function startAndOpen(): Promise<void> {
                     </Badge>
                 </div>
                 <p class="mt-1 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
-                    {{ machine.config.memoryGib }} GiB · {{ machine.config.cpuCores }} cores
+                    {{ platformLabel[machine.platform] }} · {{ machine.config.memoryGib }} GiB ·
+                    {{ machine.config.cpuCores }} cores
                     <template v-if="machine.workspaceName"> · {{ machine.workspaceName }}</template>
                     <template v-if="machine.signingKitName">
                         · {{ machine.signingKitName }}</template

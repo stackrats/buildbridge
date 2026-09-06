@@ -57,7 +57,7 @@ function canCopy(item: KeyValueItem): boolean {
                     :text="String(item.value)"
                     :what="`Copy the ${item.label.toLowerCase()}`"
                     size="iconXs"
-                    class="opacity-45 transition-opacity group-hover:opacity-100 motion-reduce:transition-none"
+                    class="opacity-45 group-hover:opacity-100"
                 />
             </dt>
             <dd

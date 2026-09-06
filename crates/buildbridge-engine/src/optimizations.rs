@@ -31,11 +31,11 @@ pub async fn list_guest_optimizations(
     machine_id: String,
 ) -> Result<GuestOptimizationsView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
-    let view = build_mac_builder_view(app, &paths).await?;
+    let view = build_machine_view(app, &paths).await?;
     let guest_ready = view.runtime.state == ContainerState::Running
         && view.guest.ssh.trust == GuestTrustState::Trusted
         && view.guest.diagnostics.authenticated;
-    let catalogue = buildbridge_docker_osx::guest_optimizations();
+    let catalogue = buildbridge_machines::guest_optimizations();
     if !guest_ready {
         return Ok(GuestOptimizationsView {
             available: false,
@@ -59,7 +59,7 @@ pub async fn list_guest_optimizations(
     let identity = paths.guest_identity();
     let known_hosts = paths.known_hosts();
     let states = tokio::task::spawn_blocking(move || {
-        buildbridge_docker_osx::check_guest_optimizations(
+        buildbridge_machines::check_guest_optimizations(
             ssh_port,
             &access.username,
             &identity,
@@ -104,10 +104,10 @@ pub async fn apply_guest_optimization(
     if !input.confirmed {
         return Err("Confirm the optimization before applying it.".to_string());
     }
-    let optimization = buildbridge_docker_osx::guest_optimization(&input.optimization_id)
+    let optimization = buildbridge_machines::guest_optimization(&input.optimization_id)
         .ok_or_else(|| "That optimization is not in the catalogue.".to_string())?;
     let paths = MachinePaths::resolve(app, &machine_id)?;
-    let view = build_mac_builder_view(app, &paths).await?;
+    let view = build_machine_view(app, &paths).await?;
     if view.runtime.state != ContainerState::Running {
         return Err("Start the macOS machine first.".to_string());
     }
@@ -124,8 +124,8 @@ pub async fn apply_guest_optimization(
     let known_hosts = paths.known_hosts();
     let optimization_id = optimization.id.to_string();
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
-        buildbridge_docker_osx::apply_guest_optimization(
+        let _operation = buildbridge_machines::enter_operation(scope);
+        buildbridge_machines::apply_guest_optimization(
             ssh_port,
             &access.username,
             &identity,

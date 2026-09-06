@@ -1,6 +1,6 @@
-// Every managed macOS machine, each with its own session: the last backend view, the client's
-// in-flight operation, live progress for each long operation, and bounded logs. Sessions are
-// keyed by machine id so switching machines in the sidebar never loses state.
+// Every managed machine, macOS or Android, each with its own session: the last backend view,
+// the client's in-flight operation, live progress for each long operation, and bounded logs.
+// Sessions are keyed by machine id so switching machines in the sidebar never loses state.
 
 import { computed, reactive } from 'vue';
 
@@ -11,6 +11,8 @@ import type { LogLine } from '../components/ui/LogView.vue';
 import { deriveJourney, summarizeJourney, type JourneyStep } from '../model/steps';
 import type {
     AdoptPodfileLockResult,
+    AndroidBuildProgress,
+    AndroidReleaseProgress,
     AppleArchiveProgress,
     AppleDeviceRunProgress,
     AppleProjectProgress,
@@ -20,8 +22,8 @@ import type {
     GuestOptimizationsView,
     ImportMacXcodeResult,
     LaunchProgress,
-    MacBuilderConfig,
-    MacBuilderView,
+    MachineConfig,
+    MachineView,
     MachineListView,
     MachineTemplateSummary,
     SafariInspectorResult,
@@ -29,6 +31,7 @@ import type {
     TemplateSaveProgress,
     UnsignedBuildTarget,
     UsbAttachProgress,
+    XcodeDownloadProgress,
     XcodeImportProgress,
 } from '../types/backend';
 
@@ -48,7 +51,7 @@ const LOG_LIMIT = 600;
 
 export interface MachineSession {
     id: string;
-    view: MacBuilderView | null;
+    view: MachineView | null;
     loading: boolean;
     error: string | null;
     notice: string | null;
@@ -64,9 +67,15 @@ export interface MachineSession {
     launch: LaunchProgress | null;
     xcode: XcodeImportProgress | null;
     xcodeImport: ImportMacXcodeResult | null;
+    /** An Xcode archive downloading through the app's own window, until it is imported. */
+    xcodeDownload: XcodeDownloadProgress | null;
     signing: SigningProvisioningProgress | null;
     project: AppleProjectProgress | null;
     archive: AppleArchiveProgress | null;
+    /** An Android machine's sync and debug build; they share the build log. */
+    androidBuild: AndroidBuildProgress | null;
+    /** An Android machine's signed release; it shares the archive log. */
+    androidRelease: AndroidReleaseProgress | null;
     usbMigration: DiskMigrationProgress | null;
     /** Rebuilding the container from its profile. */
     rebuild: ContainerRebuildProgress | null;
@@ -82,6 +91,8 @@ export interface MachineSession {
     lockAdoption: AdoptPodfileLockResult | null;
     /** Saving this machine as a template, while it runs. */
     templateSave: TemplateSaveProgress | null;
+    /** The name the template is being saved under; kept after a failure so it can be named. */
+    templateSaveName: string | null;
     /** A clone's bootstrap was tried once this session; a failure then waits for the person. */
     templateAdoptTried: boolean;
     activity: LogLine[];
@@ -103,6 +114,8 @@ const state = reactive({
 let unlisteners: Unlisten[] = [];
 let listeningPromise: Promise<void> | null = null;
 let refreshTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+/** Machines the list last showed saving a template from another BuildBridge process. */
+let foreignTemplateSaves = new Set<string>();
 
 function createSession(id: string): MachineSession {
     return {
@@ -120,9 +133,12 @@ function createSession(id: string): MachineSession {
         launch: null,
         xcode: null,
         xcodeImport: null,
+        xcodeDownload: null,
         signing: null,
         project: null,
         archive: null,
+        androidBuild: null,
+        androidRelease: null,
         usbMigration: null,
         rebuild: null,
         usbAttach: null,
@@ -133,6 +149,7 @@ function createSession(id: string): MachineSession {
         deviceLog: [],
         lockAdoption: null,
         templateSave: null,
+        templateSaveName: null,
         templateAdoptTried: false,
         activity: [],
         lastFailure: null,
@@ -148,7 +165,7 @@ function note(target: MachineSession, text: string, tone: LogLine['tone'] = 'sys
     pushBounded(target.activity, { text: `${formatTime(Date.now())}  ${text}`, tone }, LOG_LIMIT);
 }
 
-function applyView(target: MachineSession, view: MacBuilderView): void {
+function applyView(target: MachineSession, view: MachineView): void {
     target.view = view;
     maybeAdoptTemplate(target);
 }
@@ -191,6 +208,28 @@ async function loadTemplates(): Promise<void> {
     }
 }
 
+/**
+ * A save another BuildBridge process runs — the command line beside this window — is known
+ * only by the lock it holds, since no event from that process reaches this one. When the lock
+ * is gone the templates are read again, so the one it made appears.
+ */
+function noticeForeignTemplateSaves(): void {
+    const current = new Set(
+        (state.list?.machines ?? [])
+            .filter(
+                (machine) =>
+                    machine.busyOperation === 'saving_template' &&
+                    state.sessions[machine.id]?.operation !== 'save-template',
+            )
+            .map((machine) => machine.id),
+    );
+    const finished = [...foreignTemplateSaves].some((id) => !current.has(id));
+    foreignTemplateSaves = current;
+    if (finished) {
+        void loadTemplates();
+    }
+}
+
 function adoptTemplate(id: string) {
     return runOperation(id, 'template-adopt', () => useBackend().adoptTemplateGuest(id), {
         started: 'Pinning the template’s identity and installing this machine’s key',
@@ -209,6 +248,7 @@ async function loadList(): Promise<void> {
                 delete state.sessions[id];
             }
         }
+        noticeForeignTemplateSaves();
     } catch (error) {
         state.listError = describeError(error);
     } finally {
@@ -249,7 +289,7 @@ function scheduleRefresh(id: string): void {
     }, 150);
 }
 
-type OperationResult = MacBuilderView | { view: MacBuilderView };
+type OperationResult = MachineView | { view: MachineView };
 
 /** Operations return the machine's new view, or nothing when they changed nothing about it. */
 type OperationOutcome = OperationResult | undefined;
@@ -336,6 +376,21 @@ async function listenForEvents(): Promise<void> {
             backend.onXcodeProgress((event) => {
                 session(event.machineId).xcode = event;
             }),
+            backend.onXcodeDownloadProgress((event) => {
+                const target = session(event.machineId);
+                const wasFinished = target.xcodeDownload?.state === 'finished';
+                target.xcodeDownload = event;
+                if (event.state === 'finished' && !wasFinished) {
+                    note(target, `Downloaded ${event.fileName} from Apple.`);
+                    // The archive is here: import it without another click, unless the machine is
+                    // busy, in which case the step offers the import.
+                    if (target.operation === null && target.view?.busyOperation == null) {
+                        void useMachinesStore().importXcode(event.machineId, event.path);
+                    }
+                } else if (event.state === 'failed') {
+                    note(target, `The download of ${event.fileName} from Apple failed.`, 'stderr');
+                }
+            }),
             backend.onSigningProgress((event) => {
                 session(event.machineId).signing = event;
             }),
@@ -358,6 +413,36 @@ async function listenForEvents(): Promise<void> {
                 const target = session(event.machineId);
                 const phaseChanged = target.archive?.phase !== event.phase;
                 target.archive = event;
+                if (phaseChanged) {
+                    pushBounded(
+                        target.archiveLog,
+                        { text: `— ${event.detail}`, tone: 'system' },
+                        LOG_LIMIT,
+                    );
+                }
+                if (event.logLine) {
+                    pushBounded(target.archiveLog, { text: event.logLine }, LOG_LIMIT);
+                }
+            }),
+            backend.onAndroidBuildProgress((event) => {
+                const target = session(event.machineId);
+                const phaseChanged = target.androidBuild?.phase !== event.phase;
+                target.androidBuild = event;
+                if (phaseChanged) {
+                    pushBounded(
+                        target.buildLog,
+                        { text: `— ${event.detail}`, tone: 'system' },
+                        LOG_LIMIT,
+                    );
+                }
+                if (event.logLine) {
+                    pushBounded(target.buildLog, { text: event.logLine }, LOG_LIMIT);
+                }
+            }),
+            backend.onAndroidReleaseProgress((event) => {
+                const target = session(event.machineId);
+                const phaseChanged = target.androidRelease?.phase !== event.phase;
+                target.androidRelease = event;
                 if (phaseChanged) {
                     pushBounded(
                         target.archiveLog,
@@ -440,6 +525,14 @@ async function listenForEvents(): Promise<void> {
     return listeningPromise;
 }
 
+/** Whether a machine is an Android toolchain, from its view or the list row. */
+function androidMachine(id: string): boolean {
+    const provider =
+        state.sessions[id]?.view?.profile.provider ??
+        state.list?.machines.find((machine) => machine.id === id)?.config.provider;
+    return provider === 'android_toolchain';
+}
+
 /** The step the in-flight or native operation belongs to, for the step lists. */
 function runningStepFor(id: string): string | null {
     const target = state.sessions[id];
@@ -457,6 +550,97 @@ function runningStepFor(id: string): string | null {
 function runningOperationFor(id: string): string | null {
     const target = state.sessions[id];
     return target?.operation ?? target?.view?.busyOperation ?? null;
+}
+
+/** Whether the running operation has arrived at its live stage: the app is up on the phone. */
+function runningLiveFor(id: string): boolean {
+    const target = state.sessions[id];
+    return runningStepFor(id) === 'run-device' && target?.device?.phase === 'running';
+}
+
+/**
+ * A template being saved from one machine: this client's, with its name and progress, or
+ * another BuildBridge process's, known only by the lock it holds.
+ */
+export interface TemplateSaveActivity {
+    machineId: string;
+    machineName: string;
+    /** Unknown for a save another process runs. */
+    name: string | null;
+    progress: TemplateSaveProgress | null;
+    /** Started by this client, so it can be stopped from here. */
+    own: boolean;
+    cancelling: boolean;
+}
+
+export interface TemplateSaveFailure {
+    machineId: string;
+    machineName: string;
+    name: string | null;
+    message: string;
+    at: number;
+}
+
+function machineNameFor(id: string): string {
+    return (
+        state.sessions[id]?.view?.profile.name ??
+        state.list?.machines.find((machine) => machine.id === id)?.config.name ??
+        id
+    );
+}
+
+/** Every template save under way, from this client or another process, in list order. */
+function templateSavesFor(): TemplateSaveActivity[] {
+    const saves: TemplateSaveActivity[] = [];
+    for (const machine of state.list?.machines ?? []) {
+        const target = state.sessions[machine.id];
+        if (target?.operation === 'save-template') {
+            saves.push({
+                machineId: machine.id,
+                machineName: machine.config.name,
+                name: target.templateSaveName,
+                progress: target.templateSave,
+                own: true,
+                cancelling: target.cancelling,
+            });
+        } else if (machine.busyOperation === 'saving_template') {
+            saves.push({
+                machineId: machine.id,
+                machineName: machine.config.name,
+                name: null,
+                progress: null,
+                own: false,
+                cancelling: false,
+            });
+        }
+    }
+    return saves;
+}
+
+/**
+ * Saves that failed and have not been followed by a successful operation on their machine,
+ * the lifetime a step gives its own failure.
+ */
+function templateSaveFailuresFor(): TemplateSaveFailure[] {
+    return Object.values(state.sessions).flatMap((target) => {
+        const failure = target.lastFailure;
+        if (
+            !failure ||
+            failure.operation !== 'save-template' ||
+            target.operation === 'save-template'
+        ) {
+            return [];
+        }
+        return [
+            {
+                machineId: target.id,
+                machineName: machineNameFor(target.id),
+                name: target.templateSaveName,
+                message: failure.message,
+                at: failure.at,
+            },
+        ];
+    });
 }
 
 export function useMachinesStore() {
@@ -484,6 +668,12 @@ export function useMachinesStore() {
         runningStep: runningStepFor,
         /** The operation itself, so a step that hosts several can say which one. */
         runningOperation: runningOperationFor,
+        /** Whether that operation has arrived at its live stage: the app up on the phone. */
+        runningLive: runningLiveFor,
+        /** Template saves under way on any machine, for the Templates page and the sidebar. */
+        templateSaves: templateSavesFor,
+        /** Template saves that failed, until their machine's next operation succeeds. */
+        templateSaveFailures: templateSaveFailuresFor,
 
         /**
          * The machine's journey: exact once its view has been probed, coarse from the list
@@ -495,6 +685,7 @@ export function useMachinesStore() {
                 return deriveJourney(view, {
                     runningStep: runningStepFor(id),
                     runningOperation: runningOperationFor(id),
+                    runningLive: runningLiveFor(id),
                 });
             }
             const summary = state.list?.machines.find((machine) => machine.id === id);
@@ -504,7 +695,7 @@ export function useMachinesStore() {
         },
 
         async createMachine(
-            profile: MacBuilderConfig,
+            profile: MachineConfig,
             templateId: string | null = null,
         ): Promise<string | null> {
             const previous = new Set(state.list?.machines.map((machine) => machine.id));
@@ -532,9 +723,12 @@ export function useMachinesStore() {
         launch: (id: string) => {
             // Progress kept from an earlier start would label this one until its first event.
             session(id).launch = null;
+            const android = androidMachine(id);
             return runOperation(id, 'launch', () => useBackend().launchMachine(id), {
                 started: 'Starting the machine',
-                finished: 'The macOS machine is running; the Install step shows what comes next.',
+                finished: android
+                    ? 'The Android toolchain is running; approve a project next.'
+                    : 'The macOS machine is running; the Install step shows what comes next.',
             });
         },
         loadTemplates,
@@ -542,13 +736,19 @@ export function useMachinesStore() {
             session(id).templateAdoptTried = true;
             return adoptTemplate(id);
         },
-        /** Shuts macOS down and saves the disk; the machine is stopped afterwards. */
+        /**
+         * Shuts macOS down and saves the disk; the machine is stopped afterwards. The save runs
+         * on its own for minutes, so the caller need not wait on it: the progress shows on the
+         * machine's launch step, on the Templates page and in the sidebar until it ends.
+         */
         saveTemplate: (id: string, name: string) => {
-            session(id).templateSave = null;
             return runOperation(
                 id,
                 'save-template',
                 async () => {
+                    const target = session(id);
+                    target.templateSave = null;
+                    target.templateSaveName = name;
                     const template = await useBackend().saveMachineTemplate(id, name);
                     state.templates = [
                         template,
@@ -559,6 +759,7 @@ export function useMachinesStore() {
                 {
                     started: `Saving ${name}; macOS shuts down first and the machine stays stopped`,
                     finished: `Template ${name} saved. Start the machine again when you need it.`,
+                    stopped: `Saving ${name} was stopped; the partial template was removed and the machine stays stopped.`,
                 },
             ).then(async (result) => {
                 await refreshMachine(id, { silent: true });
@@ -590,7 +791,7 @@ export function useMachinesStore() {
                 finished: 'The machine is running again. Attach the phone once it is up.',
             });
         },
-        configure: (id: string, profile: MacBuilderConfig) =>
+        configure: (id: string, profile: MachineConfig) =>
             runOperation(id, 'configure', () => useBackend().configureMachine(id, profile), {
                 finished: 'Machine profile saved.',
             }),
@@ -633,6 +834,17 @@ export function useMachinesStore() {
             runOperation(id, 'forget-trust', () => useBackend().forgetGuestTrust(id), {
                 finished: 'Identity pin removed. Verify and trust the new fingerprint.',
             }),
+        /** Opens Apple's downloads page in the app; the `.xip` then arrives on its own. */
+        downloadXcode: async (id: string, query: string) => {
+            const target = session(id);
+            target.error = null;
+            try {
+                await useBackend().downloadXcode(id, query);
+                note(target, `Apple's downloads page opened, searched for ${query}.`);
+            } catch (error) {
+                target.error = describeError(error);
+            }
+        },
         importXcode: async (id: string, path: string) => {
             const target = session(id);
             target.xcode = null;
@@ -648,6 +860,9 @@ export function useMachinesStore() {
             );
             if (result) {
                 target.xcodeImport = result;
+                if (target.xcodeDownload?.path === path) {
+                    target.xcodeDownload = null;
+                }
             }
             return result;
         },
@@ -668,23 +883,101 @@ export function useMachinesStore() {
             );
         },
         approveWorkspace: (id: string, path: string) =>
-            runOperation(id, 'approve', () => useBackend().approveWorkspace(id, path), {
-                finished: 'Project approved. Nothing has been copied yet.',
-            }),
+            runOperation(
+                id,
+                'approve',
+                () =>
+                    androidMachine(id)
+                        ? useBackend().approveAndroidWorkspace(id, path)
+                        : useBackend().approveWorkspace(id, path),
+                { finished: 'Project approved. Nothing has been copied yet.' },
+            ),
         clearWorkspace: (id: string) =>
-            runOperation(id, 'clear-workspace', () => useBackend().clearWorkspace(id), {
-                finished: 'Project approval removed. The host project was not modified.',
-            }),
+            runOperation(
+                id,
+                'clear-workspace',
+                () =>
+                    androidMachine(id)
+                        ? useBackend().clearAndroidWorkspace(id)
+                        : useBackend().clearWorkspace(id),
+                { finished: 'Project approval removed. The host project was not modified.' },
+            ),
         sync: async (id: string) => {
             const target = session(id);
             target.project = null;
+            target.androidBuild = null;
             target.buildLog = [];
-            return runOperation(id, 'sync', () => useBackend().syncWorkspace(id), {
-                started: 'Synchronizing source into the guest',
+            const android = androidMachine(id);
+            return runOperation(
+                id,
+                'sync',
+                () =>
+                    android
+                        ? useBackend().syncAndroidWorkspace(id)
+                        : useBackend().syncWorkspace(id),
+                {
+                    started: android
+                        ? 'Synchronizing source into the container'
+                        : 'Synchronizing source into the guest',
+                    finished: (result) =>
+                        `Synchronized ${result.sync.sourceFileCount} files into ${result.sync.guestPath}.`,
+                },
+            );
+        },
+        /** An Android machine's debug build: the counterpart of the unsigned test build. */
+        debugBuild: async (id: string) => {
+            const target = session(id);
+            target.androidBuild = null;
+            return runOperation(id, 'test-build', () => useBackend().runAndroidDebugBuild(id), {
+                started: 'Running the debug build',
                 finished: (result) =>
-                    `Synchronized ${result.sync.sourceFileCount} files into ${result.sync.guestPath}.`,
+                    `Debug build succeeded: ${result.build.applicationId} ${result.build.versionName} (${result.build.versionCode}).`,
+            }).then((result) => {
+                if (result) {
+                    for (const line of result.build.outputTail) {
+                        pushBounded(target.buildLog, { text: line }, LOG_LIMIT);
+                    }
+                }
+                return result;
             });
         },
+        signedRelease: async (id: string, envSetId: string | null) => {
+            const target = session(id);
+            target.androidRelease = null;
+            target.archiveLog = [];
+            return runOperation(id, 'release', () => useBackend().runAndroidRelease(id, envSetId), {
+                started: 'Building the signed app bundle and APK',
+                finished: (result) =>
+                    `Signed ${result.release.versionName} (${result.release.versionCode}) verified and retained.`,
+            }).then((result) => {
+                if (result) {
+                    for (const line of result.release.outputTail) {
+                        pushBounded(target.archiveLog, { text: line }, LOG_LIMIT);
+                    }
+                }
+                return result;
+            });
+        },
+        revealDebugApk: async (id: string) => {
+            const target = session(id);
+            try {
+                await useBackend().revealAndroidDebugApk(id);
+            } catch (error) {
+                target.error = describeError(error);
+            }
+        },
+        revealRelease: async (id: string) => {
+            const target = session(id);
+            try {
+                await useBackend().revealAndroidRelease(id);
+            } catch (error) {
+                target.error = describeError(error);
+            }
+        },
+        clearRelease: (id: string) =>
+            runOperation(id, 'clear-release', () => useBackend().clearAndroidRelease(id), {
+                finished: 'Retained artifacts removed.',
+            }),
         testBuild: async (id: string, buildTarget: UnsignedBuildTarget = 'device_sdk') => {
             const target = session(id);
             target.project = null;
@@ -720,8 +1013,8 @@ export function useMachinesStore() {
         attachSigningKit: (id: string, kitId: string | null) =>
             runOperation(id, 'attach-kit', () => useBackend().attachSigningKit(id, kitId), {
                 finished: kitId
-                    ? 'Signing kit attached to this machine.'
-                    : 'Signing kit detached from this machine.',
+                    ? 'Signing credentials attached to this machine.'
+                    : 'Signing credentials detached from this machine.',
             }),
         cancelOperation: async (id: string) => {
             const target = session(id);
@@ -769,8 +1062,8 @@ export function useMachinesStore() {
         attachEnvSet: (id: string, setId: string | null) =>
             runOperation(id, 'attach-env', () => useBackend().attachEnvSet(id, setId), {
                 finished: setId
-                    ? 'Env set attached. It is written into the guest at the next sync.'
-                    : 'Env set detached. The next sync runs without it.',
+                    ? 'Environment attached. It is written into the guest at the next sync.'
+                    : 'Environment detached. The next sync runs without it.',
             }),
         clearGuestSigning: (id: string) =>
             runOperation(id, 'clear-signing', () => useBackend().clearGuestSigning(id), {

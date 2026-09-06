@@ -14,6 +14,8 @@ import { computed, ref, watch } from 'vue';
 import { formatDate } from '../../lib/format';
 import { useMachinesStore } from '../../stores/machines';
 import { kitReadiness, kitShortfall } from '../../model/signing';
+import Input from '../ui/Input.vue';
+import Field from '../ui/Field.vue';
 import { useSigningStore } from '../../stores/signing';
 import type { SigningKitSummary } from '../../types/backend';
 import Badge from '../ui/Badge.vue';
@@ -70,8 +72,57 @@ async function createCertificate(): Promise<void> {
 const creatingAny = computed(
     () =>
         signing.state.creatingCertificateKitId !== null ||
-        signing.state.creatingDevelopmentCertificateKitId !== null,
+        signing.state.creatingDevelopmentCertificateKitId !== null ||
+        signing.state.creatingKeystoreKitId !== null,
 );
+
+// Creating an Android upload key: the password is the person's to keep, typed or invented here
+// and shown so it can be written down; either way it goes into the vault for signing.
+const keystoreFor = ref<SigningKitSummary | null>(null);
+const keystoreForm = ref({ password: '', confirm: '', alias: 'upload', name: '' });
+const keystorePasswordShown = ref(false);
+
+function generateKeystorePassword(): void {
+    const alphabet = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const bytes = new Uint8Array(20);
+    crypto.getRandomValues(bytes);
+    const password = Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join('');
+    keystoreForm.value.password = password;
+    keystoreForm.value.confirm = password;
+    keystorePasswordShown.value = true;
+}
+const keystoreProblem = computed(() => {
+    if (keystoreForm.value.password.length < 6) {
+        return 'Choose a password of at least six characters.';
+    }
+    if (keystoreForm.value.password !== keystoreForm.value.confirm) {
+        return 'The two passwords differ.';
+    }
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(keystoreForm.value.alias)) {
+        return 'The alias may only contain letters, digits, dots, underscores and dashes.';
+    }
+    return null;
+});
+
+function openKeystoreDialog(kit: SigningKitSummary): void {
+    keystoreForm.value = { password: '', confirm: '', alias: 'upload', name: kit.name };
+    keystorePasswordShown.value = false;
+    keystoreFor.value = kit;
+}
+
+async function createKeystore(): Promise<void> {
+    const kit = keystoreFor.value;
+    if (!kit || keystoreProblem.value) {
+        return;
+    }
+    keystoreFor.value = null;
+    await signing.createKeystore(kit.id, {
+        password: keystoreForm.value.password,
+        keyAlias: keystoreForm.value.alias,
+        certificateName: keystoreForm.value.name,
+    });
+    keystoreForm.value = { password: '', confirm: '', alias: 'upload', name: '' };
+}
 
 function createKit(): void {
     editing.value = null;
@@ -144,6 +195,17 @@ function detailsFor(kit: SigningKitSummary) {
                     : 'Not stored · optional, for iPhone builds'),
         },
         {
+            label: 'Android upload key',
+            value: kit.androidKeystoreConfigured
+                ? `${kit.androidKeystoreName ?? 'keystore'} · key ${kit.androidKeyAlias ?? '?'}${kit.androidKeystorePasswordStored ? '' : ' · password not stored'}`
+                : 'None · create one below, or edit the credentials to point at a keystore',
+            mono: kit.androidKeystoreConfigured,
+            tone:
+                kit.androidKeystoreConfigured && !kit.androidKeystorePasswordStored
+                    ? ('warn' as const)
+                    : ('default' as const),
+        },
+        {
             label: 'Added',
             value: formatDate(new Date(kit.createdAtEpochSeconds * 1000).toISOString()),
         },
@@ -164,33 +226,33 @@ const orphaned = computed(() =>
     <div class="mx-auto max-w-4xl space-y-4 p-5">
         <header class="flex items-start justify-between gap-4">
             <div>
-                <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">Signing kits</h1>
+                <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">Signing</h1>
                 <p class="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                    A kit is one set of Apple signing credentials, held in this host's
-                    operating-system vault. The simplest kit is a Team key and a keychain password:
-                    BuildBridge creates the certificates and profiles from the key as machines need
-                    them. Files exported from a Mac work too. Keep one kit per developer team,
-                    attach it to each machine, and provisioning imports it into that machine's own
-                    keychain.
+                    Signing credentials are held in this host's operating-system vault: Apple
+                    material for iOS, an upload key for Android, or both. The simplest iOS
+                    credentials are a Team key and a keychain password, from which BuildBridge
+                    creates the certificates and profiles as machines need them; files exported from
+                    a Mac work too. An Android upload key can be created here in one click. Store
+                    one per team or app and attach it to each machine.
                 </p>
             </div>
             <Button size="sm" @click="createKit">
                 <Plus class="h-3.5 w-3.5" />
-                New kit
+                New credentials
             </Button>
         </header>
 
         <Callout
             v-if="orphaned.length"
             tone="danger"
-            title="The kit these machines were provisioned from is no longer stored"
+            title="The credentials these machines were provisioned from are no longer stored"
         >
             <p>
                 {{ orphaned.map((machine) => machine.config.name).join(', ') }}
                 {{ orphaned.length === 1 ? 'has' : 'have' }} a provisioned guest keychain, but no
-                kit here matches. An operating-system keyring reset does exactly this. Store the kit
-                again below, attach it at the machine's Attach a signing kit step, then provision
-                once more.
+                credentials here match. An operating-system keyring reset does exactly this. Store
+                the credentials again below, attach them at the machine's Attach signing credentials
+                step, then provision once more.
             </p>
         </Callout>
 
@@ -201,13 +263,13 @@ const orphaned = computed(() =>
 
         <EmptyState
             v-if="!signing.kits.value.length && !signing.state.loading"
-            title="No signing kits stored"
-            description="Store a Team key (an App Store Connect API key) and a keychain password once, and BuildBridge creates the certificates and profiles it needs at Apple. Or bring the .p12 and profiles exported from a Mac. Every machine can then be attached to the kit."
+            title="No signing credentials stored"
+            description="Store a Team key (an App Store Connect API key) and a keychain password once, and BuildBridge creates the certificates and profiles it needs at Apple. Or bring the .p12 and profiles exported from a Mac. Every machine can then be attached to them."
         >
             <template #icon><KeyRound class="h-4 w-4" /></template>
             <Button size="sm" @click="createKit">
                 <Plus class="h-3.5 w-3.5" />
-                Store the first kit
+                Store credentials
             </Button>
         </EmptyState>
 
@@ -215,10 +277,9 @@ const orphaned = computed(() =>
             <template #title>
                 <span class="flex flex-wrap items-center gap-2">
                     {{ kit.name }}
-                    <Badge v-if="kitReadiness(kit).provisionable" tone="ok"
-                        >ready to provision</Badge
-                    >
-                    <Badge v-else tone="warn">incomplete</Badge>
+                    <Badge v-if="kitReadiness(kit).provisionable" tone="ok">iOS ready</Badge>
+                    <Badge v-else-if="!kitReadiness(kit).android" tone="warn">incomplete</Badge>
+                    <Badge v-if="kitReadiness(kit).android" tone="ok">Android ready</Badge>
                     <Badge
                         v-if="kitReadiness(kit).provisionable && kitReadiness(kit).archive === null"
                         tone="warn"
@@ -253,6 +314,18 @@ const orphaned = computed(() =>
                     <Smartphone v-else class="h-3.5 w-3.5" />
                     Create development certificate now
                 </Button>
+                <Button
+                    v-if="!kit.androidKeystoreConfigured"
+                    variant="outline"
+                    size="sm"
+                    title="A 2048-bit RSA upload key in a PKCS12 keystore, created in a container of the toolchain image and kept owner-only on this host"
+                    :disabled="creatingAny"
+                    @click="openKeystoreDialog(kit)"
+                >
+                    <Spinner v-if="signing.state.creatingKeystoreKitId === kit.id" />
+                    <Smartphone v-else class="h-3.5 w-3.5" />
+                    Create Android upload key
+                </Button>
                 <Button variant="outline" size="sm" @click="editKit(kit)">
                     <Pencil class="h-3.5 w-3.5" />
                     Edit
@@ -263,7 +336,7 @@ const orphaned = computed(() =>
                 </Button>
             </template>
 
-            <!-- A message about this kit sits beside the button that produced it. -->
+            <!-- A message about these credentials sits beside the button that produced it. -->
             <template v-if="signing.state.messageKitId === kit.id">
                 <Callout v-if="signing.state.error" tone="danger" class="mb-3">
                     {{ signing.state.error }}
@@ -275,19 +348,26 @@ const orphaned = computed(() =>
 
             <KeyValue :items="detailsFor(kit)" :columns="3" />
             <p
-                v-if="!kitReadiness(kit).provisionable"
+                v-if="!kitReadiness(kit).provisionable && !kitReadiness(kit).android"
                 class="mt-2 text-[11px] leading-4 text-amber-700 dark:text-amber-400"
             >
-                Not usable yet: still needs {{ kitShortfall(kit).join(' and ') }}. Edit the kit to
-                add it.
+                Not usable yet: still needs {{ kitShortfall(kit).join(' and ') }} for iOS, or an
+                upload key for Android. Edit the credentials to add either.
+            </p>
+            <p
+                v-else-if="!kitReadiness(kit).provisionable"
+                class="mt-2 text-[11px] leading-4 text-zinc-500 dark:text-zinc-400"
+            >
+                Signs Android releases. For iOS it still needs
+                {{ kitShortfall(kit).join(' and ') }}.
             </p>
             <p
                 v-else-if="kitReadiness(kit).archive === null"
                 class="mt-2 text-[11px] leading-4 text-amber-700 dark:text-amber-400"
             >
-                This kit can run Debug builds on a phone, but cannot sign an App Store archive: it
-                holds no distribution identity and no Team key to create one. Edit the kit to add
-                either.
+                These credentials can run Debug builds on a phone, but cannot sign an App Store
+                archive: they hold no distribution identity and no Team key to create one. Edit them
+                to add either.
             </p>
 
             <div class="mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-800">
@@ -309,7 +389,7 @@ const orphaned = computed(() =>
                             :text="name"
                             what="Copy the profile file name"
                             size="iconXs"
-                            class="opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 motion-reduce:transition-none"
+                            class="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
                         />
                     </li>
                 </ul>
@@ -339,15 +419,83 @@ const orphaned = computed(() =>
                     </Chip>
                 </div>
                 <p v-else class="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
-                    Not attached to any machine yet. Open a machine and attach this kit at its
-                    Attach a signing kit step.
+                    Not attached to any machine yet. Open a machine and attach these credentials at
+                    its Attach signing credentials step.
                 </p>
             </div>
         </Card>
 
         <Callout v-if="signing.kits.value.length && !anyMachines" tone="neutral">
-            Create a macOS machine to attach a kit to.
+            Create a machine to attach credentials to.
         </Callout>
+
+        <ConfirmDialog
+            :open="keystoreFor !== null"
+            title="Create an Android upload key"
+            confirm-label="Create upload key"
+            :destructive="false"
+            :confirm-disabled="keystoreProblem !== null"
+            @update:open="(value) => (keystoreFor = value ? keystoreFor : null)"
+            @confirm="createKeystore"
+        >
+            <p>
+                A 2048-bit RSA key in a PKCS12 keystore, valid for 27 years, created by
+                <span class="font-mono">keytool</span> in a container of the toolchain image and
+                stored owner-only on this host in <b>{{ keystoreFor?.name }}</b
+                >. Google Play takes it as the upload key of a new app.
+            </p>
+            <p>
+                The password goes into the vault for BuildBridge to sign with, but neither Google
+                Play nor BuildBridge can recover an upload key whose password is lost, so keep a
+                copy and back the keystore up. Let BuildBridge invent one and copy it, or type your
+                own.
+            </p>
+            <div class="grid gap-3 sm:grid-cols-2">
+                <Field label="Keystore password" required>
+                    <Input
+                        v-model="keystoreForm.password"
+                        :type="keystorePasswordShown ? 'text' : 'password'"
+                        :mono="keystorePasswordShown"
+                        autocomplete="new-password"
+                    />
+                    <template #action>
+                        <Button
+                            variant="outline"
+                            title="Fills both fields with a random password and shows it"
+                            @click="generateKeystorePassword"
+                        >
+                            Invent one
+                        </Button>
+                    </template>
+                </Field>
+                <Field
+                    :label="keystorePasswordShown ? 'Copy it somewhere safe' : 'Confirm password'"
+                    :required="!keystorePasswordShown"
+                >
+                    <Input
+                        v-if="!keystorePasswordShown"
+                        v-model="keystoreForm.confirm"
+                        type="password"
+                        autocomplete="new-password"
+                    />
+                    <div v-else class="flex h-full items-center">
+                        <CopyButton :text="keystoreForm.password" label="Copy password" />
+                    </div>
+                </Field>
+                <Field label="Key alias" hint="The key's name inside the keystore.">
+                    <Input v-model="keystoreForm.alias" mono />
+                </Field>
+                <Field label="Certificate name" hint="Goes into the certificate as its subject.">
+                    <Input v-model="keystoreForm.name" :maxlength="64" />
+                </Field>
+            </div>
+            <p
+                v-if="keystoreProblem && (keystoreForm.password || keystoreForm.confirm)"
+                class="text-[11px] text-amber-700 dark:text-amber-400"
+            >
+                {{ keystoreProblem }}
+            </p>
+        </ConfirmDialog>
 
         <AppleVerificationCard v-if="signing.kits.value.length && anyMachines" />
 
@@ -385,34 +533,37 @@ const orphaned = computed(() =>
             <p>
                 BuildBridge generates a private key on this host, asks Apple to sign it with the
                 Team key in <b>{{ certifying?.kit.name }}</b
-                >, and stores the result in the kit as a password-protected .p12. No Mac is involved
-                and nothing at Apple is revoked.
+                >, and stores the result in the credentials as a password-protected .p12. No Mac is
+                involved and nothing at Apple is revoked.
             </p>
             <p v-if="certifying?.kind === 'development'">
                 A development identity signs only Debug builds installed on iPhones registered with
-                the team; the distribution identity in the kit is untouched. The key needs the
+                the team; the distribution identity in the credentials is untouched. The key needs
+                the
                 <b>Admin</b> role at Apple, and Apple allows only a few active development
                 certificates per team; if it refuses, its reason is shown as is.
             </p>
             <p v-else>
                 The key needs the <b>Admin</b> role at Apple, and Apple allows only a few active
                 distribution certificates per team; if it refuses, its reason is shown as is. The
-                private key then exists only in this kit, so keep this host's vault backed up.
+                private key then exists only in these credentials, so keep this host's vault backed
+                up.
             </p>
         </ConfirmDialog>
 
         <ConfirmDialog
             :open="removing !== null"
-            title="Remove this signing kit"
-            confirm-label="Remove kit"
+            title="Remove these signing credentials"
+            confirm-label="Remove credentials"
             :busy="signing.state.deleting"
             @update:open="(value) => (removing = value ? removing : null)"
             @confirm="remove"
         >
             <p>
                 <b>{{ removing?.name }}</b> is deleted from the operating-system vault: the
-                certificate path and password, the profile paths, the guest keychain password, and
-                any Team API key.
+                certificate path and password, the profile paths, the guest keychain password, any
+                Team API key, and the Android upload key's path, alias and passwords. An upload key
+                BuildBridge created for them is deleted from this host as well.
             </p>
             <p>
                 <span class="inline-flex items-center gap-1 font-medium">
@@ -421,8 +572,8 @@ const orphaned = computed(() =>
                         (removing?.attachedMachines.length ?? 0) === 1 ? '' : 's'
                     }}
                 </span>
-                using this kit will be left unattached and cannot provision signing until another
-                kit is attached.
+                using these credentials will be left unattached and cannot provision signing until
+                others are attached.
             </p>
             <p>
                 Nothing at Apple is revoked, and signing already provisioned inside a machine stays

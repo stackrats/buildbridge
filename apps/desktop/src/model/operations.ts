@@ -22,8 +22,10 @@ export type OperationId =
     | 'attach-env'
     | 'clear-signing'
     | 'archive'
+    | 'release'
     | 'reveal'
     | 'clear-archive'
+    | 'clear-release'
     | 'discard'
     | 'delete'
     | 'optimize'
@@ -55,6 +57,7 @@ export const busyKeyStep: Record<string, string> = {
     test_building: 'test-build',
     adopting_lock: 'test-build',
     archiving: 'archive',
+    releasing: 'release',
     deleting: 'launch',
     discarding: 'launch',
     migrating_usb: 'run-device',
@@ -81,6 +84,7 @@ export const busyKeyLabel: Record<string, string> = {
     test_building: 'Running the test build',
     adopting_lock: 'Adopting the guest Podfile.lock',
     archiving: 'Building the signed archive',
+    releasing: 'Building the signed release',
     deleting: 'Deleting the machine',
     discarding: 'Discarding the container',
     optimizing: 'Applying an optimization',
@@ -114,12 +118,14 @@ export const operationLabel: Record<OperationId, string> = {
     sync: 'Synchronizing source',
     'test-build': 'Running the test build',
     provision: 'Provisioning signing',
-    'attach-kit': 'Changing the signing kit',
-    'attach-env': 'Changing the env set',
+    'attach-kit': 'Changing the signing credentials',
+    'attach-env': 'Changing the environment',
     'clear-signing': 'Removing guest signing',
     archive: 'Building the signed archive',
+    release: 'Building the signed release',
     reveal: 'Revealing the artifacts',
     'clear-archive': 'Clearing retained artifacts',
+    'clear-release': 'Clearing retained artifacts',
     discard: 'Discarding the container',
     delete: 'Deleting the machine',
     optimize: 'Applying an optimization',
@@ -157,6 +163,8 @@ export const operationStep: Partial<Record<OperationId, string>> = {
     provision: 'provision',
     'clear-signing': 'provision',
     archive: 'archive',
+    release: 'release',
+    'clear-release': 'release',
     'usb-rule': 'run-device',
     'usb-migrate': 'run-device',
     'usb-attach': 'run-device',

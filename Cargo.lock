@@ -422,8 +422,8 @@ dependencies = [
 name = "buildbridge-cli"
 version = "0.1.0"
 dependencies = [
- "buildbridge-docker-osx",
  "buildbridge-engine",
+ "buildbridge-machines",
  "clap",
  "dirs",
  "serde",
@@ -444,8 +444,8 @@ dependencies = [
 name = "buildbridge-desktop"
 version = "0.1.0"
 dependencies = [
- "buildbridge-docker-osx",
  "buildbridge-engine",
+ "buildbridge-machines",
  "serde",
  "serde_json",
  "tauri",
@@ -454,22 +454,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "buildbridge-docker-osx"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "ts-rs",
-]
-
-[[package]]
 name = "buildbridge-engine"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "buildbridge-contract",
- "buildbridge-docker-osx",
+ "buildbridge-machines",
  "buildbridge-runner",
  "jsonwebtoken",
  "keyring",
@@ -478,6 +468,16 @@ dependencies = [
  "serde_json",
  "time",
  "tokio",
+ "ts-rs",
+]
+
+[[package]]
+name = "buildbridge-machines"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
  "ts-rs",
 ]
 

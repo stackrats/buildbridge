@@ -50,6 +50,8 @@ export type SigningRoute = 'files' | 'team_key';
 export interface SigningKitReadiness {
     /** Stored distribution identity, its export password and at least one profile. */
     distribution: boolean;
+    /** An Android upload key: keystore, key alias and keystore password. */
+    android: boolean;
     /** Stored development identity with its export password. */
     development: boolean;
     /** An App Store Connect key: certificates and profiles are created at Apple when needed. */
@@ -72,8 +74,14 @@ export function kitReadiness(kit: SigningKitSummary | null | undefined): Signing
         !!kit && kit.developmentCertificateConfigured && kit.developmentCertificatePasswordStored;
     const teamKey = !!kit && kit.appStoreConnectConfigured;
     const keychain = !!kit && kit.guestKeychainConfigured;
+    const android =
+        !!kit &&
+        kit.androidKeystoreConfigured &&
+        kit.androidKeyAlias !== null &&
+        kit.androidKeystorePasswordStored;
     return {
         distribution,
+        android,
         development,
         teamKey,
         keychain,
@@ -85,6 +93,26 @@ export function kitReadiness(kit: SigningKitSummary | null | undefined): Signing
 
 export function kitIsProvisionable(kit: SigningKitSummary | null | undefined): boolean {
     return kitReadiness(kit).provisionable;
+}
+
+/** Whether a kit can sign an Android release. Its Apple material has no say in it. */
+export function kitSignsAndroid(kit: SigningKitSummary | null | undefined): boolean {
+    return kitReadiness(kit).android;
+}
+
+/** What a stored kit still lacks before it can sign an Android release. */
+export function androidKitShortfall(kit: SigningKitSummary): string[] {
+    const missing: string[] = [];
+    if (!kit.androidKeystoreConfigured) {
+        missing.push('an upload keystore');
+    }
+    if (kit.androidKeystoreConfigured && kit.androidKeyAlias === null) {
+        missing.push('the key alias');
+    }
+    if (kit.androidKeystoreConfigured && !kit.androidKeystorePasswordStored) {
+        missing.push('the keystore password');
+    }
+    return missing;
 }
 
 /** What a stored kit still lacks before it can provision, as the attach step lists it. */
@@ -106,7 +134,7 @@ export function kitShortfall(kit: SigningKitSummary): string[] {
         }
     }
     if (!readiness.keychain) {
-        missing.push('keychain password');
+        missing.push('keychain password (saving the credentials again invents one)');
     }
     return missing;
 }
@@ -122,6 +150,10 @@ export interface SigningKitDraft {
     teamKeyPath: string;
     teamKeyId: string;
     teamIssuerId: string;
+    androidKeystorePath: string;
+    androidKeystorePassword: string;
+    androidKeyAlias: string;
+    androidKeyPassword: string;
 }
 
 export const emptySigningKitDraft: SigningKitDraft = {
@@ -134,6 +166,10 @@ export const emptySigningKitDraft: SigningKitDraft = {
     teamKeyPath: '',
     teamKeyId: '',
     teamIssuerId: '',
+    androidKeystorePath: '',
+    androidKeystorePassword: '',
+    androidKeyAlias: '',
+    androidKeyPassword: '',
 };
 
 /**
@@ -164,8 +200,10 @@ export function draftKitSummary(
             draft.profilePaths.length > 0
                 ? draft.profilePaths
                 : (stored?.provisioningProfileNames ?? []),
+        // Saving invents the keychain password when none is typed, so a kit always ends up with
+        // one; only a stored kit from before that rule can still lack it.
         guestKeychainConfigured:
-            draft.keychainPassword !== '' || (stored?.guestKeychainConfigured ?? false),
+            draft.keychainPassword !== '' || stored === null || stored.guestKeychainConfigured,
         createdAtEpochSeconds: stored?.createdAtEpochSeconds ?? 0,
         attachedMachines: stored?.attachedMachines ?? [],
         developmentCertificateConfigured:
@@ -175,6 +213,15 @@ export function draftKitSummary(
         developmentCertificatePasswordStored:
             draft.developmentCertificatePassword !== '' ||
             (stored?.developmentCertificatePasswordStored ?? false),
+        androidKeystoreConfigured:
+            draft.androidKeystorePath.trim() !== '' || (stored?.androidKeystoreConfigured ?? false),
+        androidKeystoreName: stored?.androidKeystoreName ?? null,
+        androidKeyAlias: draft.androidKeyAlias.trim() || (stored?.androidKeyAlias ?? null),
+        androidKeystorePasswordStored:
+            draft.androidKeystorePassword !== '' ||
+            (stored?.androidKeystorePasswordStored ?? false),
+        androidKeyPasswordStored:
+            draft.androidKeyPassword !== '' || (stored?.androidKeyPasswordStored ?? false),
     };
 }
 

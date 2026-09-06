@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue';
 
 import { useMachinesStore } from '../../stores/machines';
-import type { MacBuilderConfig, MacBuilderView } from '../../types/backend';
+import type { MachineConfig, MachineView } from '../../types/backend';
 import Button from '../ui/Button.vue';
 import Callout from '../ui/Callout.vue';
 import Modal from '../ui/Modal.vue';
@@ -10,10 +10,10 @@ import Spinner from '../ui/Spinner.vue';
 import MachineProfileForm from './MachineProfileForm.vue';
 
 const open = defineModel<boolean>('open', { default: false });
-const { view } = defineProps<{ view: MacBuilderView }>();
+const { view } = defineProps<{ view: MachineView }>();
 const machines = useMachinesStore();
 
-const profile = ref<MacBuilderConfig>({ ...view.profile });
+const profile = ref<MachineConfig>({ ...view.profile });
 const saving = ref(false);
 
 watch(open, (value) => {
@@ -42,7 +42,15 @@ async function save(): Promise<void> {
 <template>
     <Modal v-model:open="open" title="Machine profile">
         <form class="space-y-3" @submit.prevent="save">
-            <Callout v-if="hardwareLocked" tone="neutral">
+            <Callout
+                v-if="hardwareLocked && view.profile.provider === 'android_toolchain'"
+                tone="neutral"
+            >
+                The memory and CPU limits are fixed while the container exists. To change them, stop
+                the toolchain and discard its container from the machine menu; the first build
+                afterwards downloads the SDK again.
+            </Callout>
+            <Callout v-else-if="hardwareLocked" tone="neutral">
                 Memory, cores, the SSH port, and the installer are fixed while the container exists.
                 To change them, stop the machine and discard its container from the machine menu;
                 that deletes its macOS disk.

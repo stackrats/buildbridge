@@ -1,10 +1,15 @@
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/buildbridge-mark-dark.svg">
+  <img src="docs/images/buildbridge-mark-light.svg" alt="" width="140">
+</picture>
+
 # BuildBridge
 
-### Build and sign iOS apps locally on a macOS virtual machine from Linux.
+### Build and sign iOS and Android apps locally from Linux.
 
-BuildBridge creates a persistent macOS build machine on your Linux host with Docker, QEMU, and KVM, run by Docker-OSX or by dockur/macos. Its desktop app handles setup, project sync, Xcode builds, signing, and IPA export. An optional control plane queues builds and shows their progress, logs, and artifacts.
+BuildBridge creates persistent build machines on your Linux host with Docker: a macOS virtual machine under QEMU and KVM, run by Docker-OSX or by dockur/macos, for iOS; and an Android toolchain container, with no virtual machine in it, for Android. Its desktop app handles setup, project sync, the builds, signing, and export: a verified App Store Connect IPA, or a signed app bundle and APK. An optional control plane queues builds and shows their progress, logs, and artifacts.
 
 [Features](#features) · [How it works](#how-it-works) · [Requirements](#requirements) · [Development](#development)
 
@@ -14,11 +19,11 @@ BuildBridge creates a persistent macOS build machine on your Linux host with Doc
 
 ## Features
 
-- Install macOS and Xcode once, then reuse the machine across projects.
-- Sync an approved project folder and run unsigned test builds.
-- Store signing certificates and provisioning profiles in the operating system's credential vault.
-- Create signed archives and verified App Store Connect IPAs.
-- Manage multiple local macOS build machines from the Linux desktop app.
+- Install macOS and Xcode once, then reuse the machine across projects; an Android toolchain prepares itself on its first build.
+- Sync an approved Capacitor project folder and run unsigned test builds or debug builds; the debug APK is kept on the host, ready for `adb install`.
+- Store Apple certificates and profiles, and Android upload keys, in the operating system's credential vault; create either without a Mac or a keystore to hand.
+- Create signed archives and verified App Store Connect IPAs, and signed app bundles and APKs for Google Play.
+- Manage several machines of either platform from the Linux desktop app or the command line.
 - Pair with a control plane for queued builds, live status, logs, and artifacts.
 
 ## How it works
@@ -27,16 +32,17 @@ BuildBridge creates a persistent macOS build machine on your Linux host with Doc
 Control plane ────── Reverb + HTTPS ─┐   Tauri desktop ─┐
 Approved projects ───────────────────┼─ BuildBridge engine ◄─ buildbridge CLI
 Credential vault ────────────────────┘   trusted Linux host
-                                          ├─ Docker-OSX lifecycle ─┐
-                                          └─ pinned SSH bridge ─────┴─ macOS / Xcode ── archive / IPA
+                                          ├─ macOS machine lifecycle ─┐
+                                          ├─ pinned SSH bridge ────────┴─ macOS / Xcode ── archive / IPA
+                                          └─ docker exec ─────────────── Android toolchain ── bundle / APK
 ```
 
 The engine is the trusted side, running inside the desktop app or the `buildbridge` command line on your Linux host. It owns the machines, approved project folders, signing credentials, and pinned SSH connection to each guest. The control plane only coordinates pairing and builds over the protocol in the contract crate; it cannot run arbitrary shell commands or access signing secrets.
 
 The desktop guides each machine through two workflows, and the command line drives the same steps:
 
-1. **Setup:** Check the Linux host, create the machine, install macOS, configure SSH, and install Xcode.
-2. **Build:** Approve and sync a project, test an unsigned build, provision signing credentials, and export the signed archive and IPA.
+1. **Setup:** Check the Linux host and create the machine. For macOS, install macOS, configure SSH, and download Xcode from Apple in a window of the app, signed in with your own Apple ID; an Android toolchain has nothing else to set up.
+2. **Build:** Approve and sync a project, run the unsigned test build or the debug build, attach signing credentials, and export the signed archive and IPA or the signed app bundle and APK.
 
 BuildBridge never collects an Apple Account password or two-factor code. The local macOS login password is asked for once, to install the SSH key into a guest whose fingerprint is already pinned, and is discarded after that one session; the same step can be done by typing commands in the guest Terminal instead. For more detail, see [Product and Architecture](docs/PRODUCT_AND_ARCHITECTURE.md).
 
@@ -44,11 +50,11 @@ BuildBridge never collects an Apple Account password or two-factor code. The loc
 
 For the desktop runner on Linux:
 
-- x86_64 Linux with KVM (`/dev/kvm` readable and writable by your user)
 - Docker Engine reachable by your user
-- An X11 display for the one-time macOS installer console
-- OpenSSH client tools
-- Room under `~/.local/share` for each machine's macOS disk (a sparse 200 GB image; tens of GB used)
+- For a macOS machine: x86_64 Linux with KVM (`/dev/kvm` readable and writable by your user), an X11 display for the one-time macOS installer console (Docker-OSX) or `/dev/net/tun` (dockur/macos), and OpenSSH client tools
+- Room under `~/.local/share` for each machine: a sparse 200 GB macOS disk (tens of GB used), or a few GB of Android SDK and Gradle caches
+
+An Android toolchain needs only Docker: no KVM, no display, no ports.
 
 Optional, to run a Debug build on a real iPhone: the phone on USB, polkit (`pkexec`) to install one udev rule that releases iPhones from `usbmuxd`, and a `plugdev` group. Host-side iPhone sync is off while that rule is installed; the desktop can remove it again. This route is experimental.
 
@@ -68,6 +74,13 @@ buildbridge build test team-mac
 buildbridge signing attach team-mac dist-kit && buildbridge signing provision team-mac
 buildbridge build archive team-mac
 buildbridge device attach team-mac 3 9 && buildbridge device run team-mac <udid>
+
+buildbridge machine create "Android builder" --platform android
+buildbridge machine start android-builder
+buildbridge project approve android-builder /path/to/app && buildbridge project sync android-builder
+buildbridge build test android-builder
+buildbridge signing keystore dist-kit --password-stdin < keystore-password.txt
+buildbridge signing attach android-builder dist-kit && buildbridge build release android-builder
 ```
 
 Progress goes to stderr as it happens and results to stdout; `--json` makes both machine
@@ -95,7 +108,7 @@ vp install
 Run the apps:
 
 ```bash
-pnpm dev                                # Tauri desktop
+vp run dev                              # Tauri desktop
 cargo run -p buildbridge-cli -- status  # the command line, on the same machines
 ```
 
@@ -104,12 +117,14 @@ The desktop interface can be developed in a plain browser: `vp dev` inside `apps
 Run the checks:
 
 ```bash
-pnpm check          # format, lint, type check, cargo check
-pnpm test           # Rust workspace tests
-vp test --run       # desktop unit tests, inside apps/desktop
-pnpm types:generate # regenerate the TypeScript contract from the Rust DTOs
+vp check                 # format and lint (vp fmt, vp lint on their own); --fix applies
+vp run -r typecheck      # desktop type check
+vp test --run            # desktop unit tests, inside apps/desktop
+cargo test --workspace   # Rust workspace tests
+cargo clippy --workspace
+vp run types:generate    # regenerate the TypeScript contract from the Rust DTOs
 cargo test -p buildbridge-engine --test provider_boot -- --ignored   # boots a throwaway machine per provider; run before changing an image digest
-pnpm build
+vp run -r build          # build the desktop front end
 ```
 
 ## License

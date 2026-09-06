@@ -132,8 +132,8 @@ async function createProfile(): Promise<void> {
         <template #description>
             Signs a five-minute token locally and makes read-only requests for the app, bundle
             identifier, profiles, and certificates. Nothing is created, revoked, or downloaded. It
-            uses the Team key from the kit attached to the machine you choose, and the bundle
-            identifier from the project approved on it.
+            uses the Team key from the credentials attached to the machine you choose, and the
+            bundle identifier from the project approved on it.
         </template>
 
         <div>
@@ -158,8 +158,8 @@ async function createProfile(): Promise<void> {
                 </template>
             </Field>
             <Callout v-if="!configured" tone="neutral" class="mt-3">
-                The kit attached to this machine has no App Store Connect Team key. Add one by
-                editing that kit; the file route works without it.
+                The credentials attached to this machine have no App Store Connect Team key. Add one
+                by editing them; the file route works without it.
             </Callout>
             <Callout v-if="signing.state.verificationError" tone="danger" class="mt-3">
                 {{ signing.state.verificationError }}
@@ -248,13 +248,15 @@ async function createProfile(): Promise<void> {
                                     heldInKit(profile)
                                 "
                                 :title="
-                                    heldInKit(profile) ? 'Already in the attached kit' : undefined
+                                    heldInKit(profile)
+                                        ? 'Already in the attached credentials'
+                                        : undefined
                                 "
                                 @click="signing.downloadProfile(machineId, profile.id)"
                             >
                                 <Spinner v-if="signing.state.downloadingProfileId === profile.id" />
                                 <Download v-else class="h-3.5 w-3.5" />
-                                {{ heldInKit(profile) ? 'In kit' : 'Add to kit' }}
+                                {{ heldInKit(profile) ? 'Added' : 'Add' }}
                             </Button>
                         </li>
                         <li
@@ -330,7 +332,7 @@ async function createProfile(): Promise<void> {
                     <span class="font-mono break-all">{{
                         signing.state.createdProfile.savedPath
                     }}</span>
-                    and added to the signing kit.
+                    and added to the signing credentials.
                 </Callout>
 
                 <div
@@ -417,7 +419,7 @@ async function createProfile(): Promise<void> {
             </p>
             <p>
                 No existing Apple resource is deleted or revoked. The profile is downloaded to an
-                owner-only file and added to the signing kit.
+                owner-only file and added to the signing credentials.
             </p>
         </ConfirmDialog>
     </Card>

@@ -5,9 +5,9 @@ pub async fn configure_mac_guest_access(
     app: &Engine,
     machine_id: String,
     input: MacGuestAccessInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     let username = input.username.trim().to_string();
-    if !buildbridge_docker_osx::valid_guest_username(&username) {
+    if !buildbridge_machines::valid_guest_username(&username) {
         return Err(
             "Use the macOS short username: 1–32 letters, numbers, periods, underscores, or hyphens."
                 .to_string(),
@@ -22,7 +22,7 @@ pub async fn configure_mac_guest_access(
         .map_err(|error| error.to_string())??;
     save_mac_guest_access(&paths, &StoredMacGuestAccess { username })?;
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 
 /// Installs the BuildBridge key into the guest user's `authorized_keys` through one
@@ -35,9 +35,9 @@ pub async fn authorize_mac_guest_key(
     app: &Engine,
     machine_id: String,
     input: AuthorizeMacGuestKeyInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     let username = input.username.trim().to_string();
-    if !buildbridge_docker_osx::valid_guest_username(&username) {
+    if !buildbridge_machines::valid_guest_username(&username) {
         return Err(
             "Use the macOS short username: 1–32 letters, numbers, periods, underscores, or hyphens."
                 .to_string(),
@@ -72,7 +72,7 @@ pub async fn authorize_mac_guest_key(
 
     let password = input.password;
     tokio::task::spawn_blocking(move || {
-        buildbridge_docker_osx::authorize_guest_key(
+        buildbridge_machines::authorize_guest_key(
             profile.ssh_port,
             &username,
             &public_key,
@@ -84,13 +84,13 @@ pub async fn authorize_mac_guest_key(
     .await
     .map_err(|error| error.to_string())??;
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
-pub async fn trust_mac_builder_guest(
+pub async fn trust_mac_guest(
     app: &Engine,
     machine_id: String,
     input: TrustMacGuestInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     let profile = machines::load_registry(app)?
         .find(&machine_id)?
@@ -106,7 +106,7 @@ pub async fn trust_mac_builder_guest(
     }
 
     tokio::task::spawn_blocking(move || {
-        let scanned = buildbridge_docker_osx::scan_guest_host_key(profile.ssh_port)
+        let scanned = buildbridge_machines::scan_guest_host_key(profile.ssh_port)
             .map_err(|error| error.to_string())?;
         if scanned.fingerprint != input.fingerprint {
             return Err(
@@ -122,14 +122,14 @@ pub async fn trust_mac_builder_guest(
     .await
     .map_err(|error| error.to_string())??;
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
-pub async fn forget_mac_builder_guest_trust(
+pub async fn forget_mac_guest_trust(
     app: &Engine,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     remove_file_if_present(&paths.known_hosts())?;
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }

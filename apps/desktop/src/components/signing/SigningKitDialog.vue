@@ -1,11 +1,12 @@
 <script setup lang="ts">
 // Create or update one signing kit.
 //
-// One thing is always needed — the guest keychain password, which nothing can create — and then
-// one of two routes to Apple's signing material: a Team key, from which BuildBridge creates the
-// certificates and profiles at Apple when a machine first needs them, or the files exported from a
-// Mac. Both can be stored; files are used where they exist and the key creates the rest. The form
-// says at the bottom exactly what the kit will be able to do if saved now.
+// The simplest kit is a name and one of two routes to Apple's signing material: a Team key, from
+// which BuildBridge creates the certificates and profiles at Apple when a machine first needs
+// them, or the files exported from a Mac. Both can be stored; files are used where they exist and
+// the key creates the rest. The guest keychain password is invented when left blank, since nothing
+// but BuildBridge ever asks for it. The form says at the bottom exactly what the kit will be able
+// to do if saved now.
 import { ChevronRight, CircleCheck, Lock, Plus } from '@lucide/vue';
 import { computed, reactive, ref, watch } from 'vue';
 
@@ -51,12 +52,17 @@ const form = reactive({
     appStoreConnectPrivateKeyPath: '',
     developmentCertificatePath: '',
     developmentCertificatePassword: '',
+    androidKeystorePath: '',
+    androidKeystorePassword: '',
+    androidKeyAlias: '',
+    androidKeyPassword: '',
 });
 
 const editing = computed(() => kit !== null);
 // A new kit opens on the Team key route; an edited kit opens whichever routes it holds.
 const showTeamKey = ref(true);
 const showFiles = ref(false);
+const showAndroid = ref(false);
 const developmentStatus = computed(() => developmentIdentityStatus(form, kit));
 
 // Every profile BuildBridge downloads is kept on this host. A vault that loses its paths — a
@@ -92,6 +98,10 @@ const draft = computed(() => ({
     teamKeyPath: form.appStoreConnectPrivateKeyPath,
     teamKeyId: form.appStoreConnectKeyId,
     teamIssuerId: form.appStoreConnectIssuerId,
+    androidKeystorePath: form.androidKeystorePath,
+    androidKeystorePassword: form.androidKeystorePassword,
+    androidKeyAlias: form.androidKeyAlias,
+    androidKeyPassword: form.androidKeyPassword,
 }));
 // The kit as it would be stored if saved now, and what that kit could do.
 const wouldStore = computed(() => draftKitSummary(draft.value, kit));
@@ -137,6 +147,11 @@ watch([open, () => kit], ([value]) => {
         form.appStoreConnectPrivateKeyPath = '';
         form.developmentCertificatePath = '';
         form.developmentCertificatePassword = '';
+        form.androidKeystorePath = '';
+        form.androidKeystorePassword = '';
+        form.androidKeyAlias = '';
+        form.androidKeyPassword = '';
+        showAndroid.value = kit?.androidKeystoreConfigured ?? false;
         const holdsFiles =
             (kit?.signingCertificateConfigured ?? false) ||
             (kit?.developmentCertificateConfigured ?? false) ||
@@ -160,6 +175,10 @@ async function save(): Promise<void> {
         guestKeychainPassword: form.guestKeychainPassword,
         developmentCertificatePath: form.developmentCertificatePath.trim(),
         developmentCertificatePassword: form.developmentCertificatePassword,
+        androidKeystorePath: form.androidKeystorePath.trim(),
+        androidKeystorePassword: form.androidKeystorePassword,
+        androidKeyAlias: form.androidKeyAlias.trim(),
+        androidKeyPassword: form.androidKeyPassword,
     });
     if (saved) {
         open.value = false;
@@ -168,13 +187,17 @@ async function save(): Promise<void> {
 </script>
 
 <template>
-    <Modal v-model:open="open" :title="editing ? 'Edit signing kit' : 'New signing kit'" wide>
+    <Modal
+        v-model:open="open"
+        :title="editing ? 'Edit signing credentials' : 'New signing credentials'"
+        wide
+    >
         <form class="space-y-4" @submit.prevent="save">
             <!-- The transparent border and p-3 mirror the sections below, so every box in the
                  form shares one left and right edge. -->
             <div class="space-y-3 border border-transparent px-3">
                 <Field
-                    label="Kit name"
+                    label="Name"
                     required
                     hint="How you will recognise it when attaching a machine, for example the team or the app."
                 >
@@ -186,9 +209,8 @@ async function save(): Promise<void> {
                 </Field>
                 <Field
                     label="Guest keychain password"
-                    required
                     :stored="kit?.guestKeychainConfigured"
-                    hint="Any new password you invent. BuildBridge creates a keychain inside each machine for this kit and locks it with this. Not an Apple password, and nothing else uses it."
+                    hint="Leave it blank and BuildBridge invents one. It locks a keychain BuildBridge creates inside each macOS machine for these credentials; nothing else ever asks for it. Type your own only if you want to know it. Not an Apple password."
                 >
                     <Input
                         v-model="form.guestKeychainPassword"
@@ -205,8 +227,8 @@ async function save(): Promise<void> {
 
             <p class="px-3 text-[11px] leading-4 text-zinc-500 dark:text-zinc-400">
                 Then one of the two routes below. A Team key alone is enough; files exported from a
-                Mac work too, and a kit can hold both — files are used where they exist and the key
-                creates the rest.
+                Mac work too, and the credentials can hold both — files are used where they exist
+                and the key creates the rest.
             </p>
 
             <section class="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
@@ -490,19 +512,112 @@ async function save(): Promise<void> {
                 </div>
             </section>
 
-            <!-- What the kit will be able to do if saved now, in the reader's terms. -->
+            <section class="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+                <button
+                    type="button"
+                    class="flex w-full items-center gap-2 text-left"
+                    @click="showAndroid = !showAndroid"
+                >
+                    <ChevronRight
+                        class="h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform"
+                        :class="showAndroid ? 'rotate-90' : ''"
+                    />
+                    <span class="min-w-0 flex-1">
+                        <span
+                            class="block text-[13px] font-semibold text-zinc-900 dark:text-zinc-50"
+                        >
+                            Android upload key
+                            <span class="font-normal text-zinc-500 dark:text-zinc-400"
+                                >· for Android machines</span
+                            >
+                        </span>
+                        <span class="block text-[11px] text-zinc-500 dark:text-zinc-400">
+                            The keystore a signed app bundle and APK are signed with. Point these
+                            credentials at one you already use for Google Play, or save them first
+                            and create one from their card.
+                        </span>
+                    </span>
+                    <span
+                        v-if="kit?.androidKeystoreName"
+                        class="shrink-0 font-mono text-[11px] text-emerald-700 dark:text-emerald-400"
+                    >
+                        {{ kit.androidKeystoreName }}
+                    </span>
+                </button>
+
+                <div v-if="showAndroid" class="mt-3 space-y-3">
+                    <Field
+                        label="Keystore (.jks, .keystore or .p12)"
+                        :stored="kit?.androidKeystoreConfigured"
+                        hint="Stored as a path; the file stays where it is. Keep it backed up: Google Play cannot recover an upload key."
+                    >
+                        <PathField
+                            v-model="form.androidKeystorePath"
+                            kind="file"
+                            title="Choose the upload keystore"
+                            :filter="{
+                                name: 'Keystore',
+                                extensions: ['jks', 'keystore', 'p12', 'pfx'],
+                            }"
+                            :placeholder="kit?.androidKeystoreName ?? '/path/to/upload.keystore'"
+                        />
+                    </Field>
+                    <div class="grid gap-3 sm:grid-cols-2">
+                        <Field
+                            label="Key alias"
+                            :stored="
+                                kit?.androidKeyAlias !== null && kit?.androidKeyAlias !== undefined
+                            "
+                            hint="The name of the key inside the keystore."
+                        >
+                            <Input
+                                v-model="form.androidKeyAlias"
+                                mono
+                                :placeholder="kit?.androidKeyAlias ?? 'upload'"
+                            />
+                        </Field>
+                        <Field
+                            label="Keystore password"
+                            :stored="kit?.androidKeystorePasswordStored"
+                        >
+                            <Input
+                                v-model="form.androidKeystorePassword"
+                                type="password"
+                                autocomplete="off"
+                            />
+                        </Field>
+                    </div>
+                    <Field
+                        label="Key password"
+                        :stored="kit?.androidKeyPasswordStored"
+                        hint="Only when it differs from the keystore password; a PKCS12 keystore uses one password for both."
+                    >
+                        <Input
+                            v-model="form.androidKeyPassword"
+                            type="password"
+                            autocomplete="off"
+                        />
+                    </Field>
+                </div>
+            </section>
+
+            <!-- What the credentials will be able to do if saved now, in the reader's terms. -->
             <div
                 class="rounded-lg p-3 text-[11px] leading-4"
                 :class="
-                    readiness.provisionable
+                    readiness.provisionable || readiness.android
                         ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300'
                         : 'bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300'
                 "
             >
+                <p v-if="readiness.android" class="flex items-center gap-1 font-medium">
+                    <CircleCheck class="h-3.5 w-3.5" />
+                    These credentials can sign an Android release.
+                </p>
                 <template v-if="readiness.provisionable">
                     <p class="flex items-center gap-1 font-medium">
                         <CircleCheck class="h-3.5 w-3.5" />
-                        This kit can provision a machine.
+                        These credentials can provision a machine.
                     </p>
                     <ul class="mt-1 space-y-0.5">
                         <li>
@@ -512,7 +627,7 @@ async function save(): Promise<void> {
                                     ? 'the distribution certificate and App Store profile are created at Apple during provisioning.'
                                     : readiness.archive === 'files'
                                       ? 'signed with the stored identity and profile.'
-                                      : 'not possible with this kit; add a Team key, or the distribution identity with its export password and profile.'
+                                      : 'not possible with these credentials; add a Team key, or the distribution identity with its export password and profile.'
                             }}
                         </li>
                         <li>
@@ -522,14 +637,14 @@ async function save(): Promise<void> {
                                     ? 'the development identity and device profile are created at Apple when the phone is prepared.'
                                     : readiness.phone === 'files'
                                       ? 'signed with the stored development identity.'
-                                      : 'not possible with this kit; add a Team key or a development identity.'
+                                      : 'not possible with these credentials; add a Team key or a development identity.'
                             }}
                         </li>
                     </ul>
                 </template>
-                <p v-else>
-                    Not usable yet: still needs {{ shortfall.join(' and ') }}. A kit can be saved
-                    now and finished later.
+                <p v-else :class="readiness.android ? 'mt-1' : ''">
+                    {{ readiness.android ? 'For iOS it' : 'Not usable yet: it' }} still needs
+                    {{ shortfall.join(' and ') }}. Credentials can be saved now and finished later.
                 </p>
             </div>
 

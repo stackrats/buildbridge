@@ -26,12 +26,11 @@ pub struct UsbAttachProgress {
 /// authorization prompt. Host-level, so it holds no machine.
 pub async fn install_usb_release_rule(
     app: &Engine,
-) -> Result<buildbridge_docker_osx::HostUsbStatus, String> {
+) -> Result<buildbridge_machines::HostUsbStatus, String> {
     let guard = begin_host_usb_operation(app)?;
     let staging = app.data_dir().join("usb");
     let installed = tokio::task::spawn_blocking(move || {
-        buildbridge_docker_osx::install_iphone_udev_rule(&staging)
-            .map_err(|error| error.to_string())
+        buildbridge_machines::install_iphone_udev_rule(&staging).map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?;
@@ -41,10 +40,10 @@ pub async fn install_usb_release_rule(
 }
 pub async fn remove_usb_release_rule(
     app: &Engine,
-) -> Result<buildbridge_docker_osx::HostUsbStatus, String> {
+) -> Result<buildbridge_machines::HostUsbStatus, String> {
     let guard = begin_host_usb_operation(app)?;
     let removed = tokio::task::spawn_blocking(|| {
-        buildbridge_docker_osx::remove_iphone_udev_rule().map_err(|error| error.to_string())
+        buildbridge_machines::remove_iphone_udev_rule().map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?;
@@ -60,7 +59,7 @@ pub async fn migrate_machine_for_usb(
     app: &Engine,
     machine_id: String,
     input: ConfirmInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     if !input.confirmed {
         return Err("Confirm the container migration before continuing.".to_string());
     }
@@ -80,15 +79,15 @@ pub async fn migrate_machine_for_usb(
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
-        let options = buildbridge_docker_osx::LaunchOptions {
+        let _operation = buildbridge_machines::enter_operation(scope);
+        let options = buildbridge_machines::LaunchOptions {
             identity_path: &identity_path,
             disk_dir: &disk_dir,
             qmp_dir: &qmp_dir,
-            usb: buildbridge_docker_osx::resolve_usb_options(),
+            usb: buildbridge_machines::resolve_usb_options(),
             template_dir: template_dir.as_deref(),
         };
-        buildbridge_docker_osx::migrate_disk_to_host(
+        buildbridge_machines::migrate_disk_to_host(
             &container_name,
             &profile,
             &options,
@@ -115,7 +114,7 @@ pub async fn migrate_machine_for_usb(
     }
     app.notify_machines_changed();
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 
 /// Recreates the container from the machine's current profile so it picks up an option it was
@@ -125,7 +124,7 @@ pub async fn rebuild_machine_container(
     app: &Engine,
     machine_id: String,
     input: ConfirmInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     if !input.confirmed {
         return Err("Confirm the machine restart before continuing.".to_string());
     }
@@ -145,15 +144,15 @@ pub async fn rebuild_machine_container(
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
-        let options = buildbridge_docker_osx::LaunchOptions {
+        let _operation = buildbridge_machines::enter_operation(scope);
+        let options = buildbridge_machines::LaunchOptions {
             identity_path: &identity_path,
             disk_dir: &disk_dir,
             qmp_dir: &qmp_dir,
-            usb: buildbridge_docker_osx::resolve_usb_options(),
+            usb: buildbridge_machines::resolve_usb_options(),
             template_dir: template_dir.as_deref(),
         };
-        buildbridge_docker_osx::rebuild_container(&container_name, &profile, &options, |progress| {
+        buildbridge_machines::rebuild_container(&container_name, &profile, &options, |progress| {
             emit_machine_progress(
                 &event_app,
                 CONTAINER_REBUILD_PROGRESS_EVENT,
@@ -177,7 +176,7 @@ pub async fn rebuild_machine_container(
     clear_usb_attach_issue(app, &machine_id);
     app.notify_machines_changed();
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 
 /// Hands one host port to the running guest. The phone leaves this host until detached, or
@@ -186,19 +185,24 @@ pub async fn attach_usb_device(
     app: &Engine,
     machine_id: String,
     input: AttachUsbDeviceInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     let profile = machines::load_registry(app)?
         .find(&machine_id)?
         .config
         .clone();
+    if !profile.provider.is_macos() {
+        return Err(
+            "An Android toolchain takes no phone; plug it into this host and use adb.".to_string(),
+        );
+    }
     let access = load_mac_guest_access(&paths)?
         .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
-    if !buildbridge_docker_osx::valid_usb_port_path(&input.port) {
+    if !buildbridge_machines::valid_usb_port_path(&input.port) {
         return Err("The USB port is not valid.".to_string());
     }
-    let current = build_mac_builder_view(app, &paths).await?;
-    let guest_reset = buildbridge_docker_osx::guest_reset_for_macos(
+    let current = build_machine_view(app, &paths).await?;
+    let guest_reset = buildbridge_machines::guest_reset_for_macos(
         current.guest.diagnostics.macos_version.as_deref(),
     );
     let guard = begin_machine_operation(app, &machine_id, "attaching_usb")?;
@@ -208,13 +212,13 @@ pub async fn attach_usb_device(
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        let _operation = buildbridge_machines::enter_operation(scope);
         let runtime =
-            buildbridge_docker_osx::status(&container_name).map_err(|error| error.to_string())?;
+            buildbridge_machines::status(&container_name).map_err(|error| error.to_string())?;
         if runtime.state != ContainerState::Running {
             return Err("Start the machine before attaching a phone.".to_string());
         }
-        let device = buildbridge_docker_osx::host_usb_status(None)
+        let device = buildbridge_machines::host_usb_status(None)
             .devices
             .into_iter()
             .find(|device| device.bus == input.bus && device.port == input.port)
@@ -222,12 +226,12 @@ pub async fn attach_usb_device(
                 "No Apple device is plugged into that port. Plug the phone in and refresh."
                     .to_string()
             })?;
-        buildbridge_docker_osx::attach_usb_device(
+        buildbridge_machines::attach_usb_device(
             &socket,
             &container_name,
             &device,
             guest_reset,
-            buildbridge_docker_osx::UsbAttachRoute::for_provider(provider),
+            buildbridge_machines::UsbAttachRoute::for_provider(provider),
         )
         .map_err(|error| error.to_string())
     })
@@ -260,7 +264,7 @@ pub async fn attach_usb_device(
         .await?;
     }
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 
 /// What the settling loop needs to hand a phone over again: an iPhone re-enumerates itself
@@ -297,14 +301,14 @@ pub(crate) async fn settle_attached_phone(
     let known_hosts_path = paths.known_hosts();
     let endpoint = paths.qmp_endpoint(handover.provider);
     let container_name = paths.container_name.clone();
-    let route = buildbridge_docker_osx::UsbAttachRoute::for_provider(handover.provider);
+    let route = buildbridge_machines::UsbAttachRoute::for_provider(handover.provider);
     let event_app = app.clone();
     let event_machine_id = machine_id.to_string();
     let username = username.to_string();
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        let _operation = buildbridge_machines::enter_operation(scope);
         let started = std::time::Instant::now();
         let report = |phase: UsbAttachPhase, detail: &str| {
             emit_machine_progress(
@@ -325,7 +329,7 @@ pub(crate) async fn settle_attached_phone(
         let mut devices = Vec::new();
         let mut device_number = host_device_number(handover.bus, &handover.port);
         while started.elapsed() < std::time::Duration::from_secs(90) {
-            devices = buildbridge_docker_osx::list_guest_devices(
+            devices = buildbridge_machines::list_guest_devices(
                 ssh_port,
                 &username,
                 &identity_path,
@@ -334,17 +338,17 @@ pub(crate) async fn settle_attached_phone(
             .unwrap_or_default();
             if devices
                 .iter()
-                .any(|device| device.transport_type == buildbridge_docker_osx::TransportType::Wired)
+                .any(|device| device.transport_type == buildbridge_machines::TransportType::Wired)
             {
                 break;
             }
             // By node, a phone that re-enumerated on the host is handed over again by its new
             // node; QEMU would otherwise keep a dead handle and macOS would never see it.
-            if route == buildbridge_docker_osx::UsbAttachRoute::DeviceNode {
+            if route == buildbridge_machines::UsbAttachRoute::DeviceNode {
                 let current = host_device_number(handover.bus, &handover.port);
                 if current.is_some() && current != device_number {
                     device_number = current;
-                    if let Some(device) = buildbridge_docker_osx::host_usb_status(None)
+                    if let Some(device) = buildbridge_machines::host_usb_status(None)
                         .devices
                         .into_iter()
                         .find(|device| device.bus == handover.bus && device.port == handover.port)
@@ -353,7 +357,7 @@ pub(crate) async fn settle_attached_phone(
                             UsbAttachPhase::WaitingForMacos,
                             "The phone re-enumerated; handing it to QEMU again by its new device node",
                         );
-                        if let Err(error) = buildbridge_docker_osx::attach_usb_device(
+                        if let Err(error) = buildbridge_machines::attach_usb_device(
                             &endpoint,
                             &container_name,
                             &device,
@@ -369,17 +373,17 @@ pub(crate) async fn settle_attached_phone(
         }
         let wired = devices
             .iter()
-            .find(|device| device.transport_type == buildbridge_docker_osx::TransportType::Wired);
+            .find(|device| device.transport_type == buildbridge_machines::TransportType::Wired);
         match wired {
             Some(device)
-                if device.pairing_state != buildbridge_docker_osx::PairingState::Paired =>
+                if device.pairing_state != buildbridge_machines::PairingState::Paired =>
             {
                 if let Some(udid) = &device.udid {
                     report(
                         UsbAttachPhase::Pairing,
                         "Unlock the phone and tap Trust when it asks about this computer",
                     );
-                    if let Ok(paired) = buildbridge_docker_osx::pair_guest_device(
+                    if let Ok(paired) = buildbridge_machines::pair_guest_device(
                         ssh_port,
                         &username,
                         &identity_path,
@@ -405,7 +409,7 @@ pub(crate) async fn settle_attached_phone(
 
     Ok(())
 }
-pub async fn detach_usb_device(app: &Engine, machine_id: String) -> Result<MacBuilderView, String> {
+pub async fn detach_usb_device(app: &Engine, machine_id: String) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     let provider = machines::load_registry(app)?
         .find(&machine_id)?
@@ -416,8 +420,8 @@ pub async fn detach_usb_device(app: &Engine, machine_id: String) -> Result<MacBu
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
-        buildbridge_docker_osx::detach_usb_device(&socket).map_err(|error| error.to_string())
+        let _operation = buildbridge_machines::enter_operation(scope);
+        buildbridge_machines::detach_usb_device(&socket).map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string());
@@ -425,7 +429,7 @@ pub async fn detach_usb_device(app: &Engine, machine_id: String) -> Result<MacBu
     finish_operation(&cancel_probe, joined)?;
     clear_usb_attach_issue(app, &machine_id);
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 
 pub(crate) fn clear_usb_attach_issue(app: &Engine, machine_id: &str) {

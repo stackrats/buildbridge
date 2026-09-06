@@ -646,7 +646,7 @@ fn device_registration_request(name: &str, udid: &str) -> serde_json::Value {
 }
 
 pub(crate) fn validate_device_udid(udid: &str) -> Result<(), String> {
-    if !buildbridge_docker_osx::valid_device_udid(udid) {
+    if !buildbridge_machines::valid_device_udid(udid) {
         return Err(
             "The iPhone's UDID must be 40 hexadecimal characters, or 8 and 16 with a hyphen."
                 .to_string(),
@@ -1280,14 +1280,14 @@ pub(crate) async fn create_development_profile(
         .into_iter()
         .find(|certificate| certificate.id == certificate_id)
         .ok_or_else(|| {
-            "The development certificate is no longer on the Apple team. Create one from the kit."
+            "The development certificate is no longer on the Apple team. Create one from the credentials."
                 .to_string()
         })?;
     if !CertificateKind::Development.matches(&certificate)
         || !rfc3339_is_after(&certificate.expiration_date, now)
     {
         return Err(
-            "The kit's development certificate is not an unexpired Apple Development certificate; create a new one from the kit."
+            "The stored development certificate is not an unexpired Apple Development certificate; create a new one from the credentials."
                 .to_string(),
         );
     }
@@ -2188,7 +2188,7 @@ fn apple_error_message(status: StatusCode, body: &str, resource: &str) -> String
         StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY
             if resource == "development certificate" =>
         {
-            "Apple refused to issue another development certificate. Apple allows only a few active ones per team: revoke an unused one in the developer portal, or store the .p12 of an existing one in the kit."
+            "Apple refused to issue another development certificate. Apple allows only a few active ones per team: revoke an unused one in the developer portal, or store the .p12 of an existing one in the credentials."
                 .to_string()
         }
         StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY

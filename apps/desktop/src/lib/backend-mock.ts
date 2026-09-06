@@ -128,7 +128,7 @@ const hostReady: T.HostPrerequisites = {
 
 interface MockMachine {
     id: string;
-    config: T.MacBuilderConfig;
+    config: T.MachineConfig;
     createdAt: number;
     state: T.ContainerState;
     containerId: string | null;
@@ -149,6 +149,13 @@ interface MockMachine {
     archive: T.AppleArchiveResult | null;
     archiveError: string | null;
     archiveEnvSet?: string | null;
+    /** An Android machine's project and retained release; null on a macOS machine. */
+    android: {
+        workspace: T.StoredAndroidWorkspace | null;
+        release: T.AndroidReleaseResult | null;
+        releaseError: string | null;
+        releaseEnvSet: string | null;
+    } | null;
     busy: string | null;
     logs: string[];
     /** The container was created with its disk on the host, the control socket, and USB. */
@@ -264,6 +271,7 @@ function readyMachine(): MockMachine {
             outputTail: ['** ARCHIVE SUCCEEDED **', '** EXPORT SUCCEEDED **'],
         },
         archiveError: null,
+        android: null,
         busy: null,
         usbContainer: deviceReady || usbReady,
         attached: deviceReady ? { bus: 1, port: '3', enumerated: true, issue: null } : null,
@@ -313,6 +321,7 @@ function freshMachine(): MockMachine {
         signing: null,
         archive: null,
         archiveError: null,
+        android: null,
         busy: null,
         // A new machine's container is created with USB access from the start.
         usbContainer: true,
@@ -324,6 +333,78 @@ function freshMachine(): MockMachine {
         deviceRunError: null,
         cancelRequested: false,
         templateId: null,
+        logs: [],
+    };
+}
+
+/** An Android machine with a project approved, synchronized, built and released. */
+function androidMachine(): MockMachine {
+    return {
+        ...freshMachine(),
+        id: 'pixel-builder',
+        config: {
+            name: 'Android builder',
+            macosRelease: 'sequoia',
+            memoryGib: 6,
+            cpuCores: 4,
+            sshPort: 50924,
+            provider: 'android_toolchain',
+        },
+        createdAt: 1_756_800_000,
+        state: 'running',
+        containerId: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6',
+        startedAt: new Date(Date.now() - 40 * 60 * 1000).toISOString(),
+        usbContainer: false,
+        phoneController: false,
+        android: {
+            workspace: {
+                localPath: '/home/you/projects/example-app',
+                name: 'com.example.app',
+                applicationId: 'com.example.app',
+                lastSnapshotSha256:
+                    '6c22009fda0b9467709394b5ae1c442af1da4544d63b5ac01b8778c03d7fcd7b',
+                lastSyncFileCount: 1_397,
+                lastSyncBytes: 28_278_463,
+                lastBuildSucceeded: true,
+                lastBuild: {
+                    applicationId: 'com.example.app.debug',
+                    versionName: '3.2.0',
+                    versionCode: '12',
+                    toolchain: {
+                        jdkVersion: 'openjdk version "21.0.12.1" 2026-08-18 LTS',
+                        buildToolsVersion: '35.0.0',
+                    },
+                    apk: {
+                        path: '/home/you/.local/share/dev.buildbridge.desktop/machines/pixel-builder/artifacts/debug-1756890000000-4242/app-debug.apk',
+                        bytes: 33_410_772,
+                        sha256: '5555aaaa6666bbbb7777cccc8888dddd9999eeee0000ffff1111222233334444',
+                    },
+                    outputTail: ['BUILD SUCCESSFUL in 2m 41s'],
+                },
+                lastSource: null,
+            },
+            release: {
+                applicationId: 'com.example.app',
+                versionName: '3.2.0',
+                versionCode: '12',
+                keyAlias: 'upload',
+                certificateSha256:
+                    '2f7c1e9a4b3d5c6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6',
+                aab: {
+                    path: '/home/you/.local/share/dev.buildbridge.desktop/machines/pixel-builder/artifacts/release-1756900000000-4242/app-release.aab',
+                    bytes: 6_412_090,
+                    sha256: '1111aaaa2222bbbb3333cccc4444dddd5555eeee6666ffff7777000088881111',
+                },
+                apk: {
+                    path: '/home/you/.local/share/dev.buildbridge.desktop/machines/pixel-builder/artifacts/release-1756900000000-4242/app-release.apk',
+                    bytes: 9_803_211,
+                    sha256: '9999aaaa8888bbbb7777cccc6666dddd5555eeee4444ffff3333000022221111',
+                },
+                outputTail: ['BUILD SUCCESSFUL in 3m 12s', 'Verifies'],
+            },
+            releaseError: null,
+            releaseEnvSet: null,
+        },
         logs: [],
     };
 }
@@ -397,7 +478,7 @@ export function createMockBackend(): Backend {
             })),
         };
     };
-    const machines: MockMachine[] = [readyMachine(), freshMachine()];
+    const machines: MockMachine[] = [readyMachine(), freshMachine(), androidMachine()];
     // `?unpaired=1` previews the desktop with no control plane at all.
     let paired = !(
         typeof location !== 'undefined' && new URLSearchParams(location.search).has('unpaired')
@@ -418,6 +499,11 @@ export function createMockBackend(): Backend {
             developmentCertificateConfigured: deviceReady,
             developmentCertificateName: deviceReady ? 'development.p12' : null,
             developmentCertificatePasswordStored: deviceReady,
+            androidKeystoreConfigured: true,
+            androidKeystoreName: 'upload.keystore',
+            androidKeyAlias: 'upload',
+            androidKeystorePasswordStored: true,
+            androidKeyPasswordStored: false,
         },
         {
             id: 'client-app',
@@ -434,11 +520,17 @@ export function createMockBackend(): Backend {
             developmentCertificateConfigured: false,
             developmentCertificateName: null,
             developmentCertificatePasswordStored: false,
+            androidKeystoreConfigured: false,
+            androidKeystoreName: null,
+            androidKeyAlias: null,
+            androidKeystorePasswordStored: false,
+            androidKeyPasswordStored: false,
         },
     ];
     const attachments: Record<string, string | null> = {
         default: 'example-team',
         'team-mac': null,
+        'pixel-builder': 'example-team',
     };
     const templates: T.MachineTemplateSummary[] = [
         {
@@ -473,6 +565,7 @@ export function createMockBackend(): Backend {
     const envAttachments: Record<string, string | null> = {
         default: 'production',
         'team-mac': null,
+        'pixel-builder': null,
     };
     const envSetFor = (machineId: string): T.EnvSetSummary | null =>
         envSets.find((set) => set.id === envAttachments[machineId]) ?? null;
@@ -487,10 +580,12 @@ export function createMockBackend(): Backend {
     const vaultCleared =
         typeof location !== 'undefined' && new URLSearchParams(location.search).has('vaultCleared');
     const storedKits = () => (vaultCleared ? [] : kits);
-    const kitComplete = (kit: T.SigningKitSummary) =>
-        kit.signingCertificateConfigured &&
-        kit.provisioningProfileNames.length > 0 &&
-        kit.guestKeychainConfigured;
+    const kitComplete = (kit: T.SigningKitSummary, machine: MockMachine) =>
+        machine.android
+            ? kit.androidKeystoreConfigured && kit.androidKeystorePasswordStored
+            : kit.signingCertificateConfigured &&
+              kit.provisioningProfileNames.length > 0 &&
+              kit.guestKeychainConfigured;
 
     const find = (machineId: string): MockMachine => {
         const machine = machines.find((entry) => entry.id === machineId);
@@ -524,7 +619,7 @@ export function createMockBackend(): Backend {
         }
     };
 
-    const view = (machine: MockMachine): T.MacBuilderView => {
+    const view = (machine: MockMachine): T.MachineView => {
         const running = machine.state === 'running';
         const trust: T.GuestTrustState =
             !running || !machine.reachable
@@ -556,7 +651,7 @@ export function createMockBackend(): Backend {
                 if (!attached) {
                     return machine.signing ? 'kit_missing' : 'unconfigured';
                 }
-                return kitComplete(attached) ? 'ready' : 'incomplete';
+                return kitComplete(attached, machine) ? 'ready' : 'incomplete';
             })(),
             vaultIssue: null,
             guest: {
@@ -638,6 +733,16 @@ export function createMockBackend(): Backend {
             },
             deviceRun: machine.deviceRun ? { ...machine.deviceRun } : null,
             deviceRunError: machine.deviceRunError,
+            android: machine.android
+                ? {
+                      workspace: machine.android.workspace
+                          ? { ...machine.android.workspace }
+                          : null,
+                      release: machine.android.release ? { ...machine.android.release } : null,
+                      releaseEnvSet: machine.android.releaseEnvSet,
+                      releaseError: machine.android.releaseError,
+                  }
+                : null,
         };
     };
 
@@ -645,6 +750,7 @@ export function createMockBackend(): Backend {
         host: hostReady,
         machines: machines.map((machine) => ({
             id: machine.id,
+            platform: machine.android ? 'android' : 'ios',
             templateName: templateFor(machine)?.name ?? null,
             config: { ...machine.config },
             createdAtEpochSeconds: machine.createdAt,
@@ -653,16 +759,19 @@ export function createMockBackend(): Backend {
             busyOperation: machine.busy,
             guestConfigured: machine.username !== null,
             trustPinned: machine.pinned,
-            workspaceName: machine.workspace?.name ?? null,
+            workspaceName: machine.workspace?.name ?? machine.android?.workspace?.name ?? null,
             envSetName: envSetFor(machine.id)?.name ?? null,
             signingKitName:
                 storedKits().find((kit) => kit.id === attachments[machine.id])?.name ?? null,
-            signingProvisioned: machine.signing !== null,
+            signingProvisioned: machine.android
+                ? (storedKits().find((kit) => kit.id === attachments[machine.id])
+                      ?.androidKeystoreConfigured ?? false)
+                : machine.signing !== null,
             signingIdentity:
                 machine.signing?.distributionIdentity?.identityName ??
                 machine.signing?.developmentIdentity?.identityName ??
                 null,
-            archiveRetained: machine.archive !== null,
+            archiveRetained: machine.archive !== null || machine.android?.release != null,
             usbReady: machine.usbContainer && machine.state !== 'missing',
             deviceRunRetained: machine.deviceRun !== null,
         })),
@@ -759,19 +868,22 @@ export function createMockBackend(): Backend {
                     ],
                     ['checking_space', 'Checking free space for the compressed copy', null],
                     ['compressing_disk', 'Compressing the macOS disk into the template', 0],
+                    ['compressing_disk', 'Compressing the macOS disk into the template', 20],
                     ['compressing_disk', 'Compressing the macOS disk into the template', 45],
+                    ['compressing_disk', 'Compressing the macOS disk into the template', 70],
                     ['compressing_disk', 'Compressing the macOS disk into the template', 90],
                     ['copying_files', 'Copying the NVRAM and install media', 100],
                     ['completed', 'Template saved', 100],
                 ];
+                // Slow enough to leave the machine and watch it from the Templates page.
                 let elapsed = 0;
                 for (const [phase, detail, percent] of phases) {
                     emitter.emit<T.MachineEvent<T.TemplateSaveProgress>>(
                         'machine-template-progress',
                         { machineId, phase, elapsedSeconds: elapsed, detail, percent },
                     );
-                    await sleep(500);
-                    elapsed += 4;
+                    await sleep(900);
+                    elapsed += 40;
                 }
                 machine.state = 'exited';
                 machine.startedAt = null;
@@ -1196,6 +1308,9 @@ export function createMockBackend(): Backend {
         async openMachineScreen(_machineId, url) {
             window.open(url, '_blank', 'noopener');
         },
+        async openUrl(url) {
+            window.open(url, '_blank', 'noopener');
+        },
         async openDeveloperTools() {
             // The browser preview already has its own developer tools.
         },
@@ -1268,6 +1383,197 @@ export function createMockBackend(): Backend {
             const machine = find(machineId);
             machine.archive = null;
             machine.archiveError = null;
+            return view(machine);
+        },
+        async approveAndroidWorkspace(machineId, path) {
+            const machine = find(machineId);
+            await sleep(250);
+            machine.android ??= {
+                workspace: null,
+                release: null,
+                releaseError: null,
+                releaseEnvSet: null,
+            };
+            machine.android.workspace = {
+                localPath: path,
+                name: path.split('/').filter(Boolean).pop() ?? 'project',
+                applicationId: 'com.example.app',
+                lastSnapshotSha256: null,
+                lastSyncFileCount: null,
+                lastSyncBytes: null,
+                lastBuildSucceeded: false,
+                lastBuild: null,
+                lastSource: null,
+            };
+            return view(machine);
+        },
+        async clearAndroidWorkspace(machineId) {
+            const machine = find(machineId);
+            if (machine.android) {
+                machine.android.workspace = null;
+            }
+            return view(machine);
+        },
+        async syncAndroidWorkspace(machineId) {
+            const machine = find(machineId);
+            return busy(machine, 'Synchronizing source', async () => {
+                const total = 28_278_463;
+                const phases: T.AndroidBuildPhase[] = [
+                    'snapshotting',
+                    'transferring',
+                    'extracting',
+                    'completed',
+                ];
+                for (const [index, phase] of phases.entries()) {
+                    emitter.emit<T.MachineEvent<T.AndroidBuildProgress>>(
+                        'machine-android-build-progress',
+                        {
+                            machineId,
+                            phase,
+                            completedBytes: (total / 3) * Math.min(index, 3),
+                            totalBytes: total,
+                            elapsedSeconds: index * 2,
+                            detail: phase,
+                            logLine: null,
+                        },
+                    );
+                    await sleep(400);
+                }
+                const workspace = machine.android?.workspace;
+                if (workspace) {
+                    workspace.lastSnapshotSha256 =
+                        '6c22009fda0b9467709394b5ae1c442af1da4544d63b5ac01b8778c03d7fcd7b';
+                    workspace.lastSyncFileCount = 1397;
+                    workspace.lastSyncBytes = total;
+                    workspace.lastBuildSucceeded = false;
+                    workspace.lastBuild = null;
+                }
+                return {
+                    view: view(machine),
+                    sync: {
+                        guestPath: '/root/BuildBridge/workspaces/active',
+                        snapshotSha256:
+                            '6c22009fda0b9467709394b5ae1c442af1da4544d63b5ac01b8778c03d7fcd7b',
+                        sourceFileCount: 1397,
+                        sourceBytes: total,
+                        archiveBytes: 9_100_000,
+                    },
+                };
+            });
+        },
+        async runAndroidDebugBuild(machineId) {
+            const machine = find(machineId);
+            return busy(machine, 'Running the debug build', async () => {
+                const phases: T.AndroidBuildPhase[] = [
+                    'preparing_tools',
+                    'installing_dependencies',
+                    'building_web_assets',
+                    'syncing_android',
+                    'building',
+                    'inspecting',
+                    'completed',
+                ];
+                for (const [index, phase] of phases.entries()) {
+                    emitter.emit<T.MachineEvent<T.AndroidBuildProgress>>(
+                        'machine-android-build-progress',
+                        {
+                            machineId,
+                            phase,
+                            completedBytes: 0,
+                            totalBytes: 0,
+                            elapsedSeconds: index * 9,
+                            detail: phase,
+                            logLine: phase === 'building' ? '> Task :app:compileDebugKotlin' : null,
+                        },
+                    );
+                    await sleep(500);
+                }
+                const build: T.AndroidBuildResult = {
+                    applicationId: 'com.example.app.debug',
+                    versionName: '3.2.0',
+                    versionCode: '12',
+                    toolchain: {
+                        jdkVersion: 'openjdk version "21.0.12.1" 2026-08-18 LTS',
+                        buildToolsVersion: '35.0.0',
+                    },
+                    apk: {
+                        path: `/home/you/.local/share/dev.buildbridge.desktop/machines/${machineId}/artifacts/debug-${Date.now()}-4242/app-debug.apk`,
+                        bytes: 33_410_772,
+                        sha256: '5555aaaa6666bbbb7777cccc8888dddd9999eeee0000ffff1111222233334444',
+                    },
+                    outputTail: ['BUILD SUCCESSFUL in 2m 41s'],
+                };
+                const workspace = machine.android?.workspace;
+                if (workspace) {
+                    workspace.lastBuildSucceeded = true;
+                    workspace.lastBuild = build;
+                }
+                return { view: view(machine), build };
+            });
+        },
+        async runAndroidRelease(machineId, envSetId) {
+            const machine = find(machineId);
+            return busy(machine, 'Building the signed release', async () => {
+                const phases: T.AndroidReleasePhase[] = [
+                    'preparing',
+                    ...(envSetId ? (['building_web_assets'] as const) : []),
+                    'bundling',
+                    'signing',
+                    'verifying',
+                    'transferring',
+                    'completed',
+                ];
+                for (const [index, phase] of phases.entries()) {
+                    emitter.emit<T.MachineEvent<T.AndroidReleaseProgress>>(
+                        'machine-android-release-progress',
+                        {
+                            machineId,
+                            phase,
+                            completedBytes: index,
+                            totalBytes: phases.length - 1,
+                            elapsedSeconds: index * 30,
+                            detail: phase,
+                            logLine: phase === 'bundling' ? '> Task :app:bundleRelease' : null,
+                        },
+                    );
+                    await sleep(600);
+                }
+                const release = androidMachine().android?.release as T.AndroidReleaseResult;
+                if (machine.android) {
+                    machine.android.release = release;
+                    machine.android.releaseError = null;
+                    machine.android.releaseEnvSet =
+                        envSets.find((set) => set.id === envSetId)?.name ?? null;
+                }
+                return { view: view(machine), release };
+            });
+        },
+        async revealAndroidRelease() {},
+        async revealAndroidDebugApk() {},
+        async downloadXcode(machineId, query) {
+            // The preview has no Apple to talk to: the archive arrives over a few seconds.
+            const fileName = `${query.replace(/\s+/g, '_')}.xip`;
+            const path = `/home/you/.local/share/dev.buildbridge.desktop/xcode/${fileName}`;
+            const total = 3_100_000_000;
+            void (async () => {
+                for (let step = 1; step <= 6; step += 1) {
+                    await sleep(500);
+                    emitter.emit<T.XcodeDownloadProgress>('xcode-download-progress', {
+                        machineId,
+                        path,
+                        fileName,
+                        bytes: Math.round((total / 6) * step),
+                        state: step === 6 ? 'finished' : 'downloading',
+                    });
+                }
+            })();
+        },
+        async clearAndroidRelease(machineId) {
+            const machine = find(machineId);
+            if (machine.android) {
+                machine.android.release = null;
+                machine.android.releaseError = null;
+            }
             return view(machine);
         },
 
@@ -1438,7 +1744,7 @@ export function createMockBackend(): Backend {
             const kit = storedKits().find((candidate) => candidate.id === attachments[machine.id]);
             if (!kit?.appStoreConnectConfigured) {
                 throw new Error(
-                    'The attached kit has no App Store Connect Team key, so the iPhone cannot be registered.',
+                    'The attached credentials have no App Store Connect Team key, so the iPhone cannot be registered.',
                 );
             }
             return busy(machine, 'Preparing device signing', async () => {
@@ -1538,7 +1844,7 @@ export function createMockBackend(): Backend {
                 ];
                 let tick = 0;
                 while (!machine.cancelRequested && Date.now() - started < 5 * 60_000) {
-                    emit('running', 'Running; console streaming', [
+                    emit('running', 'The app is running; its console streams here.', [
                         consoleLines[tick % consoleLines.length]!,
                     ]);
                     tick += 1;
@@ -1642,7 +1948,7 @@ export function createMockBackend(): Backend {
             await sleep(250);
             const values = envSecretValues[setId];
             if (!values) {
-                throw new Error('This env set is no longer stored.');
+                throw new Error('This environment is no longer stored.');
             }
             return Object.entries(values).map(([key, value]) => ({ key, value }));
         },
@@ -1654,7 +1960,7 @@ export function createMockBackend(): Backend {
             await sleep(250);
             const name = input.name.trim();
             if (name === '') {
-                throw new Error('Give the signing kit a name of 1 to 60 characters.');
+                throw new Error('Give the signing credentials a name of 1 to 60 characters.');
             }
             const existing = input.kitId ? kits.find((kit) => kit.id === input.kitId) : null;
             const merged: T.SigningKitSummary = {
@@ -1686,12 +1992,25 @@ export function createMockBackend(): Backend {
                 provisioningProfileNames: input.provisioningProfilePaths.length
                     ? input.provisioningProfilePaths.map((path) => path.split('/').pop() ?? path)
                     : (existing?.provisioningProfileNames ?? []),
-                guestKeychainConfigured:
-                    (existing?.guestKeychainConfigured ?? false) ||
-                    input.guestKeychainPassword !== '',
+                // Saving invents the keychain password when none is typed.
+                guestKeychainConfigured: true,
                 createdAtEpochSeconds:
                     existing?.createdAtEpochSeconds ?? Math.floor(Date.now() / 1000),
                 attachedMachines: existing?.attachedMachines ?? [],
+                androidKeystoreConfigured:
+                    (existing?.androidKeystoreConfigured ?? false) ||
+                    input.androidKeystorePath.trim() !== '',
+                androidKeystoreName:
+                    input.androidKeystorePath.trim().split('/').pop() ||
+                    (existing?.androidKeystoreName ?? null),
+                androidKeyAlias:
+                    input.androidKeyAlias.trim() || (existing?.androidKeyAlias ?? null),
+                androidKeystorePasswordStored:
+                    (existing?.androidKeystorePasswordStored ?? false) ||
+                    input.androidKeystorePassword !== '',
+                androidKeyPasswordStored:
+                    (existing?.androidKeyPasswordStored ?? false) ||
+                    input.androidKeyPassword !== '',
             };
             if (existing) {
                 kits[kits.indexOf(existing)] = merged;
@@ -1703,7 +2022,7 @@ export function createMockBackend(): Backend {
         async deleteSigningKit(kitId) {
             const index = kits.findIndex((kit) => kit.id === kitId);
             if (index < 0) {
-                throw new Error('This signing kit is no longer stored.');
+                throw new Error('These signing credentials are no longer stored.');
             }
             kits.splice(index, 1);
             for (const [machineId, attached] of Object.entries(attachments)) {
@@ -1901,6 +2220,36 @@ export function createMockBackend(): Backend {
             ];
         },
 
+        async createAndroidKeystore(kitId, input) {
+            await sleep(900);
+            const kit = kits.find((entry) => entry.id === kitId);
+            if (!kit) {
+                throw new Error('These signing credentials are no longer stored.');
+            }
+            if (kit.androidKeystoreConfigured) {
+                throw new Error(
+                    'These credentials already hold an Android keystore. Remove it before creating another.',
+                );
+            }
+            if (input.password.length < 6) {
+                throw new Error('Choose a keystore password of six to 512 characters on one line.');
+            }
+            kit.androidKeystoreConfigured = true;
+            kit.androidKeystoreName = 'upload.keystore';
+            kit.androidKeyAlias = input.keyAlias.trim() || 'upload';
+            kit.androidKeystorePasswordStored = true;
+            kit.androidKeyPasswordStored = false;
+            return {
+                keystore: {
+                    path: `/home/you/.config/dev.buildbridge.desktop/android-builder/keystores/upload-${Math.floor(Date.now() / 1000)}/upload.keystore`,
+                    keyAlias: kit.androidKeyAlias,
+                    certificateSha256:
+                        '2f7c1e9a4b3d5c6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6',
+                },
+                kit: { ...kit },
+            };
+        },
+
         async downloadAppleProfile(machineId: string, profileId: string) {
             await sleep(700);
             const verification = await this.verifyAppleTeam(machineId);
@@ -1933,6 +2282,11 @@ export function createMockBackend(): Backend {
         onDeviceSigningProgress: async (handler) =>
             emitter.on('machine-device-signing-progress', handler),
         onDeviceProgress: async (handler) => emitter.on('machine-device-progress', handler),
+        onAndroidBuildProgress: async (handler) =>
+            emitter.on('machine-android-build-progress', handler),
+        onAndroidReleaseProgress: async (handler) =>
+            emitter.on('machine-android-release-progress', handler),
+        onXcodeDownloadProgress: async (handler) => emitter.on('xcode-download-progress', handler),
         onDragDrop: async (handler: (event: DragDropEvent) => void) => {
             void handler;
             return () => {};

@@ -7,14 +7,15 @@
 
 import type {
     HostPrerequisites,
-    MacBuilderView,
+    MachineView,
     MachineSummary,
     UnsignedBuildTarget,
 } from '../types/backend';
 import { formatBytes, formatElapsed, relativeTime, secondsSince } from '../lib/format';
 import { isLive } from '../lib/status';
 import { deviceNextSummary, deviceReadiness, deviceWorkingSummary } from './device';
-import { kitIsProvisionable, kitShortfall } from './signing';
+import { isAndroid } from './providers';
+import { androidKitShortfall, kitIsProvisionable, kitShortfall, kitSignsAndroid } from './signing';
 
 export type StepStatus = 'done' | 'active' | 'running' | 'pending' | 'failed';
 
@@ -50,6 +51,11 @@ export interface Step<Id extends string> {
     optional?: boolean;
     /** Self-hosted and experimental; the timeline says so beside the kind. */
     experimental?: boolean;
+    /**
+     * Running and arrived: the operation has reached what it set out to do and stays up until
+     * it is stopped — an app on the phone streaming its console — so nothing is waiting.
+     */
+    live?: boolean;
 }
 
 export type SetupStepId =
@@ -70,10 +76,26 @@ export type BuildStepId =
     | 'archive'
     | 'run-device';
 
-export type JourneyStepId = SetupStepId | BuildStepId;
+/**
+ * An Android machine's journey is the same shape with fewer steps: no macOS to install, no
+ * guest to trust, no Xcode; the debug build stands where the unsigned test build does, the
+ * signed release where the archive does, and nothing is provisioned because the upload key is
+ * streamed in per release.
+ */
+export type AndroidStepId =
+    | 'host'
+    | 'launch'
+    | 'approve'
+    | 'sync'
+    | 'test-build'
+    | 'signing-kit'
+    | 'release';
+
+export type JourneyStepId = SetupStepId | BuildStepId | AndroidStepId;
 
 export type SetupStep = Step<SetupStepId>;
 export type BuildStep = Step<BuildStepId>;
+export type AndroidStep = Step<AndroidStepId>;
 export type JourneyStep = Step<JourneyStepId>;
 
 export const phaseLabel: Record<StepPhase, string> = {
@@ -106,9 +128,10 @@ export const stepShortTitle: Record<JourneyStepId, string> = {
     approve: 'approve a project',
     sync: 'synchronize source',
     'test-build': 'test build',
-    'signing-kit': 'attach a signing kit',
+    'signing-kit': 'attach signing credentials',
     provision: 'provision signing',
     archive: 'signed archive',
+    release: 'signed release',
     'run-device': 'run on the device',
 };
 
@@ -125,8 +148,9 @@ const unlockedBy: Record<JourneyStepId, string> = {
     sync: 'after a project is approved',
     'test-build': 'after the source is synchronized',
     'signing-kit': 'after the test build passes',
-    provision: 'after a complete kit is attached',
+    provision: 'after complete credentials are attached',
     archive: 'after signing is provisioned',
+    release: 'after credentials with an upload key are attached',
     'run-device': 'after signing is provisioned',
 };
 
@@ -139,15 +163,20 @@ export interface StepContext {
      * start.
      */
     runningOperation?: string | null;
+    /**
+     * The running operation has reached its live stage — the app is up on the phone with its
+     * console streaming — rather than still working towards it.
+     */
+    runningLive?: boolean;
     /** Reference time for elapsed displays; injectable for tests. */
     now?: number;
 }
 
 /**
  * What a running step says when the operation on it is not the step's own: stopping,
- * discarding and deleting run on the launch step, removing signing on the provision step,
- * adopting the lockfile on the test-build step. Keyed by client operation id and native busy
- * key alike.
+ * discarding, deleting and saving a template run on the launch step, removing signing on the
+ * provision step, adopting the lockfile on the test-build step. Keyed by client operation id
+ * and native busy key alike.
  */
 const runningSummaryByOperation: Record<string, string> = {
     stop: 'Stopping safely; the container and its macOS disk are kept',
@@ -156,10 +185,13 @@ const runningSummaryByOperation: Record<string, string> = {
     discarding: 'Discarding the container and its macOS disk',
     delete: 'Deleting the machine',
     deleting: 'Deleting the machine',
+    'save-template': 'Saving the machine as a template; macOS is shut down first',
+    saving_template: 'Saving the machine as a template; macOS is shut down first',
     'clear-signing': 'Removing the guest keychain and installed profiles',
     clearing_signing: 'Removing the guest keychain and installed profiles',
     'adopt-lock': 'Adopting the guest’s Podfile.lock into the project',
     adopting_lock: 'Adopting the guest’s Podfile.lock into the project',
+    'clear-release': 'Clearing the retained release',
 };
 
 function runningSummary(context: StepContext, own: string): string {
@@ -194,7 +226,7 @@ function builtWith(workspace: {
 }
 
 /** Guest setup: everything that prepares one machine to build any project. */
-export function deriveSetupSteps(view: MacBuilderView, context: StepContext): SetupStep[] {
+export function deriveSetupSteps(view: MachineView, context: StepContext): SetupStep[] {
     // A clone boots the template's macOS and is bootstrapped from the template's key, so
     // the three steps a person does on a fresh install are BuildBridge's here.
     const template = view.template;
@@ -309,7 +341,7 @@ export function deriveSetupSteps(view: MacBuilderView, context: StepContext): Se
                   : reachable
                     ? template
                         ? `Pinning the identity ${template.name} recorded, as soon as macOS answers`
-                        : 'Compare the fingerprint below with the one macOS reports, then trust it'
+                        : 'Pin the fingerprint below; compare it with the one macOS reports first if you share this host'
                     : unlockedBy.trust,
     });
 
@@ -349,7 +381,7 @@ export function deriveSetupSteps(view: MacBuilderView, context: StepContext): Se
             : xcodeInstalled
               ? xcodeLabel(diagnostics.xcodeVersion)
               : authenticated
-                ? 'Download the Universal .xip from Apple on this host, then import it'
+                ? 'Download it from Apple in the window BuildBridge opens; the import follows by itself'
                 : unlockedBy['xcode-import'],
     });
 
@@ -378,7 +410,7 @@ export function deriveSetupSteps(view: MacBuilderView, context: StepContext): Se
 }
 
 /** Project build: everything that happens on an already prepared machine. */
-export function deriveBuildSteps(view: MacBuilderView, context: StepContext): BuildStep[] {
+export function deriveBuildSteps(view: MachineView, context: StepContext): BuildStep[] {
     const { appleWorkspace: workspace, signingKit, signing, archive } = view;
     const machineReady =
         view.runtime.state === 'running' &&
@@ -457,21 +489,21 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
     steps.push({
         id: 'signing-kit',
         phase: 'build',
-        title: 'Attach a signing kit',
+        title: 'Attach signing credentials',
         kind: 'manual',
         status: credentialsLost ? 'failed' : kitReady ? 'done' : built ? 'active' : 'pending',
         summary:
             view.signingHealth === 'vault_unavailable'
                 ? `The credential vault could not be read: ${view.vaultIssue ?? 'unknown error'}`
                 : view.signingHealth === 'kit_missing'
-                  ? 'The kit this machine was provisioned from is no longer stored. Store it again, then provision to rebuild the guest keychain.'
+                  ? 'The credentials this machine was provisioned from are no longer stored. Store them again, then provision to rebuild the guest keychain.'
                   : kitReady
                     ? signingKit.signingCertificateConfigured
                         ? `${signingKit.name} · ${signingKit.signingCertificateName ?? 'certificate'} · ${profileCount} profile${profileCount === 1 ? '' : 's'}`
                         : `${signingKit.name} · development identity only · phone builds, no archive`
                     : signingKit === null
                       ? built
-                          ? 'Attach one of this host’s signing kits, or store a new one'
+                          ? 'Attach signing credentials stored on this host, or store new ones'
                           : unlockedBy['signing-kit']
                       : `${signingKit.name} is incomplete: ${kitShortfall(signingKit).join(', ')} missing`,
     });
@@ -522,9 +554,9 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
               : view.archiveError
                 ? 'The last signed build failed; the diagnostic is kept below'
                 : credentialsLost
-                  ? 'Blocked: the signing kit is missing, and its keychain password is needed to sign'
+                  ? 'Blocked: the signing credentials are missing, and their keychain password is needed to sign'
                   : provisioned && !canArchive
-                    ? 'Locked: the kit holds only a development identity; add a distribution identity and an App Store profile, then provision again'
+                    ? 'Locked: the credentials hold only a development identity; add a distribution identity and an App Store profile, then provision again'
                     : provisioned && built
                       ? workspace?.lastNativeLockUpdated
                           ? 'Blocked: commit the refreshed Podfile.lock on the host and synchronize again'
@@ -544,6 +576,7 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
         kind: 'assisted',
         optional: true,
         experimental: true,
+        ...(isRunning('run-device') && context.runningLive ? { live: true } : {}),
         status: isRunning('run-device')
             ? 'running'
             : view.deviceRunError
@@ -554,13 +587,15 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
                   ? 'active'
                   : 'pending',
         summary: isRunning('run-device')
-            ? deviceWorkingSummary(readiness)
+            ? context.runningLive
+                ? `Running on ${readiness.name}; console streaming`
+                : deviceWorkingSummary(readiness)
             : view.deviceRunError
               ? 'The last device run failed; the diagnostic is kept below'
               : run
                 ? `${run.device.name} · ${run.marketingVersion} (${run.buildNumber}) · installed ${relativeTime(new Date(run.installedAtEpochSeconds * 1000).toISOString(), context.now)}`
                 : credentialsLost
-                  ? 'Blocked: the signing kit is missing, and its keychain password is needed to sign'
+                  ? 'Blocked: the signing credentials are missing, and their keychain password is needed to sign'
                   : provisioned && built
                     ? deviceNextSummary(readiness, view)
                     : unlockedBy['run-device'],
@@ -569,9 +604,311 @@ export function deriveBuildSteps(view: MacBuilderView, context: StepContext): Bu
     return steps;
 }
 
-/** The whole journey for one machine: setup first, then build, fourteen steps in all. */
-export function deriveJourney(view: MacBuilderView, context: StepContext): JourneyStep[] {
+/**
+ * An Android machine's seven steps: the host and the container, then the project, the debug
+ * build, the kit with the upload key, and the signed release.
+ */
+export function deriveAndroidSteps(view: MachineView, context: StepContext): AndroidStep[] {
+    const { runtime, signingKit } = view;
+    const android = view.android;
+    const workspace = android?.workspace ?? null;
+    const release = android?.release ?? null;
+    const releaseError = android?.releaseError ?? null;
+    const running = runtime.state === 'running';
+    const hostReady = runtime.prerequisites.ready;
+    const approved = workspace !== null;
+    const synced = approved && workspace.lastSnapshotSha256 !== null;
+    const built = synced && workspace.lastBuildSucceeded;
+    const kitReady = signingKit !== null && kitSignsAndroid(signingKit);
+    const credentialsLost =
+        view.signingHealth === 'kit_missing' || view.signingHealth === 'vault_unavailable';
+    const isRunning = (id: AndroidStepId) => context.runningStep === id;
+    const lastBuild = workspace?.lastBuild ?? null;
+
+    const steps: AndroidStep[] = [];
+
+    steps.push({
+        id: 'host',
+        phase: 'setup',
+        title: 'Check the host',
+        kind: 'automatic',
+        status: hostReady ? 'done' : 'failed',
+        summary: hostReady
+            ? `${runtime.prerequisites.dockerVersion ?? 'Docker'} · no virtual machine needed`
+            : runtime.prerequisites.issues.join(' '),
+    });
+
+    const uptime = secondsSince(runtime.startedAt, context.now);
+    steps.push({
+        id: 'launch',
+        phase: 'setup',
+        title: 'Start the Android toolchain',
+        kind: 'automatic',
+        status: isRunning('launch')
+            ? 'running'
+            : running
+              ? 'done'
+              : runtime.state === 'dead' || runtime.state === 'unavailable'
+                ? 'failed'
+                : hostReady
+                  ? 'active'
+                  : 'pending',
+        summary: isRunning('launch')
+            ? runningSummary(context, 'Creating and starting the toolchain container')
+            : running
+              ? uptime === null
+                  ? 'Running'
+                  : `Running for ${formatElapsed(uptime)}`
+              : runtime.state === 'missing'
+                ? hostReady
+                    ? 'Not created yet; the first start pulls the JDK image, a few hundred megabytes'
+                    : unlockedBy.launch
+                : runtime.state === 'exited' || runtime.state === 'created'
+                  ? 'Stopped; the SDK and caches are kept on this host and resume on start'
+                  : runtime.state === 'unavailable'
+                    ? 'Docker is unavailable on this host'
+                    : `Container is ${runtime.state}`,
+    });
+
+    steps.push({
+        id: 'approve',
+        phase: 'build',
+        title: 'Approve the project folder',
+        kind: 'manual',
+        status: approved ? 'done' : running ? 'active' : 'pending',
+        summary: approved
+            ? [workspace.name, workspace.applicationId].filter(Boolean).join(' · ')
+            : running
+              ? 'Choose the one host folder BuildBridge may read: a Capacitor project with its Android platform'
+              : 'after the toolchain starts',
+    });
+
+    steps.push({
+        id: 'sync',
+        phase: 'build',
+        title: 'Synchronize source',
+        kind: 'automatic',
+        status: isRunning('sync') ? 'running' : synced ? 'done' : approved ? 'active' : 'pending',
+        summary: isRunning('sync')
+            ? 'Creating and transferring the bounded snapshot'
+            : synced
+              ? `${workspace.lastSyncFileCount ?? 0} files · ${formatBytes(workspace.lastSyncBytes)} · snapshot ${workspace.lastSnapshotSha256?.slice(0, 12) ?? ''}`
+              : approved
+                ? 'Copy a filtered, checksummed snapshot into the container'
+                : unlockedBy.sync,
+    });
+
+    steps.push({
+        id: 'test-build',
+        phase: 'build',
+        title: 'Run the debug build',
+        kind: 'automatic',
+        status: isRunning('test-build')
+            ? 'running'
+            : built
+              ? 'done'
+              : synced
+                ? 'active'
+                : 'pending',
+        summary: isRunning('test-build')
+            ? runningSummary(context, 'Preparing the toolchain, dependencies, and the debug APK')
+            : built
+              ? lastBuild
+                  ? [
+                        `${lastBuild.applicationId} ${lastBuild.versionName} (${lastBuild.versionCode})`,
+                        lastBuild.apk ? `APK ${formatBytes(lastBuild.apk.bytes)}` : null,
+                        lastBuild.toolchain.jdkVersion
+                            .replace(/^openjdk version /, 'JDK ')
+                            .replace(/"/g, ''),
+                    ]
+                        .filter(Boolean)
+                        .join(' · ')
+                  : 'Debug build passed'
+              : synced
+                ? 'Install the locked dependencies, build the web assets, and compile the debug APK with Gradle'
+                : unlockedBy['test-build'],
+    });
+
+    steps.push({
+        id: 'signing-kit',
+        phase: 'build',
+        title: 'Attach signing credentials',
+        kind: 'manual',
+        status: credentialsLost ? 'failed' : kitReady ? 'done' : built ? 'active' : 'pending',
+        summary:
+            view.signingHealth === 'vault_unavailable'
+                ? `The credential vault could not be read: ${view.vaultIssue ?? 'unknown error'}`
+                : view.signingHealth === 'kit_missing'
+                  ? 'The credentials this machine used are no longer stored. Store them again and attach them here.'
+                  : kitReady
+                    ? `${signingKit.name} · ${signingKit.androidKeystoreName ?? 'keystore'} · key ${signingKit.androidKeyAlias ?? ''}`
+                    : signingKit === null
+                      ? built
+                          ? 'Attach credentials holding an upload keystore, or create one on the Signing page'
+                          : unlockedBy['signing-kit']
+                      : `${signingKit.name} holds no upload key: ${androidKitShortfall(signingKit).join(', ')} missing`,
+    });
+
+    steps.push({
+        id: 'release',
+        phase: 'build',
+        title: 'Build the signed bundle and APK',
+        kind: 'automatic',
+        status: isRunning('release')
+            ? 'running'
+            : release
+              ? 'done'
+              : releaseError
+                ? 'failed'
+                : kitReady && built && !credentialsLost
+                  ? 'active'
+                  : 'pending',
+        summary: isRunning('release')
+            ? runningSummary(context, 'Bundling, signing, verifying, and transferring artifacts')
+            : release
+              ? `${release.versionName} (${release.versionCode}) · bundle ${formatBytes(release.aab.bytes)} · APK ${formatBytes(release.apk.bytes)}`
+              : releaseError
+                ? 'The last signed release failed; the diagnostic is kept below'
+                : credentialsLost
+                  ? 'Blocked: the signing credentials are missing, and their upload key is needed to sign'
+                  : kitReady && built
+                    ? 'Release build type · app bundle for Google Play · APK for direct install'
+                    : unlockedBy.release,
+    });
+
+    return steps;
+}
+
+/**
+ * The whole journey for one machine: setup first, then build. Fourteen steps on a macOS
+ * machine, seven on an Android one.
+ */
+export function deriveJourney(view: MachineView, context: StepContext): JourneyStep[] {
+    if (isAndroid(view.profile.provider)) {
+        return deriveAndroidSteps(view, context);
+    }
     return [...deriveSetupSteps(view, context), ...deriveBuildSteps(view, context)];
+}
+
+/** The coarse Android journey from the list row alone; the exact one replaces it once probed. */
+function summarizeAndroidJourney(
+    summary: MachineSummary,
+    host: HostPrerequisites | null,
+    runningStep: string | null,
+): JourneyStep[] {
+    const hostReady = host?.ready ?? true;
+    const live = isLive(summary.state);
+    const dead = summary.state === 'dead' || summary.state === 'unavailable';
+    const approved = summary.workspaceName !== null;
+    const released = summary.archiveRetained;
+    const kitReady = summary.signingProvisioned;
+    const built = released || kitReady;
+    const rows: Array<{
+        id: AndroidStepId;
+        phase: StepPhase;
+        title: string;
+        kind: StepKind;
+        done: boolean;
+        fact: string;
+    }> = [
+        {
+            id: 'host',
+            phase: 'setup',
+            title: 'Check the host',
+            kind: 'automatic',
+            done: hostReady,
+            fact: hostReady ? 'Docker ready' : (host?.issues.join(' ') ?? ''),
+        },
+        {
+            id: 'launch',
+            phase: 'setup',
+            title: 'Start the Android toolchain',
+            kind: 'automatic',
+            done: live,
+            fact: live
+                ? 'Running'
+                : summary.state === 'missing'
+                  ? 'Not created yet'
+                  : dead
+                    ? 'Docker is unavailable or the container died'
+                    : 'Stopped; the SDK and caches are kept',
+        },
+        {
+            id: 'approve',
+            phase: 'build',
+            title: 'Approve the project folder',
+            kind: 'manual',
+            done: approved,
+            fact: summary.workspaceName ?? '',
+        },
+        {
+            id: 'sync',
+            phase: 'build',
+            title: 'Synchronize source',
+            kind: 'automatic',
+            done: built,
+            fact: 'Snapshot in the container',
+        },
+        {
+            id: 'test-build',
+            phase: 'build',
+            title: 'Run the debug build',
+            kind: 'automatic',
+            done: built,
+            fact: 'Debug build passed',
+        },
+        {
+            id: 'signing-kit',
+            phase: 'build',
+            title: 'Attach signing credentials',
+            kind: 'manual',
+            done: built && kitReady,
+            fact: summary.signingKitName ?? '',
+        },
+        {
+            id: 'release',
+            phase: 'build',
+            title: 'Build the signed bundle and APK',
+            kind: 'automatic',
+            done: released,
+            fact: 'Bundle and APK retained',
+        },
+    ];
+
+    let blocked = false;
+    let activeSeen = false;
+    return rows.map((row) => {
+        let status: StepStatus;
+        if (runningStep === row.id) {
+            status = 'running';
+        } else if (row.id === 'host' && !hostReady) {
+            status = 'failed';
+            blocked = true;
+        } else if (row.id === 'launch' && dead) {
+            status = 'failed';
+            blocked = true;
+        } else if (row.done && !blocked) {
+            status = 'done';
+        } else if (!activeSeen && !blocked) {
+            status = 'active';
+            activeSeen = true;
+        } else {
+            status = 'pending';
+        }
+        return {
+            id: row.id,
+            phase: row.phase,
+            title: row.title,
+            kind: row.kind,
+            status,
+            summary:
+                status === 'done' || status === 'failed'
+                    ? row.fact
+                    : row.id === 'approve'
+                      ? 'after the toolchain starts'
+                      : unlockedBy[row.id],
+        };
+    });
 }
 
 /**
@@ -584,6 +921,9 @@ export function summarizeJourney(
     host: HostPrerequisites | null,
     runningStep: string | null = null,
 ): JourneyStep[] {
+    if (isAndroid(summary.config.provider)) {
+        return summarizeAndroidJourney(summary, host, runningStep);
+    }
     const hostReady = host?.ready ?? true;
     const live = isLive(summary.state);
     const dead = summary.state === 'dead' || summary.state === 'unavailable';
@@ -696,7 +1036,7 @@ export function summarizeJourney(
         {
             id: 'signing-kit',
             phase: 'build',
-            title: 'Attach a signing kit',
+            title: 'Attach signing credentials',
             kind: 'manual',
             done: built && kitAttached,
             fact: summary.signingKitName ?? '',
@@ -826,9 +1166,9 @@ export function groupByPhase<Id extends string>(steps: Step<Id>[]): PhaseGroup<I
 export function journeyHeadline(steps: JourneyStep[]): string {
     const focus = focusStep(steps);
     if (!focus) {
-        const archive = steps.find((step) => step.id === 'archive');
-        if (archive?.status === 'done') {
-            return `signed ${archive.summary.split(' · ')[0]}`;
+        const signed = steps.find((step) => step.id === 'archive' || step.id === 'release');
+        if (signed?.status === 'done') {
+            return `signed ${signed.summary.split(' · ')[0]}`;
         }
         return steps.length ? 'all steps done' : '';
     }

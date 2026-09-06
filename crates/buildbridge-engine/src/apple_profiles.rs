@@ -18,13 +18,13 @@ pub async fn verify_apple_developer_team(
     })?;
     let secrets = resolve_signing_kit_for(app, &machine_id).await?;
     let key_id = secrets.app_store_connect_key_id.ok_or_else(|| {
-        "The stored signing kit does not include an App Store Connect Key ID.".to_string()
+        "The stored signing credentials do not include an App Store Connect Key ID.".to_string()
     })?;
     let issuer_id = secrets.app_store_connect_issuer_id.ok_or_else(|| {
-        "The stored signing kit does not include an App Store Connect Issuer ID.".to_string()
+        "The stored signing credentials do not include an App Store Connect Issuer ID.".to_string()
     })?;
     let private_key = secrets.app_store_connect_private_key.ok_or_else(|| {
-        "The stored signing kit does not include an App Store Connect .p8 key.".to_string()
+        "The stored signing credentials do not include an App Store Connect .p8 key.".to_string()
     })?;
 
     apple_api::verify_developer_team(
@@ -58,23 +58,23 @@ pub async fn create_apple_replacement_profile(
     let mut secrets = resolve_signing_kit_for(app, &machine_id).await?;
     if secrets.provisioning_profile_paths.len() >= MAX_PROVISIONING_PROFILES {
         return Err(format!(
-            "The signing kit already retains {MAX_PROVISIONING_PROFILES} profiles. Remove obsolete local profile paths before creating another one."
+            "The signing credentials already retain {MAX_PROVISIONING_PROFILES} profiles. Remove obsolete local profile paths before creating another one."
         ));
     }
     let key_id = secrets.app_store_connect_key_id.as_deref().ok_or_else(|| {
-        "The stored signing kit does not include an App Store Connect Key ID.".to_string()
+        "The stored signing credentials do not include an App Store Connect Key ID.".to_string()
     })?;
     let issuer_id = secrets
         .app_store_connect_issuer_id
         .as_deref()
         .ok_or_else(|| {
-            "The stored signing kit does not include an App Store Connect Issuer ID.".to_string()
+            "The stored signing credentials do not include an App Store Connect Issuer ID.".to_string()
         })?;
     let private_key = secrets
         .app_store_connect_private_key
         .as_deref()
         .ok_or_else(|| {
-            "The stored signing kit does not include an App Store Connect .p8 key.".to_string()
+            "The stored signing credentials do not include an App Store Connect .p8 key.".to_string()
         })?;
 
     let created = apple_api::create_replacement_profile(
@@ -142,21 +142,21 @@ pub async fn download_apple_profile(
     let mut secrets = resolve_signing_kit_for(app, &machine_id).await?;
     if secrets.provisioning_profile_paths.len() >= MAX_PROVISIONING_PROFILES {
         return Err(format!(
-            "This kit already holds {MAX_PROVISIONING_PROFILES} profiles. Remove obsolete paths before adding another."
+            "These credentials already hold {MAX_PROVISIONING_PROFILES} profiles. Remove obsolete paths before adding another."
         ));
     }
     let key_id = secrets.app_store_connect_key_id.as_deref().ok_or_else(|| {
-        "This kit has no App Store Connect Key ID, so Apple cannot be asked for the profile."
+        "These credentials have no App Store Connect Key ID, so Apple cannot be asked for the profile."
             .to_string()
     })?;
     let issuer_id = secrets
         .app_store_connect_issuer_id
         .as_deref()
-        .ok_or_else(|| "This kit has no App Store Connect Issuer ID.".to_string())?;
+        .ok_or_else(|| "These credentials have no App Store Connect Issuer ID.".to_string())?;
     let private_key = secrets
         .app_store_connect_private_key
         .as_deref()
-        .ok_or_else(|| "This kit has no App Store Connect .p8 key.".to_string())?;
+        .ok_or_else(|| "These credentials have no App Store Connect .p8 key.".to_string())?;
 
     let (profile, content) =
         apple_api::download_profile(key_id, issuer_id, private_key, profile_id.trim()).await?;

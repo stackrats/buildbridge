@@ -11,14 +11,14 @@ pub async fn pair_guest_device(
     app: &Engine,
     machine_id: String,
     input: PairGuestDeviceInput,
-) -> Result<MacBuilderView, String> {
-    if !buildbridge_docker_osx::valid_device_udid(&input.udid) {
+) -> Result<MachineView, String> {
+    if !buildbridge_machines::valid_device_udid(&input.udid) {
         return Err("The device identifier is not a UDID.".to_string());
     }
     let guest = guest_context(app, &machine_id).await?;
     let paths = guest.paths.clone();
     let devices = run_machine_operation(app, &machine_id, "pairing_device", move || {
-        buildbridge_docker_osx::pair_guest_device(
+        buildbridge_machines::pair_guest_device(
             guest.ssh_port(),
             &guest.username,
             &guest.identity_path,
@@ -32,15 +32,15 @@ pub async fn pair_guest_device(
         cache.insert(machine_id.clone(), devices);
     }
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenSafariInspectorResult {
-    pub(crate) view: MacBuilderView,
-    pub(crate) inspector: buildbridge_docker_osx::SafariInspectorResult,
+    pub(crate) view: MachineView,
+    pub(crate) inspector: buildbridge_machines::SafariInspectorResult,
 }
 
 /// Opens Safari in the guest for Web Inspector on the app running on the phone: the Develop
@@ -54,7 +54,7 @@ pub async fn open_safari_web_inspector(
     let guest = guest_context(app, &machine_id).await?;
     let paths = guest.paths.clone();
     let inspector = tokio::task::spawn_blocking(move || {
-        buildbridge_docker_osx::open_safari_web_inspector(
+        buildbridge_machines::open_safari_web_inspector(
             guest.ssh_port(),
             &guest.username,
             &guest.identity_path,
@@ -66,18 +66,15 @@ pub async fn open_safari_web_inspector(
     .map_err(|error| error.to_string())??;
 
     Ok(OpenSafariInspectorResult {
-        view: build_mac_builder_view(app, &paths).await?,
+        view: build_machine_view(app, &paths).await?,
         inspector,
     })
 }
-pub async fn list_guest_devices(
-    app: &Engine,
-    machine_id: String,
-) -> Result<MacBuilderView, String> {
+pub async fn list_guest_devices(app: &Engine, machine_id: String) -> Result<MachineView, String> {
     let guest = guest_context(app, &machine_id).await?;
     let paths = guest.paths.clone();
     let devices = run_machine_operation(app, &machine_id, "listing_devices", move || {
-        buildbridge_docker_osx::list_guest_devices(
+        buildbridge_machines::list_guest_devices(
             guest.ssh_port(),
             &guest.username,
             &guest.identity_path,
@@ -90,7 +87,7 @@ pub async fn list_guest_devices(
         cache.insert(machine_id.clone(), devices);
     }
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -106,7 +103,7 @@ pub struct PrepareDeviceSigningInput {
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct PrepareDeviceSigningResult {
-    pub(crate) view: MacBuilderView,
+    pub(crate) view: MachineView,
     pub(crate) certificate_created: bool,
     pub(crate) device_already_registered: bool,
     pub(crate) profile_created: bool,
@@ -161,7 +158,7 @@ pub async fn prepare_apple_device_signing(
         "BuildBridge could not detect one release bundle identifier. Re-approve the project after setting PRODUCT_BUNDLE_IDENTIFIER in Xcode."
             .to_string()
     })?;
-    let current = build_mac_builder_view(app, &paths).await?;
+    let current = build_machine_view(app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let mut kit = resolve_signing_kit_for(app, &machine_id).await?;
     let (key_id, issuer_id, private_key) = match (
@@ -172,7 +169,7 @@ pub async fn prepare_apple_device_signing(
         (Some(key_id), Some(issuer_id), Some(private_key)) => (key_id, issuer_id, private_key),
         _ => {
             return Err(
-                "This kit has no App Store Connect key. Device signing needs a Team key with the Admin role to register the iPhone and create a development profile."
+                "These credentials have no App Store Connect key. Device signing needs a Team key with the Admin role to register the iPhone and create a development profile."
                     .to_string(),
             );
         }
@@ -199,7 +196,7 @@ pub async fn prepare_apple_device_signing(
         let ssh_port = profile.ssh_port;
         let username = access.username.clone();
         tokio::task::spawn_blocking(move || {
-            buildbridge_docker_osx::resolve_debug_bundle_identifier(
+            buildbridge_machines::resolve_debug_bundle_identifier(
                 ssh_port,
                 &username,
                 &identity_path,
@@ -218,7 +215,7 @@ pub async fn prepare_apple_device_signing(
     // Already prepared for this phone: nothing to do beyond confirming the registration.
     if kit.development_certificate_path.is_some()
         && current.signing.as_ref().is_some_and(|signing| {
-            buildbridge_docker_osx::select_development_profile(
+            buildbridge_machines::select_development_profile(
                 signing,
                 &device_bundle_identifier,
                 &udid,
@@ -254,7 +251,7 @@ pub async fn prepare_apple_device_signing(
     let outcome: Result<(bool, bool, bool), String> = async {
         report(
             DeviceSigningPhase::CheckingKit,
-            "Checking the kit for a development identity",
+            "Checking the credentials for a development identity",
         );
         let mut certificate_created = false;
         if kit.development_certificate_path.is_none() {
@@ -291,7 +288,7 @@ pub async fn prepare_apple_device_signing(
                 // and per-team, so a new one is created rather than the kit sent back to edit.
                 report(
                     DeviceSigningPhase::CreatingCertificate,
-                    "The kit's development certificate is no longer valid at Apple; creating a new one",
+                    "The stored development certificate is no longer valid at Apple; creating a new one",
                 );
                 create_apple_certificate_for_kit(
                     app,
@@ -417,7 +414,7 @@ pub async fn prepare_apple_device_signing(
         if let Some(content) = content {
             if kit.provisioning_profile_paths.len() >= MAX_PROVISIONING_PROFILES {
                 return Err(format!(
-                    "This kit already holds {MAX_PROVISIONING_PROFILES} profiles. Remove obsolete paths before adding another."
+                    "These credentials already hold {MAX_PROVISIONING_PROFILES} profiles. Remove obsolete paths before adding another."
                 ));
             }
             let saved_path = save_managed_apple_profile(app, &profile, &content)?;
@@ -451,12 +448,8 @@ pub async fn prepare_apple_device_signing(
     );
     let view = provision_with_kit(app, &machine_id, kit).await?;
     let ready = view.signing.as_ref().is_some_and(|signing| {
-        buildbridge_docker_osx::select_development_profile(
-            signing,
-            &device_bundle_identifier,
-            &udid,
-        )
-        .is_some()
+        buildbridge_machines::select_development_profile(signing, &device_bundle_identifier, &udid)
+            .is_some()
     });
     if !ready {
         return Err(
@@ -490,7 +483,7 @@ pub struct RunAppleDeviceBuildInput {
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct RunAppleDeviceResult {
-    pub(crate) view: MacBuilderView,
+    pub(crate) view: MachineView,
     pub(crate) run: AppleDeviceRunResult,
 }
 
@@ -508,9 +501,9 @@ pub struct StoredAppleDeviceRun {
 
 /// The phone as the view last heard of it from the guest, by UDID.
 fn listed_guest_device(
-    view: &MacBuilderView,
+    view: &MachineView,
     udid: &str,
-) -> Option<buildbridge_docker_osx::GuestDevice> {
+) -> Option<buildbridge_machines::GuestDevice> {
     view.guest
         .devices
         .iter()
@@ -548,13 +541,13 @@ pub async fn run_apple_device_build(
     if !workspace.last_build_succeeded || workspace.last_snapshot_sha256.is_none() {
         return Err("Complete the unsigned project test build first.".to_string());
     }
-    let current = build_mac_builder_view(app, &paths).await?;
+    let current = build_machine_view(app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let signing = current
         .signing
         .clone()
         .ok_or_else(|| "Provision and verify signing in macOS first.".to_string())?;
-    let device_profile = buildbridge_docker_osx::select_development_profile(
+    let device_profile = buildbridge_machines::select_development_profile(
         &signing,
         workspace
             .debug_bundle_identifier
@@ -567,7 +560,7 @@ pub async fn run_apple_device_build(
     let identity = signing
         .development_identity
         .clone()
-        .ok_or_else(|| "The kit has no development identity provisioned.".to_string())?;
+        .ok_or_else(|| "The credentials have no development identity provisioned.".to_string())?;
     let device = match listed_guest_device(&current, &udid) {
         Some(device) => device,
         None => {
@@ -607,15 +600,15 @@ pub async fn run_apple_device_build(
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
-        let device_signing = buildbridge_docker_osx::DeviceSigning {
+        let _operation = buildbridge_machines::enter_operation(scope);
+        let device_signing = buildbridge_machines::DeviceSigning {
             keychain_path: &signing.keychain_path,
             identity_sha1: &identity.identity_sha1,
             development_team: &signing.development_team,
             bundle_identifier: &signing.bundle_identifier,
             profile: &device_profile,
         };
-        buildbridge_docker_osx::run_apple_device_build(
+        buildbridge_machines::run_apple_device_build(
             profile.ssh_port,
             &access.username,
             &identity_path,
@@ -659,19 +652,19 @@ pub async fn run_apple_device_build(
         },
     )?;
     remove_apple_device_run_error(&paths)?;
-    let view = build_mac_builder_view(app, &paths).await?;
+    let view = build_machine_view(app, &paths).await?;
 
     Ok(RunAppleDeviceResult { view, run })
 }
 pub async fn clear_apple_device_run(
     app: &Engine,
     machine_id: String,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     remove_file_if_present(&paths.apple_device_run_record())?;
     remove_apple_device_run_error(&paths)?;
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 
 /// Copies the Podfile.lock CocoaPods wrote in the guest into the approved host project, so a
@@ -694,7 +687,7 @@ pub async fn adopt_guest_podfile_lock(
     }
     let host_lock = PathBuf::from(&workspace.local_path).join("ios/App/Podfile.lock");
     let guest_lock = run_machine_operation(app, &machine_id, "adopting_lock", move || {
-        buildbridge_docker_osx::read_guest_podfile_lock(
+        buildbridge_machines::read_guest_podfile_lock(
             guest.ssh_port(),
             &guest.username,
             &guest.identity_path,
@@ -713,7 +706,7 @@ pub async fn adopt_guest_podfile_lock(
             ));
         }
     };
-    let changes = buildbridge_docker_osx::podfile_lock_changes(&before, &guest_lock);
+    let changes = buildbridge_machines::podfile_lock_changes(&before, &guest_lock);
     let backup = paths.podfile_lock_backup();
     if !before.is_empty() {
         write_restricted_file(&backup, before.as_bytes())?;
@@ -728,7 +721,7 @@ pub async fn adopt_guest_podfile_lock(
 
     workspace.last_native_lock_updated = false;
     save_apple_workspace(&paths, &workspace)?;
-    let view = build_mac_builder_view(app, &paths).await?;
+    let view = build_machine_view(app, &paths).await?;
 
     Ok(AdoptPodfileLockResult {
         view,

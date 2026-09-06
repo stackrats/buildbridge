@@ -142,15 +142,19 @@ async function save(): Promise<void> {
 </script>
 
 <template>
-    <Modal v-model:open="open" :title="editing ? 'Edit env set' : 'New env set'" wide>
+    <Modal v-model:open="open" :title="editing ? 'Edit environment' : 'New environment'" wide>
         <form class="space-y-4" @submit.prevent="save">
             <div class="border border-transparent px-3">
                 <Field
-                    label="Set name"
+                    label="Name"
                     required
                     hint="How you will recognise it when attaching a machine, for example production or staging."
                 >
-                    <Input v-model="form.name" placeholder="A name for this set" :maxlength="60" />
+                    <Input
+                        v-model="form.name"
+                        placeholder="A name for this environment"
+                        :maxlength="60"
+                    />
                 </Field>
             </div>
 

@@ -109,7 +109,8 @@ function move(offset: number): void {
     }
 }
 
-// The node is the status: filled when done, ink when it is your turn, ringed while it runs.
+// The node is the status: filled when done, ink when it is your turn, ringed while it runs,
+// pulsing once it is live.
 const nodeClass: Record<StepStatus, string> = {
     done: 'border-emerald-600 dark:border-emerald-500 bg-emerald-600 dark:bg-emerald-500 text-white dark:text-zinc-950',
     active: 'border-zinc-900 dark:border-zinc-100 bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-950',
@@ -129,6 +130,12 @@ const haloClass: Record<StepStatus, string> = {
     failed: 'ring-4 ring-red-500/20',
     pending: '',
 };
+
+// A live step — up, and staying up until it is stopped — pulses in the status colour instead of
+// spinning: a spinner says "wait", and there is nothing to wait for.
+const liveNodeClass =
+    'border-emerald-600 dark:border-emerald-500 bg-white dark:bg-zinc-900 ring-4 ring-emerald-500/20';
+const liveMetaClass = 'text-emerald-700 dark:text-emerald-400';
 
 const titleClass: Record<StepStatus, string> = {
     done: 'text-zinc-700 dark:text-zinc-200',
@@ -153,11 +160,13 @@ const metaClass: Record<StepStatus, string> = {
 function meta(step: Step<Id>): string {
     const parts: string[] = [];
     switch (step.status) {
-        case 'running':
+        case 'running': {
+            const word = step.live ? 'live' : 'running';
             parts.push(
-                runningSeconds === null ? 'running' : `running · ${formatElapsed(runningSeconds)}`,
+                runningSeconds === null ? word : `${word} · ${formatElapsed(runningSeconds)}`,
             );
             break;
+        }
         case 'failed':
             parts.push('needs attention');
             break;
@@ -287,7 +296,7 @@ function meta(step: Step<Id>): string {
                             type="button"
                             :class="
                                 cn(
-                                    'group/row relative flex w-full items-start gap-3 rounded-md px-2 py-2 text-left transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300',
+                                    'group/row relative flex w-full items-start gap-3 rounded-md px-2 py-2 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300',
                                     selected === step.id
                                         ? 'bg-zinc-100 dark:bg-zinc-800/60'
                                         : 'hover:bg-zinc-100/70 dark:hover:bg-zinc-800/40',
@@ -301,14 +310,18 @@ function meta(step: Step<Id>): string {
                                 :class="
                                     cn(
                                         'step-node relative z-10 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-[11px] font-semibold tabular-nums transition-[background-color,border-color,box-shadow] duration-300 motion-reduce:transition-none',
-                                        nodeClass[step.status],
-                                        haloClass[step.status],
+                                        step.live ? liveNodeClass : nodeClass[step.status],
+                                        step.live ? '' : haloClass[step.status],
                                     )
                                 "
                                 :data-status="step.status"
                             >
                                 <Check v-if="step.status === 'done'" class="h-3.5 w-3.5" />
                                 <X v-else-if="step.status === 'failed'" class="h-3.5 w-3.5" />
+                                <span
+                                    v-else-if="step.status === 'running' && step.live"
+                                    class="h-2 w-2 animate-pulse rounded-full bg-emerald-500 motion-reduce:animate-none"
+                                />
                                 <Spinner
                                     v-else-if="step.status === 'running'"
                                     size="h-3.5 w-3.5"
@@ -342,15 +355,17 @@ function meta(step: Step<Id>): string {
                                 v-if="meta(step)"
                                 class="shrink-0 pt-0.5 text-[11px] whitespace-nowrap"
                                 :class="
-                                    step.status === 'active' && step.kind === 'automatic'
-                                        ? 'text-zinc-500 dark:text-zinc-400'
-                                        : metaClass[step.status]
+                                    step.live
+                                        ? liveMetaClass
+                                        : step.status === 'active' && step.kind === 'automatic'
+                                          ? 'text-zinc-500 dark:text-zinc-400'
+                                          : metaClass[step.status]
                                 "
                             >
                                 {{ meta(step) }}
                             </span>
                             <ChevronDown
-                                class="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-500 transition-[transform,opacity] duration-200 group-hover/row:opacity-100 motion-reduce:transition-none dark:text-zinc-400"
+                                class="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-500 transition-transform duration-200 group-hover/row:opacity-100 group-focus-visible/row:opacity-100 motion-reduce:transition-none dark:text-zinc-400"
                                 :class="
                                     selected === step.id ? 'opacity-100' : '-rotate-90 opacity-0'
                                 "

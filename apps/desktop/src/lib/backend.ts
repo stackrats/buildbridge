@@ -37,25 +37,22 @@ export interface Backend {
 
     listMachines(): Promise<T.MachineListView>;
     /** `templateId` clones the machine's disk from a saved template instead of a fresh install. */
-    createMachine(
-        profile: T.MacBuilderConfig,
-        templateId: string | null,
-    ): Promise<T.MachineListView>;
+    createMachine(profile: T.MachineConfig, templateId: string | null): Promise<T.MachineListView>;
     listMachineTemplates(): Promise<T.MachineTemplateSummary[]>;
     /** Shuts macOS down and saves the machine's disk as a template; the machine stays stopped. */
     saveMachineTemplate(machineId: string, name: string): Promise<T.MachineTemplateSummary>;
     deleteMachineTemplate(templateId: string): Promise<T.MachineTemplateSummary[]>;
     /** Pins a clone's identity and installs its key through the template it came from. */
-    adoptTemplateGuest(machineId: string): Promise<T.MacBuilderView>;
+    adoptTemplateGuest(machineId: string): Promise<T.MachineView>;
     deleteMachine(machineId: string): Promise<T.MachineListView>;
-    discardMachineContainer(machineId: string): Promise<T.MacBuilderView>;
+    discardMachineContainer(machineId: string): Promise<T.MachineView>;
     /** Stops whatever is running on the machine; the operation returns as stopped. */
     cancelMachineOperation(machineId: string): Promise<void>;
-    getMachine(machineId: string): Promise<T.MacBuilderView>;
-    configureMachine(machineId: string, profile: T.MacBuilderConfig): Promise<T.MacBuilderView>;
-    launchMachine(machineId: string): Promise<T.MacBuilderView>;
-    stopMachine(machineId: string): Promise<T.MacBuilderView>;
-    configureGuestAccess(machineId: string, username: string): Promise<T.MacBuilderView>;
+    getMachine(machineId: string): Promise<T.MachineView>;
+    configureMachine(machineId: string, profile: T.MachineConfig): Promise<T.MachineView>;
+    launchMachine(machineId: string): Promise<T.MachineView>;
+    stopMachine(machineId: string): Promise<T.MachineView>;
+    configureGuestAccess(machineId: string, username: string): Promise<T.MachineView>;
     /**
      * Installs the access key over one password-authenticated SSH session to the pinned guest.
      * The password is used for that session only and is never stored.
@@ -64,19 +61,19 @@ export interface Backend {
         machineId: string,
         username: string,
         password: string,
-    ): Promise<T.MacBuilderView>;
-    trustGuest(machineId: string, fingerprint: string): Promise<T.MacBuilderView>;
-    forgetGuestTrust(machineId: string): Promise<T.MacBuilderView>;
+    ): Promise<T.MachineView>;
+    trustGuest(machineId: string, fingerprint: string): Promise<T.MachineView>;
+    forgetGuestTrust(machineId: string): Promise<T.MachineView>;
     importXcode(machineId: string, path: string): Promise<T.ImportMacXcodeResult>;
     /**
      * With a password, activation runs over the bridge under sudo and the password is used for
      * that one session only. With null, the guest Terminal opens and the person types it there.
      */
-    activateXcode(machineId: string, password: string | null): Promise<T.MacBuilderView>;
-    provisionSigning(machineId: string): Promise<T.MacBuilderView>;
-    clearGuestSigning(machineId: string): Promise<T.MacBuilderView>;
-    approveWorkspace(machineId: string, path: string): Promise<T.MacBuilderView>;
-    clearWorkspace(machineId: string): Promise<T.MacBuilderView>;
+    activateXcode(machineId: string, password: string | null): Promise<T.MachineView>;
+    provisionSigning(machineId: string): Promise<T.MachineView>;
+    clearGuestSigning(machineId: string): Promise<T.MachineView>;
+    approveWorkspace(machineId: string, path: string): Promise<T.MachineView>;
+    clearWorkspace(machineId: string): Promise<T.MachineView>;
     syncWorkspace(machineId: string): Promise<T.SyncAppleWorkspaceResult>;
     runSmokeBuild(
         machineId: string,
@@ -87,24 +84,48 @@ export interface Backend {
     openDeveloperTools(): Promise<void>;
     /** Opens a machine's screen, which its provider serves as a web page, in its own window. */
     openMachineScreen(machineId: string, url: string, title: string): Promise<void>;
+    /** Opens an https address in this host's browser, outside the app. */
+    openUrl(url: string): Promise<void>;
+    /**
+     * Opens Apple's downloads page, searched for `query`, in a window of this app. A `.xip`
+     * downloaded there lands in BuildBridge's folder and is reported as it grows; the desktop
+     * only (the browser preview simulates it).
+     */
+    downloadXcode(machineId: string, query: string): Promise<void>;
     /** `envSetId` null builds without an env set; the step defaults it to the attached one. */
     runSignedArchive(machineId: string, envSetId: string | null): Promise<T.RunAppleArchiveResult>;
     revealArchive(machineId: string): Promise<void>;
-    clearArchive(machineId: string): Promise<T.MacBuilderView>;
+    clearArchive(machineId: string): Promise<T.MachineView>;
+
+    /** The Android machine's project: the same verbs, into the toolchain container. */
+    approveAndroidWorkspace(machineId: string, path: string): Promise<T.MachineView>;
+    clearAndroidWorkspace(machineId: string): Promise<T.MachineView>;
+    syncAndroidWorkspace(machineId: string): Promise<T.SyncAndroidWorkspaceResult>;
+    /** The debug APK; the first run also prepares the toolchain inside the container. */
+    runAndroidDebugBuild(machineId: string): Promise<T.RunAndroidBuildResult>;
+    /** The signed app bundle and APK, with the attached kit's upload key. */
+    runAndroidRelease(
+        machineId: string,
+        envSetId: string | null,
+    ): Promise<T.RunAndroidReleaseResult>;
+    revealAndroidRelease(machineId: string): Promise<void>;
+    clearAndroidRelease(machineId: string): Promise<T.MachineView>;
+    /** Opens the folder holding the last debug APK, the one a phone takes over adb. */
+    revealAndroidDebugApk(machineId: string): Promise<void>;
 
     /** Installs the host udev rule that keeps usbmuxd off iPhones; one authorization prompt. */
     installUsbReleaseRule(): Promise<T.HostUsbStatus>;
     removeUsbReleaseRule(): Promise<T.HostUsbStatus>;
     /** Moves the container's disk to the host and recreates it with USB access. */
-    migrateMachineForUsb(machineId: string): Promise<T.MacBuilderView>;
-    attachUsbDevice(machineId: string, bus: number, port: string): Promise<T.MacBuilderView>;
-    detachUsbDevice(machineId: string): Promise<T.MacBuilderView>;
+    migrateMachineForUsb(machineId: string): Promise<T.MachineView>;
+    attachUsbDevice(machineId: string, bus: number, port: string): Promise<T.MachineView>;
+    detachUsbDevice(machineId: string): Promise<T.MachineView>;
     /** Recreates the container from its profile; macOS restarts once, the disk is kept. */
-    rebuildMachineContainer(machineId: string): Promise<T.MacBuilderView>;
+    rebuildMachineContainer(machineId: string): Promise<T.MachineView>;
     /** Asks the guest which phones it sees; the returned view carries the fresh list. */
-    listGuestDevices(machineId: string): Promise<T.MacBuilderView>;
+    listGuestDevices(machineId: string): Promise<T.MachineView>;
     /** Pairs the guest with the phone; raises Trust on the phone when needed and waits for it. */
-    pairGuestDevice(machineId: string, udid: string): Promise<T.MacBuilderView>;
+    pairGuestDevice(machineId: string, udid: string): Promise<T.MachineView>;
     /** Opens Safari in the guest, Develop menu on, for Web Inspector on the app on the phone. */
     openSafariWebInspector(machineId: string): Promise<T.OpenSafariInspectorResult>;
     prepareAppleDeviceSigning(
@@ -114,16 +135,16 @@ export interface Backend {
     ): Promise<T.PrepareDeviceSigningResult>;
     /** Returns when the console session ends; a Stop while running is the normal end. */
     runAppleDeviceBuild(machineId: string, udid: string): Promise<T.RunAppleDeviceResult>;
-    clearAppleDeviceRun(machineId: string): Promise<T.MacBuilderView>;
+    clearAppleDeviceRun(machineId: string): Promise<T.MachineView>;
 
     listSigningKits(): Promise<T.SigningKitSummary[]>;
     saveSigningKit(input: T.SigningKitInput): Promise<T.SigningKitSummary[]>;
     deleteSigningKit(kitId: string): Promise<T.SigningKitSummary[]>;
-    attachSigningKit(machineId: string, kitId: string | null): Promise<T.MacBuilderView>;
+    attachSigningKit(machineId: string, kitId: string | null): Promise<T.MachineView>;
     listEnvSets(): Promise<T.EnvSetSummary[]>;
     saveEnvSet(input: T.EnvSetInput): Promise<T.EnvSetSummary[]>;
     deleteEnvSet(setId: string): Promise<T.EnvSetSummary[]>;
-    attachEnvSet(machineId: string, setId: string | null): Promise<T.MacBuilderView>;
+    attachEnvSet(machineId: string, setId: string | null): Promise<T.MachineView>;
     /** Every secret in one set with its value, for the editor. Plain values are in the summary. */
     revealEnvSecrets(setId: string): Promise<T.EnvVariableSummary[]>;
     verifyAppleTeam(machineId: string): Promise<T.AppleTeamVerification>;
@@ -135,6 +156,11 @@ export interface Backend {
     createAppleCertificate(kitId: string): Promise<T.CreateAppleCertificateResult>;
     /** Creates the Apple Development identity a Debug build on a registered phone signs with. */
     createAppleDevelopmentCertificate(kitId: string): Promise<T.CreateAppleCertificateResult>;
+    /** Creates an Android upload key for the kit; the password is the person's to keep. */
+    createAndroidKeystore(
+        kitId: string,
+        input: { password: string; keyAlias: string; certificateName: string },
+    ): Promise<T.CreateAndroidKeystoreResult>;
     /** Provisioning profiles already downloaded to this host, newest first. */
     listManagedAppleProfiles(): Promise<T.ManagedAppleProfile[]>;
     /** The optimizer catalogue with each item's state on this machine's guest. */
@@ -182,6 +208,13 @@ export interface Backend {
     onDeviceProgress(
         handler: (event: T.MachineEvent<T.AppleDeviceRunProgress>) => void,
     ): Promise<Unlisten>;
+    onAndroidBuildProgress(
+        handler: (event: T.MachineEvent<T.AndroidBuildProgress>) => void,
+    ): Promise<Unlisten>;
+    onAndroidReleaseProgress(
+        handler: (event: T.MachineEvent<T.AndroidReleaseProgress>) => void,
+    ): Promise<Unlisten>;
+    onXcodeDownloadProgress(handler: (event: T.XcodeDownloadProgress) => void): Promise<Unlisten>;
     onDragDrop(handler: (event: DragDropEvent) => void): Promise<Unlisten>;
 
     /** Opens the operating system's file picker. Resolves to [] when cancelled. */
@@ -227,18 +260,18 @@ async function createTauriBackend(): Promise<Backend> {
         discardMachineContainer: (machineId) =>
             invoke('discard_machine_container', { machineId, input: { confirmed: true } }),
         cancelMachineOperation: (machineId) => invoke('cancel_machine_operation', { machineId }),
-        getMachine: (machineId) => invoke('get_mac_builder_status', { machineId }),
+        getMachine: (machineId) => invoke('get_machine', { machineId }),
         configureMachine: (machineId, profile) =>
-            invoke('configure_mac_builder', { machineId, profile }),
-        launchMachine: (machineId) => invoke('launch_mac_builder', { machineId }),
-        stopMachine: (machineId) => invoke('stop_mac_builder', { machineId }),
+            invoke('configure_machine', { machineId, profile }),
+        launchMachine: (machineId) => invoke('launch_machine', { machineId }),
+        stopMachine: (machineId) => invoke('stop_machine', { machineId }),
         configureGuestAccess: (machineId, username) =>
             invoke('configure_mac_guest_access', { machineId, input: { username } }),
         authorizeGuestKey: (machineId, username, password) =>
             invoke('authorize_mac_guest_key', { machineId, input: { username, password } }),
         trustGuest: (machineId, fingerprint) =>
-            invoke('trust_mac_builder_guest', { machineId, input: { fingerprint } }),
-        forgetGuestTrust: (machineId) => invoke('forget_mac_builder_guest_trust', { machineId }),
+            invoke('trust_mac_guest', { machineId, input: { fingerprint } }),
+        forgetGuestTrust: (machineId) => invoke('forget_mac_guest_trust', { machineId }),
         importXcode: (machineId, path) =>
             invoke('import_mac_xcode_package', { machineId, input: { path } }),
         activateXcode: (machineId, password) =>
@@ -255,10 +288,22 @@ async function createTauriBackend(): Promise<Backend> {
         openDeveloperTools: () => invoke('open_developer_tools'),
         openMachineScreen: (machineId, url, title) =>
             invoke('open_machine_screen', { machineId, url, title }),
+        openUrl: (url) => invoke('open_url', { url }),
+        downloadXcode: (machineId, query) => invoke('download_xcode', { machineId, query }),
         runSignedArchive: (machineId, envSetId) =>
             invoke('run_apple_signed_archive', { machineId, envSetId }),
         revealArchive: (machineId) => invoke('reveal_apple_archive', { machineId }),
         clearArchive: (machineId) => invoke('clear_apple_archive', { machineId }),
+        approveAndroidWorkspace: (machineId, path) =>
+            invoke('approve_android_workspace', { machineId, input: { path } }),
+        clearAndroidWorkspace: (machineId) => invoke('clear_android_workspace', { machineId }),
+        syncAndroidWorkspace: (machineId) => invoke('sync_android_workspace', { machineId }),
+        runAndroidDebugBuild: (machineId) => invoke('run_android_debug_build', { machineId }),
+        runAndroidRelease: (machineId, envSetId) =>
+            invoke('run_android_signed_release', { machineId, envSetId }),
+        revealAndroidRelease: (machineId) => invoke('reveal_android_release', { machineId }),
+        revealAndroidDebugApk: (machineId) => invoke('reveal_android_debug_apk', { machineId }),
+        clearAndroidRelease: (machineId) => invoke('clear_android_release', { machineId }),
 
         installUsbReleaseRule: () => invoke('install_usb_release_rule'),
         removeUsbReleaseRule: () => invoke('remove_usb_release_rule'),
@@ -312,6 +357,8 @@ async function createTauriBackend(): Promise<Backend> {
                 kitId,
                 input: { confirmed: true },
             }),
+        createAndroidKeystore: (kitId, input) =>
+            invoke('create_android_keystore', { kitId, input: { ...input, confirmed: true } }),
         listManagedAppleProfiles: () => invoke('list_managed_apple_profiles'),
         listGuestOptimizations: (machineId) => invoke('list_guest_optimizations', { machineId }),
         applyGuestOptimization: (machineId, optimizationId) =>
@@ -335,6 +382,9 @@ async function createTauriBackend(): Promise<Backend> {
         onUsbAttachProgress: subscribe('machine-usb-attach-progress'),
         onDeviceSigningProgress: subscribe('machine-device-signing-progress'),
         onDeviceProgress: subscribe('machine-device-progress'),
+        onAndroidBuildProgress: subscribe('machine-android-build-progress'),
+        onAndroidReleaseProgress: subscribe('machine-android-release-progress'),
+        onXcodeDownloadProgress: subscribe('xcode-download-progress'),
         pickPaths: async (request) => {
             const selection = await open({
                 title: request.title,

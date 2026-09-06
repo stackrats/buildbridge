@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 buildbridge-engine.workspace = true
-buildbridge-docker-osx.workspace = true
+buildbridge-machines.workspace = true
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 serde.workspace = true

@@ -110,18 +110,18 @@ async function remove(): Promise<void> {
     <div class="mx-auto max-w-4xl space-y-4 p-5">
         <header class="flex items-start justify-between gap-4">
             <div>
-                <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">Env sets</h1>
+                <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">Environments</h1>
                 <p class="mt-0.5 max-w-2xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                    A set is the environment a build runs with, held in this host's operating-system
-                    vault. Keep one per environment — production, staging — then attach a set to
-                    each machine. At every sync it is written into that machine's guest workspace
-                    for the web build and the build shell, and it never leaves this host in any
-                    other way.
+                    An environment is the variables and secrets a build runs with, held in this
+                    host's operating-system vault. Keep one for each stage — production, staging —
+                    then attach one to each machine. At every sync it is written into that machine's
+                    guest workspace for the web build and the build shell, and it never leaves this
+                    host in any other way.
                 </p>
             </div>
             <Button size="sm" @click="createSet">
                 <Plus class="h-3.5 w-3.5" />
-                New set
+                New environment
             </Button>
         </header>
 
@@ -154,7 +154,7 @@ async function remove(): Promise<void> {
                 v-if="!set.variables.length && !set.secretKeys.length"
                 class="text-xs text-zinc-500 dark:text-zinc-400"
             >
-                Empty. A build attached to this set gets no variables from it.
+                Empty. A build attached to this environment gets no variables from it.
             </p>
             <template v-else>
                 <p class="text-[11px] text-zinc-500 dark:text-zinc-400">Variables</p>
@@ -229,13 +229,13 @@ async function remove(): Promise<void> {
 
         <EmptyState
             v-if="!envs.sets.value.length && envs.state.loaded"
-            title="No env sets yet"
-            description="Builds run with the project's committed configuration until a set is attached. Store one when the web build needs values that are not in the repository."
+            title="No environments yet"
+            description="Builds run with the project's committed configuration until an environment is attached. Store one when the web build needs values that are not in the repository."
         >
             <template #icon><Variable class="h-4 w-4" /></template>
             <Button size="sm" @click="createSet">
                 <Plus class="h-3.5 w-3.5" />
-                New set
+                New environment
             </Button>
         </EmptyState>
 
@@ -243,8 +243,8 @@ async function remove(): Promise<void> {
 
         <ConfirmDialog
             :open="removing !== null"
-            title="Remove this env set"
-            confirm-label="Remove set"
+            title="Remove this environment"
+            confirm-label="Remove environment"
             :busy="envs.state.deleting"
             destructive
             @update:open="(value) => (removing = value ? removing : null)"

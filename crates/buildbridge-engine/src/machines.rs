@@ -10,8 +10,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use buildbridge_docker_osx::{
-    DEFAULT_MACHINE_ID, MacBuilderConfig, MachineProvider, QmpEndpoint, container_name,
+use buildbridge_machines::{
+    DEFAULT_MACHINE_ID, MachineConfig, MachineProvider, QmpEndpoint, container_name_for,
 };
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +31,7 @@ pub(crate) const MAX_MACHINES: usize = 12;
 #[serde(rename_all = "camelCase")]
 pub struct StoredMachine {
     pub id: String,
-    pub config: MacBuilderConfig,
+    pub config: MachineConfig,
     #[ts(type = "number")]
     pub created_at_epoch_seconds: u64,
     /// The signing kit this machine provisions. `None` falls back to the sole kit, if there is
@@ -75,7 +75,7 @@ impl MachineRegistry {
     /// its SSH port, or the screen port a dockur/macos machine serves after it.
     pub fn ensure_unique_ssh_port(
         &self,
-        profile: &MacBuilderConfig,
+        profile: &MachineConfig,
         except_machine_id: Option<&str>,
     ) -> Result<(), String> {
         let ports = profile.published_ports();
@@ -115,7 +115,7 @@ pub struct MachinePaths {
 
 impl MachinePaths {
     pub fn resolve(app: &Engine, machine_id: &str) -> Result<Self, String> {
-        if !buildbridge_docker_osx::valid_machine_id(machine_id) {
+        if !buildbridge_machines::valid_machine_id(machine_id) {
             return Err("The machine identifier is invalid.".to_string());
         }
 
@@ -133,12 +133,42 @@ impl MachinePaths {
             )
         };
 
+        // The container is named for what it holds, which the registry knows; a machine that
+        // is no longer registered resolves to the macOS naming, as every machine did before.
+        let provider = load_registry(app)
+            .ok()
+            .and_then(|registry| {
+                registry
+                    .find(machine_id)
+                    .ok()
+                    .map(|machine| machine.config.provider)
+            })
+            .unwrap_or_default();
+
         Ok(Self {
             id: machine_id.to_string(),
-            container_name: container_name(machine_id),
+            container_name: container_name_for(provider, machine_id),
             config_dir,
             data_dir,
         })
+    }
+
+    /// The Android toolchain's home: the SDK, the Gradle caches and the synchronized project,
+    /// bound into the container and kept on this host.
+    pub fn android_home_dir(&self) -> PathBuf {
+        self.data_dir.join("home")
+    }
+
+    pub fn android_workspace(&self) -> PathBuf {
+        self.config_dir.join("android-workspace.json")
+    }
+
+    pub fn android_release_record(&self) -> PathBuf {
+        self.config_dir.join("android-release.json")
+    }
+
+    pub fn android_release_error(&self) -> PathBuf {
+        self.config_dir.join("android-release-error.txt")
     }
 
     pub fn identity(&self) -> PathBuf {
@@ -199,7 +229,7 @@ impl MachinePaths {
     }
 
     pub fn qmp_socket(&self) -> PathBuf {
-        self.qmp_dir().join(buildbridge_docker_osx::QMP_SOCKET_NAME)
+        self.qmp_dir().join(buildbridge_machines::QMP_SOCKET_NAME)
     }
 
     /// How this machine's QEMU control socket is reached, which its provider decides.
@@ -229,7 +259,14 @@ impl MachinePaths {
     /// around. Discarding a container discards its macOS, so this goes with it.
     pub fn remove_container_storage(&self) -> Result<(), String> {
         remove_dir_all_if_present(&self.disk_dir())?;
-        remove_dir_all_if_present(&self.qmp_dir())
+        remove_dir_all_if_present(&self.qmp_dir())?;
+        // The toolchain wrote into its home as root; the image empties what this user cannot.
+        buildbridge_machines::remove_android_home(&self.android_home_dir()).map_err(|error| {
+            format!(
+                "Could not remove {}: {error}",
+                self.android_home_dir().display()
+            )
+        })
     }
 
     /// Where a remote build checks out a revision of the approved project. One directory per
@@ -255,6 +292,9 @@ impl MachinePaths {
             self.apple_archive_error(),
             self.apple_device_run_record(),
             self.apple_device_run_error(),
+            self.android_workspace(),
+            self.android_release_record(),
+            self.android_release_error(),
             self.operation_lock(),
         ] {
             remove_file_if_present(&path)?;
@@ -299,7 +339,7 @@ pub(crate) fn load_registry(app: &Engine) -> Result<MachineRegistry, String> {
             let registry: MachineRegistry = serde_json::from_slice(&bytes)
                 .map_err(|error| format!("The machine registry is invalid: {error}"))?;
             for machine in &registry.machines {
-                if !buildbridge_docker_osx::valid_machine_id(&machine.id) {
+                if !buildbridge_machines::valid_machine_id(&machine.id) {
                     return Err(format!(
                         "The machine registry contains an invalid identifier: {}",
                         machine.id
@@ -329,7 +369,7 @@ pub(crate) fn save_registry(app: &Engine, registry: &MachineRegistry) -> Result<
 
 fn migrate_legacy_builder(app: &Engine) -> Result<MachineRegistry, String> {
     let legacy_path = app.config_dir().join(LEGACY_CONFIG_FILE);
-    let config: MacBuilderConfig = match fs::read(&legacy_path) {
+    let config: MachineConfig = match fs::read(&legacy_path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
             format!("The legacy macOS builder configuration is invalid: {error}")
         })?,
@@ -420,7 +460,7 @@ mod tests {
         );
         assert_eq!(machine_id_from_name("默认", &[]), "machine");
         assert_eq!(machine_id_from_name("default", &[]), "machine");
-        assert!(buildbridge_docker_osx::valid_machine_id(
+        assert!(buildbridge_machines::valid_machine_id(
             &machine_id_from_name(
                 &"very long machine name that keeps going and going".repeat(2),
                 &[]
@@ -456,7 +496,7 @@ mod tests {
         let registry = MachineRegistry {
             machines: vec![StoredMachine {
                 id: "default".to_string(),
-                config: MacBuilderConfig::default(),
+                config: MachineConfig::default(),
                 created_at_epoch_seconds: 0,
                 signing_kit_id: None,
                 env_set_id: None,
@@ -466,20 +506,20 @@ mod tests {
 
         assert!(
             registry
-                .ensure_unique_ssh_port(&MacBuilderConfig::default(), None)
+                .ensure_unique_ssh_port(&MachineConfig::default(), None)
                 .is_err()
         );
         assert!(
             registry
-                .ensure_unique_ssh_port(&MacBuilderConfig::default(), Some("default"))
+                .ensure_unique_ssh_port(&MachineConfig::default(), Some("default"))
                 .is_ok()
         );
         assert!(
             registry
                 .ensure_unique_ssh_port(
-                    &MacBuilderConfig {
+                    &MachineConfig {
                         ssh_port: 50923,
-                        ..MacBuilderConfig::default()
+                        ..MachineConfig::default()
                     },
                     None
                 )

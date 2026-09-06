@@ -1,28 +1,66 @@
 <script setup lang="ts">
-// The machine profile fields, shared by the new-machine and edit-machine dialogs.
+// The machine profile fields, shared by the new-machine and edit-machine dialogs. The platform
+// is chosen first and picks the provider under it; only the provider is stored, since it
+// decides the platform, and both are fixed once the machine exists.
+import { ExternalLink } from '@lucide/vue';
 import { computed } from 'vue';
 
-import type { MacBuilderConfig, MacOsRelease, MachineProvider } from '../../types/backend';
+import { useBackend } from '../../lib/backend';
+import {
+    defaultProviderFor,
+    isAndroid,
+    platformLabel,
+    platforms,
+    providerLabel,
+    providerPlatform,
+    providerSource,
+    providersFor,
+} from '../../model/providers';
+import type {
+    MachineConfig,
+    MacOsRelease,
+    MachinePlatform,
+    MachineProvider,
+} from '../../types/backend';
 import Field from '../ui/Field.vue';
 import Input from '../ui/Input.vue';
 import NumberField from '../ui/NumberField.vue';
 import Select from '../ui/Select.vue';
 
-const model = defineModel<MacBuilderConfig>({ required: true });
+const model = defineModel<MachineConfig>({ required: true });
 const { hardwareLocked = false, providerLocked = false } = defineProps<{
     /** True while a container exists: memory, cores, port, and release cannot change. */
     hardwareLocked?: boolean;
-    /** True for an existing machine: its disk directory belongs to the provider that made it. */
+    /** True for an existing machine: its directory belongs to the provider that made it. */
     providerLocked?: boolean;
 }>();
 
-const providers: { value: MachineProvider; label: string }[] = [
-    { value: 'docker_osx', label: 'Docker-OSX' },
-    { value: 'dockur_macos', label: 'dockur/macos' },
-];
+const platform = computed<MachinePlatform>(() => providerPlatform[model.value.provider]);
+const android = computed(() => isAndroid(model.value.provider));
 
-// Both run macOS under QEMU with KVM in a container BuildBridge creates; installs, builds,
-// signing and templates are the same on either. What differs is below, so the choice is an
+const platformOptions = platforms.map((entry) => ({ value: entry.value, label: entry.label }));
+const platformDetail = computed(
+    () => platforms.find((entry) => entry.value === platform.value)?.detail ?? '',
+);
+
+// Changing the platform moves the provider to that platform's recommended one; the form never
+// holds a provider that builds for another platform.
+function choosePlatform(value: MachinePlatform): void {
+    if (value !== platform.value) {
+        model.value.provider = defaultProviderFor(value);
+    }
+}
+
+const providerOptions = computed(() =>
+    providersFor[platform.value].map((provider) => ({
+        value: provider,
+        label: providerLabel[provider],
+    })),
+);
+
+// The two macOS providers run macOS under QEMU with KVM in a container BuildBridge creates;
+// installs, builds, signing and templates are the same on either. The Android one is a
+// toolchain container with no virtual machine. What differs is below, so the choice is an
 // informed one rather than a label.
 const differences: Record<MachineProvider, { label: string; detail: string }[]> = {
     docker_osx: [
@@ -58,7 +96,34 @@ const differences: Record<MachineProvider, { label: string; detail: string }[]> 
             detail: 'Actively maintained, with a newer QEMU. Installs, builds and templates work the same; iPhone passthrough uses the same controller but has not been proven on it yet.',
         },
     ],
+    android_toolchain: [
+        {
+            label: 'Builds',
+            detail: 'A debug APK, then a signed app bundle and APK with an upload key from the signing credentials.',
+        },
+        {
+            label: 'Host',
+            detail: 'Docker and nothing else: no KVM, no display, no ports. Memory and cores are limits on its builds.',
+        },
+        {
+            label: 'Disk',
+            detail: 'A home directory beside the machine on this host, holding the SDK, two JDKs, the Gradle caches and the synchronized project; a few gigabytes.',
+        },
+        {
+            label: 'Track record',
+            detail: "A pinned Eclipse Temurin JDK image with Google's command-line tools and pinned Node downloaded into it; a real Capacitor 8 project released through it on 2026-09-06. No templates and no phone passthrough; a phone takes the APK over adb from this host.",
+        },
+    ],
 };
+
+// The repository behind the chosen provider, shown without its scheme and opened in the
+// host's browser, where the person can read it before trusting a machine to it.
+const source = computed(() => providerSource[model.value.provider]);
+const sourceLabel = computed(() => source.value.replace(/^https:\/\//, ''));
+
+function openSource(): void {
+    void useBackend().openUrl(source.value);
+}
 
 // Newest first. Xcode 26 does not run on Sonoma or Ventura, so a machine built on either
 // cannot reach a signed archive; say so here rather than letting it fail at the Xcode step.
@@ -87,17 +152,34 @@ const releases = computed((): { value: MacOsRelease; label: string }[] =>
             <Input v-model="model.name" placeholder="A name for this machine" :maxlength="80" />
         </Field>
         <Field
+            label="Platform"
+            :hint="
+                providerLocked
+                    ? `Fixed once the machine exists: a ${platformLabel[platform]} machine stays one.`
+                    : platformDetail
+            "
+        >
+            <Select
+                :model-value="platform"
+                :options="platformOptions"
+                :disabled="providerLocked"
+                @update:model-value="choosePlatform($event as MachinePlatform)"
+            />
+        </Field>
+        <Field
             label="Provider"
             :hint="
                 providerLocked
-                    ? 'Fixed once the machine exists: its disk directory belongs to this provider.'
-                    : 'Which image runs macOS. Either installs, builds, signs and clones the same way.'
+                    ? 'Fixed once the machine exists: its directory belongs to this provider.'
+                    : android
+                      ? 'One provider builds Android.'
+                      : 'Which image runs macOS. Either installs, builds, signs and clones the same way.'
             "
         >
             <Select
                 :model-value="model.provider"
-                :options="providers"
-                :disabled="providerLocked"
+                :options="providerOptions"
+                :disabled="providerLocked || providerOptions.length === 1"
                 @update:model-value="model.provider = $event as MachineProvider"
             />
             <dl class="mt-2 space-y-1.5 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950">
@@ -113,9 +195,24 @@ const releases = computed((): { value: MacOsRelease; label: string }[] =>
                         {{ difference.detail }}
                     </dd>
                 </div>
+                <div class="grid grid-cols-[6.5rem_1fr] gap-2">
+                    <dt class="text-xs font-medium text-zinc-700 dark:text-zinc-200">Source</dt>
+                    <dd class="text-xs leading-5">
+                        <button
+                            type="button"
+                            class="inline-flex items-center gap-1 text-zinc-500 underline decoration-zinc-300 underline-offset-2 hover:text-zinc-800 dark:text-zinc-400 dark:decoration-zinc-600 dark:hover:text-zinc-100"
+                            :title="source"
+                            @click="openSource"
+                        >
+                            {{ sourceLabel }}
+                            <ExternalLink class="h-3 w-3" aria-hidden="true" />
+                        </button>
+                    </dd>
+                </div>
             </dl>
         </Field>
         <Field
+            v-if="!android"
             label="macOS installer"
             :hint="
                 hardwareLocked
@@ -130,8 +227,8 @@ const releases = computed((): { value: MacOsRelease; label: string }[] =>
                 @update:model-value="model.macosRelease = $event as MacOsRelease"
             />
         </Field>
-        <div class="grid grid-cols-3 gap-3">
-            <Field label="Memory (GiB)" hint="4–64">
+        <div class="grid gap-3" :class="android ? 'grid-cols-2' : 'grid-cols-3'">
+            <Field label="Memory (GiB)" :hint="android ? '4–64 · a limit on its builds' : '4–64'">
                 <NumberField
                     v-model="model.memoryGib"
                     :min="4"
@@ -147,7 +244,7 @@ const releases = computed((): { value: MacOsRelease; label: string }[] =>
                     :disabled="hardwareLocked"
                 />
             </Field>
-            <Field label="SSH port" hint="Unique per machine">
+            <Field v-if="!android" label="SSH port" hint="Unique per machine">
                 <NumberField
                     v-model="model.sshPort"
                     :min="1024"

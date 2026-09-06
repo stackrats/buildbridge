@@ -65,6 +65,10 @@ pub struct MachineReport {
     /// Every env set this host holds, by name, so a build can choose one.
     #[serde(default)]
     pub env_sets: Vec<String>,
+    /// What the machine builds for: `ios` or `android`. Additive in protocol v1; a control
+    /// plane that predates it reads every machine as an iOS one, which every machine was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]
@@ -137,6 +141,8 @@ pub enum BuildKind {
     Diagnostics,
     /// A signed Release archive and App Store export on one managed macOS machine.
     AppleArchive,
+    /// A signed release app bundle and APK on one Android toolchain machine.
+    AndroidRelease,
 }
 
 /// The payload of an `apple_archive` build. The machine is the runner's own; `git_ref` names a
@@ -158,6 +164,25 @@ impl AppleArchivePayload {
     pub fn from_value(value: &serde_json::Value) -> Result<Self, String> {
         serde_json::from_value(value.clone())
             .map_err(|error| format!("the apple_archive payload is not valid: {error}"))
+    }
+}
+
+/// The payload of an `android_release` build: the same shape as an Apple archive's, on a
+/// machine whose provider is the Android toolchain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AndroidReleasePayload {
+    pub machine_id: String,
+    #[serde(default, rename = "ref")]
+    pub git_ref: Option<String>,
+    #[serde(default)]
+    pub env_set: Option<String>,
+}
+
+impl AndroidReleasePayload {
+    pub fn from_value(value: &serde_json::Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone())
+            .map_err(|error| format!("the android_release payload is not valid: {error}"))
     }
 }
 
@@ -269,6 +294,52 @@ mod tests {
         let bare = AppleArchivePayload::from_value(&serde_json::json!({"machine_id": "m1"}))
             .expect("ref is optional");
         assert_eq!(bare.git_ref, None);
+    }
+
+    #[test]
+    fn an_android_release_claim_decodes_beside_the_apple_one() {
+        let claim: ClaimBuildResponse = serde_json::from_str(
+            r#"{
+                "protocol_version": 1,
+                "build": {
+                    "id": "build-3",
+                    "kind": "android_release",
+                    "payload": {"machine_id": "droid", "env_set": "production"},
+                    "lease_expires_at": "2026-09-01T10:00:00Z",
+                    "next_log_sequence": 1
+                }
+            }"#,
+        )
+        .expect("contract JSON should decode");
+
+        assert_eq!(claim.build.kind, BuildKind::AndroidRelease);
+        let payload = AndroidReleasePayload::from_value(&claim.build.payload).expect("payload");
+        assert_eq!(payload.machine_id, "droid");
+        assert_eq!(payload.env_set.as_deref(), Some("production"));
+        assert_eq!(payload.git_ref, None);
+    }
+
+    #[test]
+    fn a_machine_report_without_a_platform_keeps_the_original_wire_shape() {
+        let report = MachineReport {
+            id: "m".to_string(),
+            name: "Mac".to_string(),
+            ready: true,
+            project: None,
+            bundle_identifier: None,
+            repository: None,
+            env_set: None,
+            env_sets: Vec::new(),
+            platform: None,
+        };
+        let json = serde_json::to_value(&report).expect("serializes");
+        assert!(json.get("platform").is_none());
+        let android: MachineReport = serde_json::from_value(serde_json::json!({
+            "id": "d", "name": "Droid", "ready": false, "project": null,
+            "bundle_identifier": null, "repository": null, "env_set": null, "platform": "android"
+        }))
+        .expect("decodes");
+        assert_eq!(android.platform.as_deref(), Some("android"));
     }
 
     #[test]

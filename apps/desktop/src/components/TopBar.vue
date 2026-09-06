@@ -11,7 +11,7 @@ import { useMachinesStore } from '../stores/machines';
 import { controlPlaneChip } from '../model/runner';
 import { useRunnerStore } from '../stores/runner';
 import { useUi } from '../stores/ui';
-import BrandMark from './ui/BrandMark.vue';
+import BrandLogo from './ui/BrandLogo.vue';
 
 const machines = useMachinesStore();
 const runner = useRunnerStore();
@@ -63,7 +63,7 @@ const hostChip = computed(() => {
 const runnerChip = computed(() => controlPlaneChip(runner.state.status, runner.state.realtime));
 
 const chipClass =
-    'inline-flex h-7 items-center gap-1.5 rounded-full border border-zinc-200 dark:border-zinc-800 px-2.5 text-[11px] transition-colors hover:border-zinc-300 dark:hover:border-zinc-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300';
+    'inline-flex h-7 items-center gap-1.5 rounded-full border border-zinc-200 dark:border-zinc-800 px-2.5 text-[11px] hover:border-zinc-300 dark:hover:border-zinc-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300';
 </script>
 
 <template>
@@ -72,14 +72,11 @@ const chipClass =
     >
         <button
             type="button"
-            class="flex items-center gap-2 rounded-md px-1 py-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300"
+            class="flex items-center rounded-md px-1 py-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300"
             v-tip="'Overview'"
             @click="ui.navigate({ kind: 'home' })"
         >
-            <BrandMark class="h-[22px] w-[22px] text-zinc-900 dark:text-zinc-50" />
-            <span class="text-[15px] font-semibold tracking-tight text-zinc-900 dark:text-zinc-50"
-                >BuildBridge</span
-            >
+            <BrandLogo class="text-zinc-900 dark:text-zinc-50" />
         </button>
 
         <div class="flex items-center gap-1.5">
@@ -123,7 +120,7 @@ const chipClass =
                     v-for="option in themeOptions"
                     :key="option.value"
                     type="button"
-                    class="flex h-6 w-6 items-center justify-center rounded-[5px] transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300"
+                    class="flex h-6 w-6 items-center justify-center rounded-[5px] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300"
                     :class="
                         theme === option.value
                             ? 'bg-white text-zinc-900 shadow-[0_1px_2px_rgb(0_0_0/0.06)] dark:bg-zinc-700 dark:text-zinc-50'

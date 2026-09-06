@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vite-plus/test';
 
-import type { HostPrerequisites, MacBuilderView, MachineSummary } from '../types/backend';
+import type { HostPrerequisites, MachineView, MachineSummary } from '../types/backend';
 import {
     completedCount,
+    deriveAndroidSteps,
     deriveBuildSteps,
     deriveJourney,
     deriveSetupSteps,
@@ -26,7 +27,7 @@ const readyHost: HostPrerequisites = {
     issues: [],
 };
 
-function baseView(overrides: Partial<MacBuilderView> = {}): MacBuilderView {
+function baseView(overrides: Partial<MachineView> = {}): MachineView {
     return {
         machineId: 'default',
         profile: {
@@ -97,11 +98,12 @@ function baseView(overrides: Partial<MacBuilderView> = {}): MacBuilderView {
         deviceRun: null,
         deviceRunError: null,
         template: null,
+        android: null,
         ...overrides,
     };
 }
 
-function readyView(): MacBuilderView {
+function readyView(): MachineView {
     const view = baseView();
     view.runtime.state = 'running';
     view.runtime.containerId = 'abc';
@@ -239,6 +241,16 @@ describe('deriveSetupSteps', () => {
         expect(launch?.summary).toBe('Discarding the container and its macOS disk');
     });
 
+    it('names a template save on the launch step, which runs the machine stopped', () => {
+        const launch = deriveSetupSteps(readyView(), {
+            runningStep: 'launch',
+            runningOperation: 'save-template',
+        }).find((step) => step.id === 'launch');
+
+        expect(launch?.status).toBe('running');
+        expect(launch?.summary).toBe('Saving the machine as a template; macOS is shut down first');
+    });
+
     it('keeps the start summary for the launch step’s own operation', () => {
         const launch = deriveSetupSteps(baseView(), {
             runningStep: 'launch',
@@ -249,7 +261,7 @@ describe('deriveSetupSteps', () => {
     });
 });
 
-function provisionedView(): MacBuilderView {
+function provisionedView(): MachineView {
     const view = readyView();
     view.appleWorkspace = {
         localPath: '/home/you/projects/example-app',
@@ -346,7 +358,7 @@ describe('deriveBuildSteps', () => {
         ]);
         expect(focusStep(steps)?.id).toBe('signing-kit');
         expect(steps.find((step) => step.id === 'provision')?.summary).toBe(
-            'after a complete kit is attached',
+            'after complete credentials are attached',
         );
     });
 
@@ -384,6 +396,11 @@ describe('deriveBuildSteps', () => {
             developmentCertificateConfigured: false,
             developmentCertificateName: null,
             developmentCertificatePasswordStored: false,
+            androidKeystoreConfigured: false,
+            androidKeystoreName: null,
+            androidKeyAlias: null,
+            androidKeystorePasswordStored: false,
+            androidKeyPasswordStored: false,
         };
         view.signing = {
             keychainPath: '/k',
@@ -475,6 +492,11 @@ describe('deriveBuildSteps', () => {
             developmentCertificateConfigured: false,
             developmentCertificateName: null,
             developmentCertificatePasswordStored: false,
+            androidKeystoreConfigured: false,
+            androidKeystoreName: null,
+            androidKeyAlias: null,
+            androidKeystorePasswordStored: false,
+            androidKeyPasswordStored: false,
         };
 
         const steps = deriveBuildSteps(view, { runningStep: null });
@@ -485,7 +507,7 @@ describe('deriveBuildSteps', () => {
 });
 
 describe('development-only kit', () => {
-    function developmentOnlyView(): MacBuilderView {
+    function developmentOnlyView(): MachineView {
         const view = provisionedView();
         view.signingHealth = 'ready';
         view.signingKit = {
@@ -503,6 +525,11 @@ describe('development-only kit', () => {
             developmentCertificateConfigured: true,
             developmentCertificateName: 'development.p12',
             developmentCertificatePasswordStored: true,
+            androidKeystoreConfigured: false,
+            androidKeystoreName: null,
+            androidKeyAlias: null,
+            androidKeystorePasswordStored: false,
+            androidKeyPasswordStored: false,
         };
         view.signing = {
             ...view.signing!,
@@ -526,7 +553,7 @@ describe('development-only kit', () => {
         expect(byId('provision').summary).toContain('development only');
         expect(byId('archive').status).toBe('pending');
         expect(byId('archive').summary).toContain(
-            'Locked: the kit holds only a development identity',
+            'Locked: the credentials hold only a development identity',
         );
         expect(byId('run-device').status).toBe('active');
     });
@@ -537,6 +564,11 @@ describe('development-only kit', () => {
         view.signingKit = {
             ...view.signingKit!,
             developmentCertificatePasswordStored: false,
+            androidKeystoreConfigured: false,
+            androidKeystoreName: null,
+            androidKeyAlias: null,
+            androidKeystorePasswordStored: false,
+            androidKeyPasswordStored: false,
             appStoreConnectConfigured: false,
             appStoreConnectKeyId: null,
         };
@@ -608,6 +640,7 @@ describe('deriveJourney', () => {
 function summary(overrides: Partial<MachineSummary> = {}): MachineSummary {
     return {
         id: 'team-mac',
+        platform: 'ios',
         config: {
             name: 'Team Mac',
             macosRelease: 'sequoia',
@@ -725,6 +758,11 @@ describe('journeyHeadline', () => {
             developmentCertificateConfigured: false,
             developmentCertificateName: null,
             developmentCertificatePasswordStored: false,
+            androidKeystoreConfigured: false,
+            androidKeystoreName: null,
+            androidKeyAlias: null,
+            androidKeystorePasswordStored: false,
+            androidKeyPasswordStored: false,
         };
         expect(journeyHeadline(deriveJourney(view, { runningStep: null }))).toBe(
             'signed 3.2.0 (15)',
@@ -733,7 +771,7 @@ describe('journeyHeadline', () => {
 });
 
 describe('run on the device', () => {
-    const at = (view: MacBuilderView, runningStep: string | null = null) =>
+    const at = (view: MachineView, runningStep: string | null = null) =>
         deriveJourney(view, { runningStep }).find((step) => step.id === 'run-device')!;
     /** Provisioned with a complete kit attached, so the archive is the only required step left. */
     const kittedView = () => {
@@ -753,6 +791,11 @@ describe('run on the device', () => {
             developmentCertificateConfigured: false,
             developmentCertificateName: null,
             developmentCertificatePasswordStored: false,
+            androidKeystoreConfigured: false,
+            androidKeystoreName: null,
+            androidKeyAlias: null,
+            androidKeystorePasswordStored: false,
+            androidKeyPasswordStored: false,
         };
         return view;
     };
@@ -798,7 +841,24 @@ describe('run on the device', () => {
     it('describes the running operation from the facts', () => {
         const step = at(provisionedView(), 'run-device');
         expect(step.status).toBe('running');
+        expect(step.live).toBeUndefined();
         expect(step.summary).toContain('udev rule');
+    });
+
+    it('is live, not merely running, once the app is up on the phone', () => {
+        const step = deriveJourney(provisionedView(), {
+            runningStep: 'run-device',
+            runningLive: true,
+        }).find((candidate) => candidate.id === 'run-device')!;
+        expect(step.status).toBe('running');
+        expect(step.live).toBe(true);
+        expect(step.summary).toBe('Running on the iPhone; console streaming');
+        // Live belongs to the device run alone; nothing else in the journey picks it up.
+        const others = deriveJourney(provisionedView(), {
+            runningStep: 'archive',
+            runningLive: true,
+        });
+        expect(others.every((candidate) => candidate.live === undefined)).toBe(true);
     });
 
     it('is done with the last run and failed when the last run failed', () => {
@@ -860,7 +920,7 @@ describe('run on the device', () => {
 });
 
 describe('a machine cloned from a template', () => {
-    function cloneView(): MacBuilderView {
+    function cloneView(): MachineView {
         const view = readyView();
         view.template = { id: 'xcode-26-ready', name: 'Xcode 26 ready' };
         view.guest.ssh = { ...view.guest.ssh, trust: 'untrusted', pinnedFingerprint: null };
@@ -892,5 +952,212 @@ describe('a machine cloned from a template', () => {
         expect(install.summary).toBe(
             'Starting the macOS saved in Xcode 26 ready; nothing to install',
         );
+    });
+});
+
+/** An Android machine's view: no guest, an `android` section instead. */
+function androidView(overrides: Partial<MachineView> = {}): MachineView {
+    return baseView({
+        machineId: 'pixel',
+        profile: {
+            name: 'Android builder',
+            macosRelease: 'sequoia',
+            memoryGib: 6,
+            cpuCores: 4,
+            sshPort: 50924,
+            provider: 'android_toolchain',
+        },
+        runtime: {
+            prerequisites: { ...readyHost, kvmAccess: false, displayAccess: false },
+            state: 'running',
+            containerId: 'abc',
+            startedAt: null,
+        },
+        android: { workspace: null, release: null, releaseEnvSet: null, releaseError: null },
+        ...overrides,
+    });
+}
+
+function androidKit(complete = true): NonNullable<MachineView['signingKit']> {
+    return {
+        id: 'team',
+        name: 'Team kit',
+        appStoreConnectConfigured: false,
+        appStoreConnectKeyId: null,
+        signingCertificateConfigured: false,
+        signingCertificateName: null,
+        signingCertificatePasswordStored: false,
+        provisioningProfileNames: [],
+        guestKeychainConfigured: false,
+        createdAtEpochSeconds: 0,
+        attachedMachines: [],
+        developmentCertificateConfigured: false,
+        developmentCertificateName: null,
+        developmentCertificatePasswordStored: false,
+        androidKeystoreConfigured: complete,
+        androidKeystoreName: complete ? 'upload.keystore' : null,
+        androidKeyAlias: complete ? 'upload' : null,
+        androidKeystorePasswordStored: complete,
+        androidKeyPasswordStored: false,
+    };
+}
+
+describe('an Android machine', () => {
+    it('has seven steps and no device phase', () => {
+        const steps = deriveJourney(androidView(), { runningStep: null });
+
+        expect(steps.map((step) => step.id)).toEqual([
+            'host',
+            'launch',
+            'approve',
+            'sync',
+            'test-build',
+            'signing-kit',
+            'release',
+        ]);
+        expect(steps.slice(0, 2).every((step) => step.phase === 'setup')).toBe(true);
+        expect(steps.slice(2).every((step) => step.phase === 'build')).toBe(true);
+        expect(requiredSteps(steps)).toHaveLength(7);
+        expect(groupByPhase(steps).map((group) => group.phase)).toEqual(['setup', 'build']);
+    });
+
+    it('passes the host check without KVM or a display', () => {
+        const steps = deriveAndroidSteps(androidView(), { runningStep: null });
+
+        expect(steps[0]?.status).toBe('done');
+        expect(steps[0]?.summary).toContain('no virtual machine');
+        expect(steps[1]?.status).toBe('done');
+        expect(steps[2]?.status).toBe('active');
+    });
+
+    it('walks approve, sync, debug build, kit, release in order', () => {
+        const view = androidView();
+        view.android!.workspace = {
+            localPath: '/home/you/app',
+            name: 'app',
+            applicationId: 'com.example.app',
+            lastSnapshotSha256: 'abc123def456',
+            lastSyncFileCount: 10,
+            lastSyncBytes: 1000,
+            lastBuildSucceeded: true,
+            lastBuild: {
+                applicationId: 'com.example.app.debug',
+                versionName: '1.0',
+                versionCode: '3',
+                toolchain: {
+                    jdkVersion: 'openjdk version "17.0.20" 2026',
+                    buildToolsVersion: '35.0.0',
+                },
+                apk: { path: '/a/debug-1-1/app-debug.apk', bytes: 33_000_000, sha256: 'cc' },
+                outputTail: [],
+            },
+            lastSource: null,
+        };
+        view.signingKit = androidKit();
+        view.signingHealth = 'ready';
+
+        const steps = deriveAndroidSteps(view, { runningStep: null });
+
+        expect(steps.map((step) => [step.id, step.status])).toEqual([
+            ['host', 'done'],
+            ['launch', 'done'],
+            ['approve', 'done'],
+            ['sync', 'done'],
+            ['test-build', 'done'],
+            ['signing-kit', 'done'],
+            ['release', 'active'],
+        ]);
+        expect(steps[4]?.summary).toContain('JDK 17.0.20');
+        expect(steps[5]?.summary).toContain('upload.keystore');
+    });
+
+    it('keeps the release locked while the kit has no upload key', () => {
+        const view = androidView();
+        view.android!.workspace = {
+            localPath: '/home/you/app',
+            name: 'app',
+            applicationId: 'com.example.app',
+            lastSnapshotSha256: 'abc',
+            lastSyncFileCount: 10,
+            lastSyncBytes: 1000,
+            lastBuildSucceeded: true,
+            lastBuild: null,
+            lastSource: null,
+        };
+        view.signingKit = androidKit(false);
+        view.signingHealth = 'incomplete';
+
+        const steps = deriveAndroidSteps(view, { runningStep: null });
+
+        expect(steps.find((step) => step.id === 'signing-kit')?.status).toBe('active');
+        expect(steps.find((step) => step.id === 'signing-kit')?.summary).toContain(
+            'an upload keystore',
+        );
+        expect(steps.find((step) => step.id === 'release')?.status).toBe('pending');
+    });
+
+    it('reports a retained release in the headline', () => {
+        const view = androidView();
+        view.android!.workspace = {
+            localPath: '/home/you/app',
+            name: 'app',
+            applicationId: 'com.example.app',
+            lastSnapshotSha256: 'abc',
+            lastSyncFileCount: 10,
+            lastSyncBytes: 1000,
+            lastBuildSucceeded: true,
+            lastBuild: null,
+            lastSource: null,
+        };
+        view.signingKit = androidKit();
+        view.signingHealth = 'ready';
+        view.android!.release = {
+            applicationId: 'com.example.app',
+            versionName: '3.2.0',
+            versionCode: '12',
+            keyAlias: 'upload',
+            certificateSha256: 'ff',
+            aab: { path: '/a.aab', bytes: 6_000_000, sha256: 'aa' },
+            apk: { path: '/a.apk', bytes: 9_000_000, sha256: 'bb' },
+            outputTail: [],
+        };
+
+        const steps = deriveJourney(view, { runningStep: null });
+
+        expect(focusStep(steps)).toBeNull();
+        expect(journeyHeadline(steps)).toBe('signed 3.2.0 (12)');
+    });
+
+    it('summarizes the coarse journey from the list row', () => {
+        const steps = summarizeJourney(
+            summary({
+                id: 'pixel',
+                platform: 'android',
+                config: {
+                    name: 'Android builder',
+                    macosRelease: 'sequoia',
+                    memoryGib: 6,
+                    cpuCores: 4,
+                    sshPort: 50924,
+                    provider: 'android_toolchain',
+                },
+                state: 'running',
+                workspaceName: 'app',
+                signingKitName: 'Team kit',
+                signingProvisioned: true,
+            }),
+            readyHost,
+        );
+
+        expect(steps).toHaveLength(7);
+        expect(steps.map((step) => step.status)).toEqual([
+            'done',
+            'done',
+            'done',
+            'done',
+            'done',
+            'done',
+            'active',
+        ]);
     });
 });

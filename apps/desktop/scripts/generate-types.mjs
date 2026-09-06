@@ -21,7 +21,7 @@ execFileSync(
         '-p',
         'buildbridge-contract',
         '-p',
-        'buildbridge-docker-osx',
+        'buildbridge-machines',
         '-p',
         'buildbridge-engine',
         'export_bindings',

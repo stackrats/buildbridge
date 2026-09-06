@@ -15,7 +15,7 @@ import {
 import { computed, onBeforeUnmount, ref } from 'vue';
 
 import { formatElapsed, secondsSince } from '../../lib/format';
-import { templateSavePhaseLabel } from '../../model/phases';
+import { isAndroid, providerLabel } from '../../model/providers';
 import { isLive, machineStateBadge, machineStateLabel } from '../../lib/status';
 import { activityLabel, useMachinesStore, type MachineSession } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
@@ -32,24 +32,57 @@ const ui = useUi();
 
 const view = computed(() => session.view!);
 const busy = computed(() => session.operation !== null || view.value.busyOperation !== null);
+// A template save, this client's or one another BuildBridge process holds the machine for; its
+// percentage joins the busy badge, since the save's dialog is gone while it runs.
+const savingTemplate = computed(
+    () => session.operation === 'save-template' || view.value.busyOperation === 'saving_template',
+);
+const templateSavePercent = computed(() =>
+    savingTemplate.value ? (session.templateSave?.percent ?? null) : null,
+);
 // The native busy key is the truth once the view refreshes; until then the operation this
 // client started names what is happening, so a machine being stopped never reads as running.
-const busyLabel = computed(
-    () =>
+const busyLabel = computed(() => {
+    const label =
         activityLabel(view.value.busyOperation) ??
         view.value.busyOperation ??
-        activityLabel(session.operation),
-);
+        activityLabel(session.operation);
+    return label && templateSavePercent.value !== null
+        ? `${label} · ${templateSavePercent.value}%`
+        : label;
+});
 const live = computed(() => isLive(view.value.runtime.state));
 const canStart = computed(
     () => !busy.value && !live.value && view.value.runtime.prerequisites.ready,
 );
 
+const android = computed(() => isAndroid(view.value.profile.provider));
+
 const facts = computed(() => {
     const uptime = secondsSince(view.value.runtime.startedAt, now);
     const { diagnostics } = view.value.guest;
+    if (android.value) {
+        const lastBuild = view.value.android?.workspace?.lastBuild ?? null;
+        return [
+            providerLabel[view.value.profile.provider],
+            `${view.value.profile.memoryGib} GiB limit`,
+            `${view.value.profile.cpuCores} cores`,
+            uptime === null ? null : `up ${formatElapsed(uptime)}`,
+            lastBuild
+                ? lastBuild.toolchain.jdkVersion
+                      .replace(/^openjdk version /, 'JDK ')
+                      .replace(/"/g, '')
+                      .split(' ')
+                      .slice(0, 2)
+                      .join(' ')
+                : null,
+            lastBuild ? `build tools ${lastBuild.toolchain.buildToolsVersion}` : null,
+        ]
+            .filter(Boolean)
+            .join(' · ');
+    }
     return [
-        view.value.profile.provider === 'dockur_macos' ? 'dockur/macos' : 'Docker-OSX',
+        providerLabel[view.value.profile.provider],
         `${view.value.profile.memoryGib} GiB`,
         `${view.value.profile.cpuCores} cores`,
         `ssh 127.0.0.1:${view.value.profile.sshPort}`,
@@ -75,6 +108,9 @@ const templateName = ref('');
 // A template carries the pinned identity and the access key, so both must exist; a machine
 // keeping its disk inside the container has nothing on this host to copy.
 const templateBlocker = computed(() => {
+    if (android.value) {
+        return 'Templates are for macOS machines; a toolchain has no disk to save';
+    }
     if (!view.value.guest.ssh.pinnedFingerprint) {
         return 'Pin the guest identity first';
     }
@@ -86,8 +122,6 @@ const templateBlocker = computed(() => {
     }
     return null;
 });
-const savingTemplate = computed(() => session.operation === 'save-template');
-
 function openTemplateDialog(): void {
     templateName.value = view.value.guest.diagnostics.xcodeVersion
         ? `Xcode ${view.value.guest.diagnostics.xcodeVersion} ready`
@@ -95,15 +129,16 @@ function openTemplateDialog(): void {
     templateOpen.value = true;
 }
 
-async function saveTemplate(): Promise<void> {
+// The save runs on its own for minutes, so the dialog closes as soon as it starts; the
+// progress shows on the launch step, on the Templates page and in the sidebar, and a failure
+// lands on this page like any other operation's.
+function saveTemplate(): void {
     const name = templateName.value.trim();
     if (!name) {
         return;
     }
-    const result = await machines.saveTemplate(session.id, name);
-    if (result !== null || session.lastFailure?.operation !== 'save-template') {
-        templateOpen.value = false;
-    }
+    templateOpen.value = false;
+    void machines.saveTemplate(session.id, name);
 }
 
 function closeMenu(): void {
@@ -230,16 +265,28 @@ const menuItemClass =
                         :disabled="busy || templateBlocker !== null"
                         class="disabled:opacity-40"
                         :title="
-                            templateBlocker ??
-                            'Saves this machine\'s disk as a template new machines clone in seconds'
+                            savingTemplate
+                                ? 'The save is running; its progress is on the Launch step and the Templates page'
+                                : (templateBlocker ??
+                                  'Saves this machine\'s disk as a template new machines clone in seconds')
                         "
                         @click="
                             closeMenu();
                             openTemplateDialog();
                         "
                     >
-                        <Layers class="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
-                        Save as template
+                        <Spinner
+                            v-if="savingTemplate"
+                            size="h-3.5 w-3.5"
+                            tone="text-zinc-500 dark:text-zinc-400"
+                        />
+                        <Layers v-else class="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
+                        <template v-if="savingTemplate">
+                            Saving template{{
+                                templateSavePercent !== null ? ` · ${templateSavePercent}%` : ''
+                            }}
+                        </template>
+                        <template v-else>Save as template</template>
                     </button>
                     <div class="my-1 h-px bg-zinc-200 dark:bg-zinc-700" />
                     <button
@@ -252,7 +299,9 @@ const menuItemClass =
                                 ? 'Stop the machine first'
                                 : view.runtime.state === 'missing'
                                   ? 'There is no container to discard yet'
-                                  : 'Removes the container and its macOS disk; the machine profile stays'
+                                  : android
+                                    ? 'Removes the container, the SDK, the caches and the synchronized project; the machine profile stays'
+                                    : 'Removes the container and its macOS disk; the machine profile stays'
                         "
                         @click="
                             closeMenu();
@@ -260,7 +309,11 @@ const menuItemClass =
                         "
                     >
                         <HardDrive class="h-3.5 w-3.5 text-amber-700 dark:text-amber-400" />
-                        Discard container and disk
+                        {{
+                            android
+                                ? 'Discard container and toolchain'
+                                : 'Discard container and disk'
+                        }}
                     </button>
                     <button
                         type="button"
@@ -290,7 +343,7 @@ const menuItemClass =
             title="Save this machine as a template"
             confirm-label="Save template"
             :destructive="false"
-            :busy="savingTemplate"
+            :confirm-disabled="!templateName.trim()"
             @confirm="saveTemplate"
         >
             <p>
@@ -304,27 +357,35 @@ const menuItemClass =
                 no console or password; it is stored owner-only and retired from each clone once the
                 clone has its own key. Nothing leaves this host.
             </p>
-            <Input
-                v-model="templateName"
-                placeholder="Template name"
-                :maxlength="60"
-                :disabled="savingTemplate"
-            />
-            <p
-                v-if="savingTemplate && session.templateSave"
-                class="text-xs text-zinc-600 dark:text-zinc-300"
-            >
-                {{ templateSavePhaseLabel[session.templateSave.phase]
-                }}{{
-                    session.templateSave.percent !== null
-                        ? ` · ${session.templateSave.percent}%`
-                        : ''
-                }}
-                · {{ session.templateSave.detail }}
+            <p>
+                The save runs in the background: this dialog closes, and the progress shows on the
+                Launch step, on the Templates page and in the sidebar, where it can be stopped.
             </p>
+            <Input v-model="templateName" placeholder="Template name" :maxlength="60" />
         </ConfirmDialog>
 
         <ConfirmDialog
+            v-if="android"
+            v-model:open="discardOpen"
+            title="Discard the container and its toolchain"
+            confirm-label="Discard container"
+            acknowledgement="I understand the SDK, the Gradle caches, and the synchronized project will be deleted"
+            :busy="session.operation === 'discard'"
+            @confirm="discard"
+        >
+            <p>
+                The container for <b>{{ view.profile.name }}</b> is removed together with its home
+                on this host: the Android SDK and tools it downloaded, the Gradle caches, and the
+                synchronized project. The next start creates a fresh container, and the first build
+                downloads the toolchain again.
+            </p>
+            <p>
+                The machine profile, the approved project record, the attached signing credentials,
+                and retained artifacts on this host are kept.
+            </p>
+        </ConfirmDialog>
+        <ConfirmDialog
+            v-else
             v-model:open="discardOpen"
             title="Discard the container and its macOS disk"
             confirm-label="Discard container"
@@ -353,18 +414,27 @@ const menuItemClass =
             v-model:open="deleteOpen"
             title="Delete this machine"
             confirm-label="Delete machine"
-            acknowledgement="I understand the container, macOS disk, access key, and retained artifacts will be deleted"
+            :acknowledgement="
+                android
+                    ? 'I understand the container, its toolchain, and retained artifacts will be deleted'
+                    : 'I understand the container, macOS disk, access key, and retained artifacts will be deleted'
+            "
             :busy="deleting"
             @confirm="remove"
         >
-            <p>
+            <p v-if="android">
+                <b>{{ view.profile.name }}</b> is removed from BuildBridge: its container and the
+                home with the SDK and caches, the approved project record, and any retained bundle
+                or APK on this host.
+            </p>
+            <p v-else>
                 <b>{{ view.profile.name }}</b> is removed from BuildBridge: its container and macOS
                 disk, its SSH access key and identity pin, the approved project record, and any
                 retained IPA or archive on this host.
             </p>
             <p>
-                The host project folder and the signing kit in the operating-system vault are not
-                touched.
+                The host project folder and the signing credentials in the operating-system vault
+                are not touched.
             </p>
         </ConfirmDialog>
     </header>

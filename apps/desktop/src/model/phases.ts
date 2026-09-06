@@ -2,6 +2,8 @@
 // sentence. The backend also sends a `detail` sentence; these labels are the short form.
 
 import type {
+    AndroidBuildPhase,
+    AndroidReleasePhase,
     AppleArchivePhase,
     AppleDeviceRunPhase,
     AppleProjectPhase,
@@ -52,13 +54,13 @@ export const deviceSigningPhaseLabel: Record<DeviceSigningPhase, string> = {
 
 export const devicePhaseLabel: Record<AppleDeviceRunPhase, string> = {
     preparing: 'Preparing the recipe',
-    building_web_assets: 'Rebuilding web assets with the env set',
+    building_web_assets: 'Rebuilding web assets with the environment',
     resolving_target: 'Reading the Debug build settings',
     building: 'Compiling for the iPhone',
     verifying: 'Verifying the signature',
     installing: 'Installing on the iPhone',
     launching: 'Launching',
-    running: 'Running; console streaming',
+    running: 'Live; console streaming',
     completed: 'Stopped',
 };
 
@@ -109,7 +111,7 @@ export const projectPhaseLabel: Record<AppleProjectPhase, string> = {
 
 export const archivePhaseLabel: Record<AppleArchivePhase, string> = {
     preparing: 'Preparing the recipe',
-    building_web_assets: 'Rebuilding web assets with the env set',
+    building_web_assets: 'Rebuilding web assets with the environment',
     archiving: 'Archiving',
     exporting: 'Exporting the IPA',
     verifying: 'Verifying the signature',
@@ -124,4 +126,27 @@ export const templateSavePhaseLabel: Record<TemplateSavePhase, string> = {
     compressing_disk: 'Compressing the disk',
     copying_files: 'Copying the NVRAM and install media',
     completed: 'Template saved',
+};
+
+export const androidBuildPhaseLabel: Record<AndroidBuildPhase, string> = {
+    snapshotting: 'Creating the snapshot',
+    transferring: 'Transferring source',
+    extracting: 'Preparing the container workspace',
+    preparing_tools: 'Preparing Node, pnpm, and the Android SDK',
+    installing_dependencies: 'Installing locked dependencies',
+    building_web_assets: 'Building web assets',
+    syncing_android: 'Synchronizing Capacitor Android',
+    building: 'Compiling the debug APK',
+    inspecting: 'Reading the built app back',
+    completed: 'Completed',
+};
+
+export const androidReleasePhaseLabel: Record<AndroidReleasePhase, string> = {
+    preparing: 'Checking the toolchain and the upload key',
+    building_web_assets: 'Rebuilding web assets with the environment',
+    bundling: 'Building the release bundle and APK',
+    signing: 'Signing with the upload key',
+    verifying: 'Verifying the signatures',
+    transferring: 'Transferring artifacts',
+    completed: 'Completed',
 };

@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vite-plus/test';
 
 import type { SigningKitSummary } from '../types/backend';
 import {
+    androidKitShortfall,
     appStoreConnectIsPartial,
     draftKitSummary,
     emptySigningKitDraft,
     kitHoldsProfile,
     kitReadiness,
+    kitSignsAndroid,
     kitShortfall,
     missingKitRequirements,
 } from './signing';
@@ -29,6 +31,11 @@ function storedKit(overrides: Partial<SigningKitSummary> = {}): SigningKitSummar
         developmentCertificateConfigured: false,
         developmentCertificateName: null,
         developmentCertificatePasswordStored: false,
+        androidKeystoreConfigured: false,
+        androidKeystoreName: null,
+        androidKeyAlias: null,
+        androidKeystorePasswordStored: false,
+        androidKeyPasswordStored: false,
         ...overrides,
     };
 }
@@ -191,6 +198,7 @@ describe('kit readiness', () => {
     it('provisions with the distribution set, the development identity, or both', () => {
         expect(kitReadiness(storedKit(distribution))).toEqual({
             distribution: true,
+            android: false,
             development: false,
             teamKey: false,
             keychain: true,
@@ -200,6 +208,7 @@ describe('kit readiness', () => {
         });
         expect(kitReadiness(storedKit(development))).toEqual({
             distribution: false,
+            android: false,
             development: true,
             teamKey: false,
             keychain: true,
@@ -215,6 +224,7 @@ describe('kit readiness', () => {
     it('provisions with a Team key alone, creating certificates and profiles on demand', () => {
         expect(kitReadiness(storedKit(teamKey))).toEqual({
             distribution: false,
+            android: false,
             development: false,
             teamKey: true,
             keychain: true,
@@ -246,10 +256,10 @@ describe('kit readiness', () => {
     it('lists the shortest route to provisioning', () => {
         expect(kitShortfall(storedKit())).toEqual([
             'a Team key, or a distribution or development identity',
-            'keychain password',
+            'keychain password (saving the credentials again invents one)',
         ]);
         expect(kitShortfall(storedKit({ appStoreConnectConfigured: true }))).toEqual([
-            'keychain password',
+            'keychain password (saving the credentials again invents one)',
         ]);
         expect(
             kitShortfall(
@@ -265,5 +275,56 @@ describe('kit readiness', () => {
             ),
         ).toEqual(['development identity export password']);
         expect(kitShortfall(storedKit(development))).toEqual([]);
+    });
+});
+
+describe('the Android upload key', () => {
+    const uploadKey = {
+        androidKeystoreConfigured: true,
+        androidKeystoreName: 'upload.keystore',
+        androidKeyAlias: 'upload',
+        androidKeystorePasswordStored: true,
+    };
+
+    it('signs a release with a keystore, an alias and the keystore password', () => {
+        expect(kitSignsAndroid(storedKit(uploadKey))).toBe(true);
+        expect(kitReadiness(storedKit(uploadKey)).android).toBe(true);
+        // The key password defaults to the keystore's; it is never required.
+        expect(kitSignsAndroid(storedKit({ ...uploadKey, androidKeyPasswordStored: true }))).toBe(
+            true,
+        );
+    });
+
+    it('has no say in the Apple side of the kit and the reverse', () => {
+        expect(kitReadiness(storedKit(uploadKey)).provisionable).toBe(false);
+        expect(kitSignsAndroid(storedKit({ appStoreConnectConfigured: true }))).toBe(false);
+        expect(kitSignsAndroid(null)).toBe(false);
+    });
+
+    it('names what is missing, in the order it is asked for', () => {
+        expect(androidKitShortfall(storedKit())).toEqual(['an upload keystore']);
+        expect(androidKitShortfall(storedKit({ ...uploadKey, androidKeyAlias: null }))).toEqual([
+            'the key alias',
+        ]);
+        expect(
+            androidKitShortfall(storedKit({ ...uploadKey, androidKeystorePasswordStored: false })),
+        ).toEqual(['the keystore password']);
+        expect(androidKitShortfall(storedKit(uploadKey))).toEqual([]);
+    });
+
+    it('counts a typed keystore path and password as stored once saved', () => {
+        const draft = {
+            ...emptyDraft,
+            androidKeystorePath: '/keys/upload.keystore',
+            androidKeystorePassword: 'secret-1',
+            androidKeyAlias: 'release',
+        };
+        const summary = draftKitSummary(draft, null);
+        expect(summary.androidKeystoreConfigured).toBe(true);
+        expect(summary.androidKeyAlias).toBe('release');
+        expect(summary.androidKeystorePasswordStored).toBe(true);
+        expect(kitSignsAndroid(summary)).toBe(true);
+        // A blank draft keeps what the vault holds.
+        expect(kitSignsAndroid(draftKitSummary(emptyDraft, storedKit(uploadKey)))).toBe(true);
     });
 });

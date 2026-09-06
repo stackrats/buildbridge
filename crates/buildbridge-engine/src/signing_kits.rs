@@ -16,8 +16,9 @@ pub async fn save_signing_kit(
                 .iter()
                 .find(|kit| kit.id == id)
                 .cloned()
-                .ok_or_else(|| "This signing kit is no longer stored.".to_string())?;
-            let merged = merge_signing_kit(existing, incoming);
+                .ok_or_else(|| "These signing credentials are no longer stored.".to_string())?;
+            let mut merged = merge_signing_kit(existing, incoming);
+            invent_keychain_password(&mut merged)?;
             if let Some(stored) = kits.kits.iter_mut().find(|kit| kit.id == id) {
                 *stored = merged;
             }
@@ -25,7 +26,7 @@ pub async fn save_signing_kit(
         None => {
             if kits.kits.len() >= MAX_SIGNING_KITS {
                 return Err(format!(
-                    "BuildBridge stores at most {MAX_SIGNING_KITS} signing kits."
+                    "BuildBridge stores at most {MAX_SIGNING_KITS} signing credentials."
                 ));
             }
             let existing_ids = kits
@@ -33,11 +34,12 @@ pub async fn save_signing_kit(
                 .iter()
                 .map(|kit| kit.id.as_str())
                 .collect::<Vec<_>>();
-            let created = StoredSigningKit {
+            let mut created = StoredSigningKit {
                 id: machines::machine_id_from_name(&incoming.name, &existing_ids),
                 created_at_epoch_seconds: machines::now_epoch_seconds(),
                 ..incoming
             };
+            invent_keychain_password(&mut created)?;
             kits.kits.push(created);
         }
     }
@@ -71,18 +73,19 @@ pub async fn delete_signing_kit(
     input: ConfirmInput,
 ) -> Result<Vec<SigningKitSummary>, String> {
     if !input.confirmed {
-        return Err("Confirm removing the signing kit before continuing.".to_string());
+        return Err("Confirm removing the signing credentials before continuing.".to_string());
     }
     let mut kits = read_signing_kits().await?;
     let index = kits
         .kits
         .iter()
         .position(|kit| kit.id == kit_id)
-        .ok_or_else(|| "This signing kit is no longer stored.".to_string())?;
+        .ok_or_else(|| "These signing credentials are no longer stored.".to_string())?;
     let removed = kits.kits.remove(index);
     write_signing_kits(kits).await?;
     remove_managed_profiles_for(app, &removed)?;
     remove_managed_certificate_for(app, &removed)?;
+    remove_managed_keystore_for(app, &removed)?;
 
     let mut registry = machines::load_registry(app)?;
     let mut detached = false;
@@ -102,12 +105,12 @@ pub async fn attach_signing_kit(
     app: &Engine,
     machine_id: String,
     input: AttachSigningKitInput,
-) -> Result<MacBuilderView, String> {
+) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     if let Some(id) = input.kit_id.as_deref() {
         let stored = read_signing_kits().await?;
         if !stored.kits.iter().any(|kit| kit.id == id) {
-            return Err("This signing kit is no longer stored.".to_string());
+            return Err("These signing credentials are no longer stored.".to_string());
         }
     }
     let mut registry = machines::load_registry(app)?;
@@ -115,13 +118,13 @@ pub async fn attach_signing_kit(
     registry.machines[index].signing_kit_id = input.kit_id;
     machines::save_registry(app, &registry)?;
 
-    build_mac_builder_view(app, &paths).await
+    build_machine_view(app, &paths).await
 }
 
 pub(crate) fn normalize_signing_kit(input: SigningKitInput) -> Result<StoredSigningKit, String> {
     let name = input.name.trim().to_string();
     if name.is_empty() || name.chars().count() > 60 {
-        return Err("Give the signing kit a name of 1 to 60 characters.".to_string());
+        return Err("Give the signing credentials a name of 1 to 60 characters.".to_string());
     }
     let app_store_connect_private_key_path =
         optional_trim(input.app_store_connect_private_key_path);
@@ -158,6 +161,10 @@ pub(crate) fn normalize_signing_kit(input: SigningKitInput) -> Result<StoredSign
         development_certificate_path: optional_trim(input.development_certificate_path),
         development_certificate_password: optional_trim(input.development_certificate_password),
         development_certificate_serial_number: None,
+        android_keystore_path: optional_trim(input.android_keystore_path),
+        android_keystore_password: optional_trim(input.android_keystore_password),
+        android_key_alias: optional_trim(input.android_key_alias),
+        android_key_password: optional_trim(input.android_key_password),
     };
     let app_store_connect_values = [
         secrets.app_store_connect_key_id.is_some(),
@@ -198,6 +205,30 @@ pub(crate) fn normalize_signing_kit(input: SigningKitInput) -> Result<StoredSign
     for path in &secrets.provisioning_profile_paths {
         validate_secret_file(path, &["mobileprovision"], "provisioning profile")?;
     }
+    if let Some(path) = &secrets.android_keystore_path {
+        validate_secret_file(path, &["jks", "keystore", "p12", "pfx"], "Android keystore")?;
+    }
+    if let Some(alias) = &secrets.android_key_alias
+        && !valid_android_key_alias(alias)
+    {
+        return Err(
+            "The Android key alias may only contain letters, digits, dots, underscores and dashes."
+                .to_string(),
+        );
+    }
+    for password in [
+        secrets.android_keystore_password.as_deref(),
+        secrets.android_key_password.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if password.chars().count() < 6 || password.chars().any(char::is_control) {
+            return Err(
+                "An Android keystore password is one line of at least six characters.".to_string(),
+            );
+        }
+    }
 
     for value in [
         secrets.app_store_connect_key_id.as_deref(),
@@ -205,6 +236,8 @@ pub(crate) fn normalize_signing_kit(input: SigningKitInput) -> Result<StoredSign
         secrets.signing_certificate_password.as_deref(),
         secrets.guest_keychain_password.as_deref(),
         secrets.development_certificate_password.as_deref(),
+        secrets.android_keystore_password.as_deref(),
+        secrets.android_key_password.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -252,8 +285,193 @@ pub(crate) fn merge_signing_kit(
         incoming.development_certificate_serial_number =
             existing.development_certificate_serial_number;
     }
+    incoming.android_keystore_path = incoming
+        .android_keystore_path
+        .or(existing.android_keystore_path);
+    incoming.android_keystore_password = incoming
+        .android_keystore_password
+        .or(existing.android_keystore_password);
+    incoming.android_key_alias = incoming.android_key_alias.or(existing.android_key_alias);
+    incoming.android_key_password = incoming
+        .android_key_password
+        .or(existing.android_key_password);
 
     incoming
+}
+
+pub(crate) fn valid_android_key_alias(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+}
+
+/// Whether a kit can sign an Android release: a keystore, the alias of the key in it, and
+/// the keystore password. The key password defaults to the keystore's.
+pub(crate) fn kit_has_android_signing(kit: &StoredSigningKit) -> bool {
+    kit.android_keystore_path.is_some()
+        && kit.android_key_alias.is_some()
+        && kit.android_keystore_password.is_some()
+}
+
+/// The upload key as a release takes it, or why it cannot.
+pub(crate) fn android_signing_material(
+    kit: &StoredSigningKit,
+) -> Result<AndroidSigningMaterial, String> {
+    let keystore_path = kit.android_keystore_path.clone().ok_or_else(|| {
+        "The attached credentials hold no Android keystore. Add an upload key to them, or create one there."
+            .to_string()
+    })?;
+    let key_alias = kit.android_key_alias.clone().ok_or_else(|| {
+        "The attached credentials do not name the key alias in their keystore.".to_string()
+    })?;
+    let keystore_password = kit
+        .android_keystore_password
+        .clone()
+        .ok_or_else(|| "The Android keystore password is missing from the OS vault.".to_string())?;
+    let key_password = kit
+        .android_key_password
+        .clone()
+        .unwrap_or_else(|| keystore_password.clone());
+    if !std::path::Path::new(&keystore_path).is_file() {
+        return Err(format!(
+            "The keystore is no longer at {keystore_path}. Put it back or choose another."
+        ));
+    }
+
+    Ok(AndroidSigningMaterial {
+        keystore_path: PathBuf::from(keystore_path),
+        keystore_password,
+        key_alias,
+        key_password,
+    })
+}
+
+/// Where kits keep the upload keys BuildBridge created for them, one directory per key.
+pub(crate) fn managed_android_keystores_dir(app: &Engine) -> Result<PathBuf, String> {
+    Ok(app.config_dir().join("android-builder").join("keystores"))
+}
+
+/// Creates an upload key for a kit in a throwaway container of the toolchain image: the
+/// keystore lands owner-only under BuildBridge's managed directory, and its path, alias and
+/// password go into the kit. The person chooses the password and must keep it; Google Play
+/// cannot recover an upload key whose password is lost, and neither can BuildBridge.
+pub async fn create_android_keystore(
+    app: &Engine,
+    kit_id: String,
+    input: CreateAndroidKeystoreInput,
+) -> Result<CreateAndroidKeystoreResult, String> {
+    if !input.confirmed {
+        return Err("Confirm the keystore creation before continuing.".to_string());
+    }
+    let kits = read_signing_kits().await?.kits;
+    let mut kit = kits
+        .iter()
+        .find(|kit| kit.id == kit_id)
+        .cloned()
+        .ok_or_else(|| "These signing credentials are no longer stored.".to_string())?;
+    if kit.android_keystore_path.is_some() {
+        return Err(
+            "These credentials already hold an Android keystore. Remove it before creating another."
+                .to_string(),
+        );
+    }
+    let key_alias = optional_trim(input.key_alias).unwrap_or_else(|| "upload".to_string());
+    if !valid_android_key_alias(&key_alias) {
+        return Err(
+            "The key alias may only contain letters, digits, dots, underscores and dashes."
+                .to_string(),
+        );
+    }
+    let certificate_name =
+        optional_trim(input.certificate_name).unwrap_or_else(|| kit.name.clone());
+    let password = input.password;
+    if password.chars().count() < 6
+        || password.len() > 512
+        || password.chars().any(char::is_control)
+    {
+        return Err("Choose a keystore password of six to 512 characters on one line.".to_string());
+    }
+    let stored_password = password.clone();
+    let directory = managed_android_keystores_dir(app)?
+        .join(format!("upload-{}", machines::now_epoch_seconds()));
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    set_restricted_directory_permissions(&directory)?;
+    let output_path = directory.join("upload.keystore");
+    let creation_path = output_path.clone();
+    let creation_alias = key_alias.clone();
+    let created = tokio::task::spawn_blocking(move || {
+        buildbridge_machines::create_android_keystore(
+            &creation_path,
+            &password,
+            &creation_alias,
+            &certificate_name,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string());
+    let keystore = match created.and_then(|result| result) {
+        Ok(keystore) => keystore,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&directory);
+            return Err(error);
+        }
+    };
+    kit.android_keystore_path = Some(keystore.path.clone());
+    kit.android_key_alias = Some(key_alias);
+    kit.android_keystore_password = Some(stored_password);
+    kit.android_key_password = None;
+    save_signing_kit_record(kit.clone()).await?;
+
+    Ok(CreateAndroidKeystoreResult {
+        keystore,
+        kit: summarize_signing_kit(&kit),
+    })
+}
+
+/// Removes the upload key BuildBridge created for a kit, if the kit's keystore is one of
+/// those; a keystore the person pointed the kit at is theirs and stays.
+pub(crate) fn remove_managed_keystore_for(
+    app: &Engine,
+    kit: &StoredSigningKit,
+) -> Result<(), String> {
+    let managed = managed_android_keystores_dir(app)?;
+    if let Some(path) = &kit.android_keystore_path {
+        let candidate = std::path::Path::new(path);
+        if candidate.starts_with(&managed)
+            && let Some(directory) = candidate.parent()
+            && directory != managed
+        {
+            let _ = fs::remove_dir_all(directory);
+        }
+    }
+
+    Ok(())
+}
+
+/// The guest keychain password is BuildBridge's to invent: it locks a keychain BuildBridge
+/// creates inside a machine, and nothing else ever asks for it. A kit saved without one gets
+/// one, so the simplest kit is a name and a Team key; a password someone typed is kept as is.
+pub(crate) fn invent_keychain_password(kit: &mut StoredSigningKit) -> Result<(), String> {
+    if kit.guest_keychain_password.is_none() {
+        kit.guest_keychain_password = Some(generated_password()?);
+    }
+
+    Ok(())
+}
+
+/// Thirty-two hexadecimal characters from the operating system's random source, with no
+/// dependency to carry: the same entropy OpenSSL would hand back, read directly.
+pub(crate) fn generated_password() -> Result<String, String> {
+    let mut bytes = [0_u8; 16];
+    let mut source = fs::File::open("/dev/urandom")
+        .map_err(|error| format!("The system random source is unavailable: {error}"))?;
+    std::io::Read::read_exact(&mut source, &mut bytes)
+        .map_err(|error| format!("The system random source could not be read: {error}"))?;
+
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 pub(crate) fn optional_trim(value: String) -> Option<String> {
@@ -372,6 +590,16 @@ pub(crate) fn summarize_signing_kit(secrets: &StoredSigningKit) -> SigningKitSum
             },
         ),
         development_certificate_password_stored: secrets.development_certificate_password.is_some(),
+        android_keystore_configured: secrets.android_keystore_path.is_some(),
+        android_keystore_name: secrets.android_keystore_path.as_ref().and_then(|path| {
+            std::path::Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        }),
+        android_key_alias: secrets.android_key_alias.clone(),
+        android_keystore_password_stored: secrets.android_keystore_password.is_some(),
+        android_key_password_stored: secrets.android_key_password.is_some(),
     }
 }
 
@@ -395,7 +623,7 @@ pub(crate) fn parse_signing_vault(encoded: &str) -> Result<StoredSigningKits, St
                 kit.id = DEFAULT_SIGNING_KIT_ID.to_string();
             }
             if kit.name.is_empty() {
-                kit.name = "Signing kit".to_string();
+                kit.name = "Signing credentials".to_string();
             }
         }
         return Ok(kits);
@@ -407,7 +635,7 @@ pub(crate) fn parse_signing_vault(encoded: &str) -> Result<StoredSigningKits, St
     Ok(StoredSigningKits {
         kits: vec![StoredSigningKit {
             id: DEFAULT_SIGNING_KIT_ID.to_string(),
-            name: "Signing kit".to_string(),
+            name: "Signing credentials".to_string(),
             ..legacy
         }],
     })
@@ -460,23 +688,40 @@ pub(crate) fn kit_has_development_identity(kit: &StoredSigningKit) -> bool {
 /// `KitMissing` is the state left by an operating-system keyring being cleared: the guest still
 /// holds a provisioned keychain, but the material that created it is gone, so the interface must
 /// ask for the kit again instead of claiming signing is configured.
+#[cfg(test)]
 pub(crate) fn signing_health(
     vault_issue: Option<&str>,
     kit: Option<&StoredSigningKit>,
     provisioned: bool,
 ) -> SigningHealth {
+    signing_health_for(MachinePlatform::Ios, vault_issue, kit, provisioned)
+}
+
+/// The same classification for either platform: an Android machine is ready when its kit
+/// holds an upload key, and there is nothing provisioned into it that a lost kit could
+/// orphan, since the key is streamed in per release.
+pub(crate) fn signing_health_for(
+    platform: MachinePlatform,
+    vault_issue: Option<&str>,
+    kit: Option<&StoredSigningKit>,
+    provisioned: bool,
+) -> SigningHealth {
+    let complete = |kit: &StoredSigningKit| match platform {
+        MachinePlatform::Ios => kit_is_complete(kit),
+        MachinePlatform::Android => kit_has_android_signing(kit),
+    };
     match (vault_issue, kit) {
         (Some(_), _) => SigningHealth::VaultUnavailable,
         (None, None) if provisioned => SigningHealth::KitMissing,
         (None, None) => SigningHealth::Unconfigured,
-        (None, Some(kit)) if kit_is_complete(kit) => SigningHealth::Ready,
+        (None, Some(kit)) if complete(kit) => SigningHealth::Ready,
         (None, Some(_)) => SigningHealth::Incomplete,
     }
 }
 
 pub(crate) async fn read_signing_kits() -> Result<StoredSigningKits, String> {
     tokio::task::spawn_blocking(move || {
-        let entry = mac_builder_credential_entry()?;
+        let entry = signing_kit_credential_entry()?;
 
         match entry.get_password() {
             Ok(encoded) => parse_signing_vault(&encoded),
@@ -494,7 +739,7 @@ pub(crate) async fn write_signing_kits(kits: StoredSigningKits) -> Result<(), St
     let encoded = serde_json::to_string(&kits).map_err(|error| error.to_string())?;
 
     tokio::task::spawn_blocking(move || {
-        mac_builder_credential_entry()?
+        signing_kit_credential_entry()?
             .set_password(&encoded)
             .map_err(|error| error.to_string())
     })
@@ -510,7 +755,7 @@ pub(crate) async fn resolve_signing_kit_for(
     optional_signing_kit_for(app, machine_id)
         .await?
         .ok_or_else(|| {
-            "Attach a signing kit to this machine first. Signing kits are stored once on this host and attached per machine."
+            "Attach signing credentials to this machine first. They are stored once on this host and attached per machine."
                 .to_string()
         })
 }

@@ -42,7 +42,7 @@ function move(offset: number): void {
             :tabindex="model === tab.value ? 0 : -1"
             :class="
                 cn(
-                    'flex h-7 items-center gap-1.5 rounded-[5px] px-2.5 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300',
+                    'flex h-7 items-center gap-1.5 rounded-[5px] px-2.5 text-xs font-medium focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300',
                     model === tab.value
                         ? 'bg-white text-zinc-900 shadow-[0_1px_2px_rgb(0_0_0/0.06)] dark:bg-zinc-800 dark:text-zinc-50'
                         : 'text-zinc-500 hover:text-zinc-600 dark:text-zinc-400 dark:hover:text-zinc-300',

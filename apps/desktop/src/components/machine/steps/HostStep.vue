@@ -2,6 +2,7 @@
 import { CircleCheck, CircleX, RefreshCw } from '@lucide/vue';
 import { computed } from 'vue';
 
+import { isAndroid, providerLabel as providerLabels } from '../../../model/providers';
 import type { JourneyStep } from '../../../model/steps';
 import { useMachinesStore, type MachineSession } from '../../../stores/machines';
 import Button from '../../ui/Button.vue';
@@ -14,23 +15,29 @@ const machines = useMachinesStore();
 
 const prerequisites = computed(() => session.view!.runtime.prerequisites);
 const provider = computed(() => session.view!.profile.provider);
-const providerLabel = computed(() =>
-    provider.value === 'dockur_macos' ? 'dockur/macos' : 'Docker-OSX',
-);
+const providerLabel = computed(() => providerLabels[provider.value]);
+const android = computed(() => isAndroid(provider.value));
 
+// The toolchain container needs Docker and nothing else of the host: no KVM, no display.
 const checks = computed(() => [
     {
-        label: 'Linux x86_64 host',
+        label: android.value ? 'Unix host' : 'Linux x86_64 host',
         ok: prerequisites.value.supportedHost,
         detail: prerequisites.value.supportedHost
             ? 'Supported'
-            : `${providerLabel.value} needs x86_64 Linux with KVM`,
+            : android.value
+              ? `${providerLabel.value} needs a Unix host with Docker`
+              : `${providerLabel.value} needs x86_64 Linux with KVM`,
     },
     {
         label: 'Docker engine',
         ok: prerequisites.value.dockerCli && prerequisites.value.dockerDaemon,
         detail: prerequisites.value.dockerVersion ?? 'Install Docker and allow this user to use it',
     },
+    ...(android.value ? [] : macChecks.value),
+]);
+
+const macChecks = computed(() => [
     {
         label: 'KVM acceleration',
         ok: prerequisites.value.kvmAccess,
@@ -73,7 +80,11 @@ const checks = computed(() => [
 
         <template v-if="step.status === 'failed'" #status>
             <FailureBlock
-                title="This host cannot run a macOS machine yet"
+                :title="
+                    android
+                        ? 'This host cannot run the Android toolchain yet'
+                        : 'This host cannot run a macOS machine yet'
+                "
                 cause="Fix what is marked below on the host, then check again. Nothing else in the journey can start until every check passes."
                 :diagnostic="prerequisites.issues.join('\n')"
             />

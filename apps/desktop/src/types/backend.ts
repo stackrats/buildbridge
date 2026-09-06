@@ -1,6 +1,6 @@
 // The Tauri command and event contract, as TypeScript.
 //
-// Every type here is generated from the Rust DTOs by ts-rs (`pnpm types:generate`, which runs
+// Every type here is generated from the Rust DTOs by ts-rs (`vp run types:generate`, which runs
 // the crates' export tests into ./generated); nothing is mirrored by hand, so a field added or
 // renamed in Rust shows up here on the next generation and the type checker finds every place
 // that reads it. Field names are camelCase because every Rust DTO serializes that way. The few
@@ -19,6 +19,19 @@ import type { TunnelState } from './generated/TunnelState';
 
 /** A machine's progress event: the payload with the machine it belongs to flattened in. */
 export type MachineEvent<T> = T & { machineId: string };
+
+/**
+ * An Xcode archive on its way from Apple into BuildBridge's folder, reported by the desktop
+ * shell rather than the engine: the download runs in a window of the app, so only the desktop
+ * sees it. The total is unknown; the file's size so far is what there is.
+ */
+export interface XcodeDownloadProgress {
+    machineId: string;
+    path: string;
+    fileName: string;
+    bytes: number;
+    state: 'downloading' | 'finished' | 'failed';
+}
 
 /** What the control plane returns for a realtime channel authorization; passed through. */
 export interface RealtimeAuthorization {

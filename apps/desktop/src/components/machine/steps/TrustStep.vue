@@ -72,9 +72,11 @@ async function forget(): Promise<void> {
 
         <div class="space-y-3">
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                BuildBridge only ever talks to a guest whose SSH host key you have pinned. Compare
-                the fingerprint it scanned with the one macOS reports, then trust it. A key that
-                changes later is rejected until you explicitly forget the pin.
+                BuildBridge only ever talks to a guest whose SSH host key you have pinned. This
+                guest is a machine on this host, reached over its own loopback port, so pinning the
+                fingerprint it just scanned is the usual step; comparing it with the one macOS
+                reports first is the careful option, for a host you share. A key that changes later
+                is rejected until you explicitly forget the pin.
             </p>
 
             <div v-if="ssh.fingerprint" class="group rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950">
@@ -84,7 +86,7 @@ async function forget(): Promise<void> {
                         :text="ssh.fingerprint"
                         what="Copy the scanned fingerprint"
                         size="iconXs"
-                        class="opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 motion-reduce:transition-none"
+                        class="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
                     />
                 </p>
                 <p class="mt-1 font-mono text-xs break-all text-zinc-900 dark:text-zinc-50">
@@ -100,7 +102,7 @@ async function forget(): Promise<void> {
 
             <div class="rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950">
                 <p class="text-xs text-zinc-500 dark:text-zinc-400">
-                    In the guest Terminal, print the same fingerprint with
+                    To compare first, print the same fingerprint in the guest Terminal with
                 </p>
                 <div class="mt-1 flex items-center gap-2">
                     <code

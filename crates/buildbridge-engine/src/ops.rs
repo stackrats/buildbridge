@@ -18,7 +18,7 @@ pub struct AppState {
     pub(crate) usb_attach_issues: Mutex<HashMap<String, String>>,
     /// The phones each guest reported at its last listing. Probing `devicectl` costs seconds,
     /// so the view serves this and the listing command refreshes it.
-    pub(crate) guest_devices: Mutex<HashMap<String, Vec<buildbridge_docker_osx::GuestDevice>>>,
+    pub(crate) guest_devices: Mutex<HashMap<String, Vec<buildbridge_machines::GuestDevice>>>,
 }
 
 /// Marks the host busy with a privileged USB change until dropped.
@@ -141,9 +141,21 @@ pub async fn cancel_machine_operation(app: &Engine, machine_id: String) -> Resul
 
     if matches!(
         label.as_deref(),
-        Some("test_building" | "archiving" | "running_on_device")
+        Some("test_building" | "archiving" | "releasing" | "running_on_device")
     ) {
         let paths = MachinePaths::resolve(app, &machine_id)?;
+        let provider = machines::load_registry(app)
+            .ok()
+            .and_then(|registry| registry.find(&machine_id).ok().map(|m| m.config.provider))
+            .unwrap_or_default();
+        if !provider.is_macos() {
+            let container_name = paths.container_name.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                buildbridge_machines::stop_android_jobs(&container_name)
+            })
+            .await;
+            return Ok(());
+        }
         if let Some(access) = load_mac_guest_access(&paths)?
             && let Ok(registry) = machines::load_registry(app)
             && let Ok(machine) = registry.find(&machine_id)
@@ -152,7 +164,7 @@ pub async fn cancel_machine_operation(app: &Engine, machine_id: String) -> Resul
             let identity = paths.guest_identity();
             let known_hosts = paths.known_hosts();
             let _ = tokio::task::spawn_blocking(move || {
-                buildbridge_docker_osx::stop_guest_jobs(
+                buildbridge_machines::stop_guest_jobs(
                     ssh_port,
                     &access.username,
                     &identity,
@@ -291,11 +303,11 @@ pub(crate) fn emit_machine_progress<T: Serialize + Clone>(
 /// ready for project work. One place for the checks, so every command refuses the same way.
 pub struct GuestContext {
     pub(crate) paths: MachinePaths,
-    pub(crate) profile: MacBuilderConfig,
+    pub(crate) profile: MachineConfig,
     pub(crate) username: String,
     pub(crate) identity_path: PathBuf,
     pub(crate) known_hosts_path: PathBuf,
-    pub(crate) current: MacBuilderView,
+    pub(crate) current: MachineView,
 }
 
 impl GuestContext {
@@ -310,9 +322,12 @@ pub(crate) async fn guest_context(app: &Engine, machine_id: &str) -> Result<Gues
         .find(machine_id)?
         .config
         .clone();
+    if !profile.provider.is_macos() {
+        return Err("This is an Android machine; it has no macOS guest.".to_string());
+    }
     let access = load_mac_guest_access(&paths)?
         .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
-    let current = build_mac_builder_view(app, &paths).await?;
+    let current = build_machine_view(app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     Ok(GuestContext {
         identity_path: paths.guest_identity(),
@@ -341,7 +356,7 @@ where
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_docker_osx::enter_operation(scope);
+        let _operation = buildbridge_machines::enter_operation(scope);
         work()
     })
     .await

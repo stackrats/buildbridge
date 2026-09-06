@@ -2,10 +2,10 @@
 import { computed, ref, watch } from 'vue';
 
 import { describeError } from '../../lib/utils';
-import { recommendedRelease } from '../../model/providers';
+import { isAndroid, recommendedRelease } from '../../model/providers';
 import { useMachinesStore } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
-import type { MacBuilderConfig } from '../../types/backend';
+import type { MachineConfig } from '../../types/backend';
 import Button from '../ui/Button.vue';
 import Callout from '../ui/Callout.vue';
 import Field from '../ui/Field.vue';
@@ -27,7 +27,7 @@ const nextPort = computed(() => {
     return port;
 });
 
-function blank(): MacBuilderConfig {
+function blank(): MachineConfig {
     return {
         name: machines.machines.value.length === 0 ? 'macOS builder' : '',
         macosRelease: 'tahoe',
@@ -38,7 +38,7 @@ function blank(): MacBuilderConfig {
     };
 }
 
-const profile = ref<MacBuilderConfig>(blank());
+const profile = ref<MachineConfig>(blank());
 const saving = ref(false);
 const error = ref<string | null>(null);
 // '' is a fresh install; a template id clones that template's disk.
@@ -46,6 +46,7 @@ const startFrom = ref('');
 
 // A template belongs to the provider that saved it: the disk directory's layout is that
 // provider's, so only its templates are offered.
+const android = computed(() => isAndroid(profile.value.provider));
 const readyTemplates = computed(() =>
     machines.state.templates.filter(
         (template) => template.ready && template.provider === profile.value.provider,
@@ -105,15 +106,16 @@ async function create(): Promise<void> {
 </script>
 
 <template>
-    <Modal v-model:open="open" title="New macOS machine">
+    <Modal v-model:open="open" title="New machine">
         <form class="space-y-3" @submit.prevent="create">
             <p class="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                A machine is a persistent macOS guest on this host, run by Docker-OSX or by
-                dockur/macos. Install macOS and Xcode in it once, then reuse it for every project
-                you build.
+                A machine builds one platform. A macOS machine is a persistent guest on this host,
+                run by Docker-OSX or by dockur/macos, with macOS and Xcode installed once; an
+                Android toolchain is a container with the SDK, Gradle and Node prepared in it.
+                Either is reused for every project you build.
             </p>
             <Callout
-                v-if="!hostReady"
+                v-if="!hostReady && !android"
                 tone="warn"
                 title="This host is not ready for a macOS machine yet"
             >
@@ -121,7 +123,7 @@ async function create(): Promise<void> {
                 start.
             </Callout>
             <Field
-                v-if="readyTemplates.length"
+                v-if="readyTemplates.length && !android"
                 label="Start from"
                 :hint="
                     startFrom

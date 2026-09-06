@@ -1,11 +1,13 @@
 <script setup lang="ts">
 // Templates: prepared machines saved once on this host, so a new machine is a clone made in
-// seconds rather than an install made in an hour. Saving happens from a machine's own menu;
-// this page lists what is saved, what depends on it, and starts a clone.
+// seconds rather than an install made in an hour. Saving starts from a machine's own menu and
+// runs in the background; this page shows each save as it runs, lists what is saved and what
+// depends on it, and starts a clone.
 import { Layers, Plus, Trash2 } from '@lucide/vue';
 import { computed, onMounted, ref } from 'vue';
 
 import { formatBytes, formatDate } from '../../lib/format';
+import { templateSavePhaseLabel } from '../../model/phases';
 import { useMachinesStore } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
 import type { MachineTemplateSummary } from '../../types/backend';
@@ -16,12 +18,18 @@ import Callout from '../ui/Callout.vue';
 import Card from '../ui/Card.vue';
 import EmptyState from '../ui/EmptyState.vue';
 import KeyValue from '../ui/KeyValue.vue';
+import ProgressRow from '../ui/ProgressRow.vue';
 import Spinner from '../ui/Spinner.vue';
 
 const machines = useMachinesStore();
 const ui = useUi();
 
 const templates = computed(() => machines.state.templates);
+// Saves under way sit ahead of the saved templates, this window's with their progress and a
+// Stop, another BuildBridge process's by the lock it holds; a failed one stays until its
+// machine's next operation succeeds.
+const saves = computed(() => machines.templateSaves());
+const failures = computed(() => machines.templateSaveFailures());
 const removing = ref<MachineTemplateSummary | null>(null);
 const deleting = ref(false);
 const error = ref<string | null>(null);
@@ -83,7 +91,8 @@ function detailsFor(template: MachineTemplateSummary) {
                     A template is a machine you prepared once, saved on this host as a compressed
                     copy of its disk. A new machine cloned from it starts in seconds with macOS,
                     Xcode and its access already in place, and its journey begins at the first
-                    project step. Save one from a machine's menu once it has Xcode activated.
+                    project step. Save one from a machine's menu once it has Xcode activated; the
+                    save runs in the background and shows here while it does.
                 </p>
             </div>
         </header>
@@ -92,8 +101,57 @@ function detailsFor(template: MachineTemplateSummary) {
             {{ machines.state.templatesError }}
         </Callout>
 
+        <Card v-for="save in saves" :key="`saving-${save.machineId}`">
+            <template #title>
+                <span class="flex flex-wrap items-center gap-2">
+                    {{ save.name ?? 'A template' }}
+                    <Badge tone="warn">saving</Badge>
+                </span>
+            </template>
+            <template #description>
+                From {{ save.machineName }}; macOS is shut down first and the machine stays stopped
+                afterwards.
+            </template>
+            <template #actions>
+                <Button
+                    variant="outline"
+                    size="sm"
+                    title="Opens the machine; its Launch step follows the save too"
+                    @click="ui.openMachine(save.machineId)"
+                >
+                    Open machine
+                </Button>
+            </template>
+            <ProgressRow
+                :label="
+                    save.progress
+                        ? templateSavePhaseLabel[save.progress.phase]
+                        : 'Saving the machine as a template'
+                "
+                :detail="
+                    save.progress?.detail ??
+                    (save.own ? null : 'run by another BuildBridge process, which has its progress')
+                "
+                :elapsed-seconds="save.progress?.elapsedSeconds ?? null"
+                :value="save.progress?.percent == null ? null : save.progress.percent / 100"
+                :stoppable="save.own"
+                :stopping="save.cancelling"
+                stop-title="Stop the save. The partial template is removed; the machine stays stopped."
+                @stop="machines.cancelOperation(save.machineId)"
+            />
+        </Card>
+
+        <Callout
+            v-for="failure in failures"
+            :key="`failed-${failure.machineId}`"
+            tone="danger"
+            :title="`Saving ${failure.name ?? 'the template'} from ${failure.machineName} failed`"
+        >
+            {{ failure.message }}
+        </Callout>
+
         <EmptyState
-            v-if="!templates.length && !machines.state.templatesLoading"
+            v-if="!templates.length && !saves.length && !machines.state.templatesLoading"
             title="No templates yet"
             description="Open a machine whose setup is complete, choose Save as template from its menu, and it becomes the starting point for every machine after it."
         >

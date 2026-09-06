@@ -1,0 +1,2049 @@
+//! The Android toolchain container: a machine's third provider, and the first without a
+//! virtual machine. Android's SDK, Gradle and the JDK run natively on Linux, so what a machine
+//! needs is a reproducible toolchain rather than an emulated operating system: a pinned JDK
+//! image kept alive with `sleep`, whose home directory is bound from the machine's directory
+//! on this host. Every tool the recipes need — Node and pnpm for the web assets, Google's
+//! command-line tools and the build tools for the SDK — is downloaded into that home with its
+//! checksum pinned, the same way the macOS guest prepares itself, so a fresh container heals
+//! itself where a tool is first used. Everything else the container is asked to do goes
+//! through `docker exec` with a fixed script, mirroring what the macOS providers speak over SSH:
+//! the same snapshot streamed in, the same detachable job wrapper, the same artifact transfer
+//! with sizes and checksums agreed on both sides. The container runs as root, which is why its
+//! home is emptied through a throwaway container when the machine is deleted.
+
+use super::*;
+
+/// Pinned by digest: `eclipse-temurin:17-jdk-noble` as resolved on 2026-09-06 (OpenJDK 17.0.20
+/// on Ubuntu 24.04). JDK 17 is what every Android Gradle Plugin since 8.0 accepts, and what
+/// Capacitor 5 through 8 projects run their Gradle on; JDK 21 would refuse the older Gradle
+/// wrappers. The same upgrade rule as the macOS images: a deliberate commit that names what
+/// changed upstream.
+pub const ANDROID_IMAGE: &str =
+    "eclipse-temurin@sha256:61a94244559f2e89e4edb02bae37eeb8762ecf5deaf237251fa630e5120a8798";
+/// The image's JDK, fixed by the digest above: the JVM Gradle itself runs on.
+const JAVA_HOME: &str = "/opt/java/openjdk";
+/// Temurin JDK 21 for x86_64 Linux, as published on 2026-09-06 (`jdk-21.0.12.1+1`), with the
+/// checksum Adoptium states. Capacitor 8's Android library compiles for Java 21 on the JVM
+/// Gradle runs on, and its plugins ask for a Java 21 toolchain, while Gradle 8.0 through 8.4,
+/// which Capacitor 5 and 6 projects pin, refuse to run on anything past 17; so both JDKs are
+/// present, the project's wrapper version decides which Gradle runs on, and both are registered
+/// as toolchains it may compile with.
+const JDK_21_VERSION: &str = "21.0.12.1_1";
+const JDK_21_RELEASE: &str = "jdk-21.0.12.1%2B1";
+const JDK_21_LINUX_X64_SHA256: &str =
+    "ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94";
+/// The container's home: bound from the machine's `home` directory on this host, so the SDK,
+/// the Gradle caches, the synchronized project and the build outputs survive the container.
+pub(crate) const HOME_CONTAINER_DIR: &str = "/root";
+/// Google's command-line tools, as published on 2026-09-06; the checksum is the one the
+/// download page states and the one measured here.
+const CMDLINE_TOOLS_VERSION: &str = "15859902";
+const CMDLINE_TOOLS_LINUX_SHA256: &str =
+    "4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583";
+/// The build tools every release needs on its own — `zipalign`, `apksigner`, `aapt2` — whatever
+/// build tools the project's Gradle plugin installs for itself.
+const BUILD_TOOLS_VERSION: &str = "35.0.0";
+const NODE_LINUX_X64_SHA256: &str =
+    "855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8ec";
+/// `sleep` is the container's only process and dies on the first signal; ten seconds is ample.
+const STOP_TIMEOUT_SECONDS: u16 = 10;
+/// A signed app bundle and APK together; an app past this is not a mobile app.
+pub const ANDROID_RELEASE_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const ANDROID_BUILD_OUTPUT_TAIL_LINES: usize = 80;
+const ANDROID_BUILD_DIAGNOSTIC_LINES: usize = 24;
+const AAB_NAME: &str = "app-release.aab";
+const APK_NAME: &str = "app-release.apk";
+const DEBUG_APK_NAME: &str = "app-debug.apk";
+
+/// The phases of everything that runs the project's tools in the container: the sync and the
+/// debug build share them, as the macOS project phases do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum AndroidBuildPhase {
+    Snapshotting,
+    Transferring,
+    Extracting,
+    PreparingTools,
+    InstallingDependencies,
+    BuildingWebAssets,
+    SyncingAndroid,
+    Building,
+    Inspecting,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidBuildProgress {
+    pub phase: AndroidBuildPhase,
+    #[ts(type = "number")]
+    pub completed_bytes: u64,
+    #[ts(type = "number")]
+    pub total_bytes: u64,
+    #[ts(type = "number")]
+    pub elapsed_seconds: u64,
+    pub detail: String,
+    pub log_line: Option<String>,
+}
+
+/// What the container built with: named so a build can be repeated somewhere else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidToolchainSummary {
+    pub jdk_version: String,
+    pub build_tools_version: String,
+}
+
+/// The debug build's outcome: the app as `aapt2` reads it back from the APK, the tools, and
+/// the APK itself on this host, which is how the app reaches a phone or an emulator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidBuildResult {
+    pub application_id: String,
+    pub version_name: String,
+    pub version_code: String,
+    pub toolchain: AndroidToolchainSummary,
+    /// The debug APK, retained on this host; `None` on records from before it was kept.
+    #[serde(default)]
+    pub apk: Option<AndroidArtifact>,
+    pub output_tail: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum AndroidReleasePhase {
+    Preparing,
+    /// Only when a build chooses an env set: the web assets are rebuilt with it first.
+    BuildingWebAssets,
+    Bundling,
+    Signing,
+    Verifying,
+    Transferring,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidReleaseProgress {
+    pub phase: AndroidReleasePhase,
+    #[ts(type = "number")]
+    pub completed_bytes: u64,
+    #[ts(type = "number")]
+    pub total_bytes: u64,
+    #[ts(type = "number")]
+    pub elapsed_seconds: u64,
+    pub detail: String,
+    pub log_line: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidArtifact {
+    pub path: String,
+    #[ts(type = "number")]
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+/// A signed release: the app bundle Google Play takes and the APK a phone installs, both
+/// signed with the kit's upload key and verified before they left the container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidReleaseResult {
+    pub application_id: String,
+    pub version_name: String,
+    pub version_code: String,
+    pub key_alias: String,
+    /// The signing certificate's SHA-256, as `apksigner` printed it: what Google Play shows as
+    /// the upload key certificate.
+    pub certificate_sha256: String,
+    pub aab: AndroidArtifact,
+    pub apk: AndroidArtifact,
+    pub output_tail: Vec<String>,
+}
+
+/// The upload key as a release needs it. The keystore is streamed into the container and the
+/// passwords with it as owner-only files; none of them is ever an argument or an environment
+/// variable, and all of them are removed once the release is signed.
+#[derive(Clone)]
+pub struct AndroidSigningMaterial {
+    pub keystore_path: PathBuf,
+    pub keystore_password: String,
+    pub key_alias: String,
+    pub key_password: String,
+}
+
+impl std::fmt::Debug for AndroidSigningMaterial {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AndroidSigningMaterial")
+            .field("keystore_path", &self.keystore_path)
+            .field("key_alias", &self.key_alias)
+            .field("keystore_password", &"<redacted>")
+            .field("key_password", &"<redacted>")
+            .finish()
+    }
+}
+
+/// What a freshly created keystore reports about itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidKeystoreSummary {
+    pub path: String,
+    pub key_alias: String,
+    pub certificate_sha256: String,
+}
+
+/// Where the toolchain lives under the container's home. Every recipe derives its paths from
+/// here so the debug build and the signed release agree.
+pub(crate) struct AndroidToolchain {
+    pub(crate) home: String,
+    pub(crate) tools: String,
+    pub(crate) node_root: String,
+    pub(crate) pnpm: String,
+    pub(crate) sdk: String,
+    pub(crate) build_tools: String,
+    /// The second JDK, for projects whose Gradle asks to compile with Java 21.
+    pub(crate) jdk_21: String,
+    pub(crate) workspace: String,
+    pub(crate) signing: String,
+    /// The `PATH` the recipes export: pinned tools first, then the image's JDK and Ubuntu.
+    pub(crate) path: String,
+}
+
+pub(crate) fn android_toolchain(home: &str) -> AndroidToolchain {
+    let tools = format!("{home}/.buildbridge/tools");
+    let node_root = format!("{tools}/node-v{NODE_VERSION}-linux-x64");
+    let sdk = format!("{home}/android-sdk");
+    let build_tools = format!("{sdk}/build-tools/{BUILD_TOOLS_VERSION}");
+    let path = format!(
+        "{node_root}/bin:{tools}/pnpm/node_modules/.bin:{sdk}/platform-tools:{sdk}/cmdline-tools/latest/bin:{build_tools}:{JAVA_HOME}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    );
+
+    AndroidToolchain {
+        home: home.to_string(),
+        pnpm: format!("{tools}/pnpm/node_modules/.bin/pnpm"),
+        jdk_21: format!("{tools}/jdk-{JDK_21_VERSION}"),
+        workspace: format!("{home}/BuildBridge/workspaces/active"),
+        signing: format!("{home}/.buildbridge/signing"),
+        tools,
+        node_root,
+        sdk,
+        build_tools,
+        path,
+    }
+}
+
+/// Installs whatever of the toolchain is missing — Node, pnpm, Google's command-line tools,
+/// the SDK licences, the platform tools and the pinned build tools — idempotently, with every
+/// download checked against its pinned SHA-256. Platforms and further build tools the project
+/// asks for are installed by its own Gradle plugin into the same SDK, which the accepted
+/// licences allow. The image ships no `unzip`; the JDK's own `jar` opens the zip.
+pub(crate) fn android_tools_preparation(toolchain: &AndroidToolchain) -> String {
+    let AndroidToolchain {
+        home,
+        tools,
+        node_root,
+        pnpm,
+        sdk,
+        build_tools,
+        jdk_21,
+        workspace,
+        ..
+    } = toolchain;
+    let node_name = format!("node-v{NODE_VERSION}-linux-x64");
+    let node_archive = format!("{tools}/{node_name}.tar.gz");
+    let cmdline_archive = format!("{tools}/commandlinetools-linux-{CMDLINE_TOOLS_VERSION}.zip");
+    let jdk_archive = format!("{tools}/OpenJDK21U-jdk_x64_linux_hotspot_{JDK_21_VERSION}.tar.gz");
+    format!(
+        r#"/bin/mkdir -p "{tools}" "{sdk}" "{home}/.gradle"
+if /bin/test ! -x "{jdk_21}/bin/javac"; then
+    /bin/rm -rf "{jdk_21}" "{jdk_archive}" "{tools}/jdk-21.incoming"
+    /usr/bin/curl --fail --location --show-error --silent "https://github.com/adoptium/temurin21-binaries/releases/download/{JDK_21_RELEASE}/OpenJDK21U-jdk_x64_linux_hotspot_{JDK_21_VERSION}.tar.gz" --output "{jdk_archive}"
+    /usr/bin/printf '%s  %s\n' "{JDK_21_LINUX_X64_SHA256}" "{jdk_archive}" | /usr/bin/sha256sum --check --status
+    /bin/mkdir -p "{tools}/jdk-21.incoming"
+    /usr/bin/tar -xzf "{jdk_archive}" -C "{tools}/jdk-21.incoming" --strip-components=1
+    /bin/mv "{tools}/jdk-21.incoming" "{jdk_21}"
+    /bin/rm -f "{jdk_archive}"
+fi
+# Gradle runs on the image's JDK 17 and may compile with either; the project decides which.
+/usr/bin/printf 'org.gradle.java.installations.auto-download=false\norg.gradle.java.installations.paths=%s,%s\n' "{JAVA_HOME}" "{jdk_21}" > "{home}/.gradle/gradle.properties"
+if /bin/test ! -x "{node_root}/bin/node"; then
+    /bin/rm -rf "{node_root}" "{node_archive}"
+    /usr/bin/curl --fail --location --show-error --silent "https://nodejs.org/dist/v{NODE_VERSION}/{node_name}.tar.gz" --output "{node_archive}"
+    /usr/bin/printf '%s  %s\n' "{NODE_LINUX_X64_SHA256}" "{node_archive}" | /usr/bin/sha256sum --check --status
+    /usr/bin/tar -xzf "{node_archive}" -C "{tools}"
+    /bin/rm -f "{node_archive}"
+fi
+if /bin/test ! -x "{pnpm}"; then
+    "{node_root}/bin/npm" install --prefix "{tools}/pnpm" "pnpm@{PNPM_VERSION}" --no-audit --no-fund
+fi
+if /bin/test ! -x "{sdk}/cmdline-tools/latest/bin/sdkmanager"; then
+    /bin/rm -rf "{sdk}/cmdline-tools" "{cmdline_archive}" "{tools}/cmdline-tools"
+    /usr/bin/curl --fail --location --show-error --silent "https://dl.google.com/android/repository/commandlinetools-linux-{CMDLINE_TOOLS_VERSION}_latest.zip" --output "{cmdline_archive}"
+    /usr/bin/printf '%s  %s\n' "{CMDLINE_TOOLS_LINUX_SHA256}" "{cmdline_archive}" | /usr/bin/sha256sum --check --status
+    /bin/mkdir -p "{tools}/cmdline-tools" "{sdk}/cmdline-tools"
+    (cd "{tools}/cmdline-tools" && "{JAVA_HOME}/bin/jar" xf "{cmdline_archive}")
+    /bin/mv "{tools}/cmdline-tools/cmdline-tools" "{sdk}/cmdline-tools/latest"
+    /bin/chmod 755 "{sdk}/cmdline-tools/latest/bin"/*
+    /bin/rm -rf "{cmdline_archive}" "{tools}/cmdline-tools"
+fi
+if /bin/test ! -f "{sdk}/licenses/android-sdk-license"; then
+    /usr/bin/yes | "{sdk}/cmdline-tools/latest/bin/sdkmanager" --sdk_root="{sdk}" --licenses > /dev/null
+fi
+if /bin/test ! -f "{build_tools}/apksigner" || /bin/test ! -f "{sdk}/platform-tools/adb"; then
+    "{sdk}/cmdline-tools/latest/bin/sdkmanager" --sdk_root="{sdk}" "platform-tools" "build-tools;{BUILD_TOOLS_VERSION}"
+fi
+/bin/test -f "{build_tools}/apksigner"
+/bin/test -f "{build_tools}/zipalign"
+/bin/test -f "{build_tools}/aapt2"
+# Gradle's caches and the env file live under the workspace's .buildbridge; a tool that
+# honours ignore files must not crawl them.
+/bin/mkdir -p "{workspace}/.buildbridge"
+/usr/bin/printf '*\n' > "{workspace}/.buildbridge/.gitignore""#
+    )
+}
+
+/// The environment every recipe exports before it touches the project. The Gradle daemon is
+/// off: a build is one JVM that exits with it, so a stopped container holds no memory and a
+/// cancelled build leaves nothing behind. Which JDK Gradle runs on is the project's committed
+/// wrapper's decision: Gradle 8.5 and newer run on Java 21, which Capacitor 8's own library
+/// compiles with, while the Gradle that Capacitor 5 and 6 pin refuses anything past 17.
+pub(crate) fn android_recipe_environment(toolchain: &AndroidToolchain) -> String {
+    let AndroidToolchain {
+        home,
+        sdk,
+        path,
+        jdk_21,
+        workspace,
+        ..
+    } = toolchain;
+    format!(
+        r#"export HOME="{home}"
+export PATH="{path}"
+export JAVA_HOME="{JAVA_HOME}"
+gradle_wrapper="{workspace}/android/gradle/wrapper/gradle-wrapper.properties"
+if /bin/test -f "$gradle_wrapper"; then
+    gradle_major=$(/usr/bin/sed -n 's/^distributionUrl=.*gradle-\([0-9]*\)\.\([0-9]*\).*/\1/p' "$gradle_wrapper" | /usr/bin/head -n 1)
+    gradle_minor=$(/usr/bin/sed -n 's/^distributionUrl=.*gradle-\([0-9]*\)\.\([0-9]*\).*/\2/p' "$gradle_wrapper" | /usr/bin/head -n 1)
+    if /bin/test "${{gradle_major:-0}}" -gt 8 || {{ /bin/test "${{gradle_major:-0}}" -eq 8 && /bin/test "${{gradle_minor:-0}}" -ge 5; }}; then
+        export JAVA_HOME="{jdk_21}"
+    fi
+fi
+export PATH="$JAVA_HOME/bin:$PATH"
+export ANDROID_HOME="{sdk}"
+export ANDROID_SDK_ROOT="{sdk}"
+export ANDROID_USER_HOME="{home}/.android"
+export GRADLE_USER_HOME="{home}/.gradle"
+export GRADLE_OPTS="-Dorg.gradle.daemon=false"
+export LANG="C.UTF-8"
+export CI=1
+export CYPRESS_INSTALL_BINARY=0"#
+    )
+}
+
+/// The container's fixed argv. Nothing is published and no device is passed: the container
+/// holds a toolchain, not a machine. Memory and cores are limits on the build rather than a
+/// virtual machine's hardware. `--init` gives `sleep` a parent that forwards the stop signal.
+pub(crate) fn create_args(
+    container_name: &str,
+    config: &MachineConfig,
+    home_dir: &Path,
+) -> Vec<String> {
+    vec![
+        "create".to_string(),
+        format!("--name={container_name}"),
+        "--label=dev.buildbridge.managed=true".to_string(),
+        "--label=dev.buildbridge.provider=android_toolchain".to_string(),
+        "--restart=no".to_string(),
+        format!("--stop-timeout={STOP_TIMEOUT_SECONDS}"),
+        "--init".to_string(),
+        format!("--memory={}g", config.memory_gib),
+        format!("--cpus={}", config.cpu_cores),
+        format!("--volume={}:{HOME_CONTAINER_DIR}:rw", home_dir.display()),
+        format!("--workdir={HOME_CONTAINER_DIR}"),
+        format!("--env=HOME={HOME_CONTAINER_DIR}"),
+        "--entrypoint=/bin/sleep".to_string(),
+        ANDROID_IMAGE.to_string(),
+        "infinity".to_string(),
+    ]
+}
+
+pub(crate) fn ensure_home_dir(home_dir: &Path) -> Result<(), ProviderError> {
+    validate_bind_path(home_dir, "home directory")?;
+    fs::create_dir_all(home_dir).map_err(|error| ProviderError::Identity(error.to_string()))?;
+    disk::restrict_directory(home_dir)
+}
+
+/// Creates the container when it is missing, then starts it. The first start pulls the JDK
+/// image; the toolchain itself is prepared by the first build, where its progress can be shown.
+pub(crate) fn launch<F>(
+    container_name: &str,
+    config: &MachineConfig,
+    home_dir: &Path,
+    mut on_progress: F,
+) -> Result<RuntimeStatus, ProviderError>
+where
+    F: FnMut(LaunchProgress),
+{
+    let started = Instant::now();
+    let mut report = |phase: LaunchPhase, detail: &str| {
+        on_progress(LaunchProgress {
+            phase,
+            elapsed_seconds: started.elapsed().as_secs(),
+            detail: detail.to_string(),
+        });
+    };
+    report(LaunchPhase::Preparing, "Checking the host and Docker");
+    let prerequisites = probe_host_for(MachineProvider::AndroidToolchain);
+    if !prerequisites.ready {
+        return Err(ProviderError::Prerequisites(prerequisites.issues.join(" ")));
+    }
+
+    let (state, _, _) = inspect_container(container_name)?;
+    if state == ContainerState::Missing {
+        report(
+            LaunchPhase::PullingImage,
+            "Pulling the JDK image; the first pull downloads a few hundred megabytes",
+        );
+        ensure_image(ANDROID_IMAGE)?;
+        report(
+            LaunchPhase::PreparingDisk,
+            "Preparing the toolchain's home directory on this host",
+        );
+        ensure_home_dir(home_dir)?;
+        report(
+            LaunchPhase::CreatingContainer,
+            "Creating the toolchain container",
+        );
+        run_docker(
+            "container creation",
+            &create_args(container_name, config, home_dir),
+        )?;
+    } else {
+        ensure_manual_restart_policy(container_name)?;
+    }
+
+    let (state, _, _) = inspect_container(container_name)?;
+    if state != ContainerState::Running {
+        report(LaunchPhase::Starting, "Starting the toolchain container");
+        run_docker("start", &["start".to_string(), container_name.to_string()])?;
+    }
+
+    report(LaunchPhase::Completed, "The Android toolchain is running");
+    status_for(container_name, MachineProvider::AndroidToolchain)
+}
+
+/// Removes the machine's home directory, emptying it through the image first when its
+/// root-owned files refuse this user.
+pub fn remove_android_home(home_dir: &Path) -> Result<(), ProviderError> {
+    match fs::remove_dir_all(home_dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            empty_directory_with_container(ANDROID_IMAGE, home_dir)?;
+            fs::remove_dir_all(home_dir).map_err(|error| ProviderError::Identity(error.to_string()))
+        }
+        Err(error) => Err(ProviderError::Identity(error.to_string())),
+    }
+}
+
+/// `docker exec` with a fixed script; values that are the user's travel as positional
+/// arguments after it, never inside it.
+fn container_exec_command(container_name: &str, script: &str, arguments: &[&str]) -> Command {
+    let mut command = Command::new("docker");
+    command.args([
+        "exec",
+        "--interactive",
+        container_name,
+        "/bin/sh",
+        "-c",
+        script,
+        "sh",
+    ]);
+    command.args(arguments);
+    command
+}
+
+pub(crate) fn run_container_command(
+    container_name: &str,
+    script: &str,
+) -> Result<String, ProviderError> {
+    let output = container_exec_command(container_name, script, &[])
+        .stdin(Stdio::null())
+        .tracked_output()
+        .map_err(|error| ProviderError::DockerUnavailable(error.to_string()))?;
+
+    if output.status.success() {
+        Ok(clean_output(&output.stdout))
+    } else {
+        let message = clean_output(&output.stderr);
+        Err(ProviderError::AndroidToolchain(if message.is_empty() {
+            clean_output(&output.stdout)
+        } else {
+            message
+        }))
+    }
+}
+
+/// Writes bytes into the container as an owner-only file, through the exec's stdin.
+pub(crate) fn stream_bytes_to_container(
+    container_name: &str,
+    contents: &[u8],
+    container_path: &str,
+    label: &str,
+) -> Result<(), ProviderError> {
+    let script = format!(
+        "set -eu; umask 077; /bin/mkdir -p \"$(/usr/bin/dirname {0})\"; /bin/cat > {0}",
+        shell_single_quote(container_path)
+    );
+    let mut child = container_exec_command(container_name, &script, &[])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .tracked_spawn()
+        .map_err(|error| {
+            ProviderError::AndroidToolchain(format!("could not start {label} transfer: {error}"))
+        })?;
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        ProviderError::AndroidToolchain(format!("could not open {label} transfer"))
+    })?;
+    stdin.write_all(contents).map_err(|error| {
+        ProviderError::AndroidToolchain(format!("{label} transfer was interrupted: {error}"))
+    })?;
+    drop(stdin);
+    let output = child.wait_with_output().map_err(|error| {
+        ProviderError::AndroidToolchain(format!("could not finish {label} transfer: {error}"))
+    })?;
+    if !output.status.success() {
+        return Err(ProviderError::AndroidToolchain(format!(
+            "the container rejected the {label}: {}",
+            clean_output(&output.stderr)
+        )));
+    }
+
+    Ok(())
+}
+
+/// Streams a host file into the container, reporting bytes as they go.
+fn stream_file_to_container<F>(
+    container_name: &str,
+    path: &Path,
+    total_bytes: u64,
+    container_path: &str,
+    mut on_bytes: F,
+) -> Result<(), ProviderError>
+where
+    F: FnMut(u64),
+{
+    let mut file = File::open(path).map_err(|error| {
+        ProviderError::AndroidToolchain(format!("could not open the source snapshot: {error}"))
+    })?;
+    let script = format!(
+        "set -eu; umask 077; /bin/mkdir -p \"$(/usr/bin/dirname {0})\"; /bin/cat > {0}",
+        shell_single_quote(container_path)
+    );
+    let mut child = container_exec_command(container_name, &script, &[])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .tracked_spawn()
+        .map_err(|error| {
+            ProviderError::AndroidToolchain(format!(
+                "could not start source synchronization: {error}"
+            ))
+        })?;
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        ProviderError::AndroidToolchain("could not open source synchronization".to_string())
+    })?;
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut completed_bytes = 0;
+    let mut last_progress = Instant::now() - Duration::from_secs(1);
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            ProviderError::AndroidToolchain(format!("could not read the source snapshot: {error}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+        stdin.write_all(&buffer[..read]).map_err(|error| {
+            ProviderError::AndroidToolchain(format!(
+                "source synchronization was interrupted: {error}"
+            ))
+        })?;
+        completed_bytes += read as u64;
+        if last_progress.elapsed() >= Duration::from_millis(250) || completed_bytes == total_bytes {
+            on_bytes(completed_bytes);
+            last_progress = Instant::now();
+        }
+    }
+    drop(stdin);
+    let output = child.wait_with_output().map_err(|error| {
+        ProviderError::AndroidToolchain(format!("could not finish source synchronization: {error}"))
+    })?;
+    if !output.status.success() {
+        return Err(ProviderError::AndroidToolchain(format!(
+            "the container rejected the source snapshot: {}",
+            clean_output(&output.stderr)
+        )));
+    }
+
+    Ok(())
+}
+
+/// Streams a file out of the container into a new owner-only host file, refusing more bytes
+/// than the container declared for it.
+fn stream_container_file<F>(
+    container_name: &str,
+    container_path: &str,
+    local_path: &Path,
+    expected_bytes: u64,
+    mut on_bytes: F,
+) -> Result<(), ProviderError>
+where
+    F: FnMut(u64),
+{
+    let script = format!("set -eu; /bin/cat {}", shell_single_quote(container_path));
+    let mut child = container_exec_command(container_name, &script, &[])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .tracked_spawn()
+        .map_err(|error| {
+            ProviderError::AndroidToolchain(format!("could not start artifact transfer: {error}"))
+        })?;
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        ProviderError::AndroidToolchain("could not read the artifact transfer".to_string())
+    })?;
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(local_path)
+        .map_err(|error| {
+            ProviderError::AndroidToolchain(format!("could not create the local artifact: {error}"))
+        })?;
+    set_artifact_permissions(local_path)?;
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut copied = 0_u64;
+    let mut last_progress = Instant::now() - Duration::from_secs(1);
+    loop {
+        let count = stdout.read(&mut buffer).map_err(|error| {
+            ProviderError::AndroidToolchain(format!("could not read the artifact: {error}"))
+        })?;
+        if count == 0 {
+            break;
+        }
+        copied = copied.checked_add(count as u64).ok_or_else(|| {
+            ProviderError::AndroidToolchain("the artifact size overflowed".to_string())
+        })?;
+        if copied > expected_bytes {
+            return Err(ProviderError::AndroidToolchain(
+                "the container sent more artifact data than declared".to_string(),
+            ));
+        }
+        file.write_all(&buffer[..count]).map_err(|error| {
+            ProviderError::AndroidToolchain(format!("could not retain the artifact: {error}"))
+        })?;
+        if last_progress.elapsed() >= Duration::from_millis(200) || copied == expected_bytes {
+            on_bytes(copied);
+            last_progress = Instant::now();
+        }
+    }
+    file.sync_all().map_err(|error| {
+        ProviderError::AndroidToolchain(format!("could not flush the artifact: {error}"))
+    })?;
+    drop(file);
+    let output = child.wait_with_output().map_err(|error| {
+        ProviderError::AndroidToolchain(format!("could not finish artifact transfer: {error}"))
+    })?;
+    if !output.status.success() {
+        return Err(ProviderError::AndroidToolchain(format!(
+            "the artifact transfer failed: {}",
+            clean_output(&output.stderr)
+        )));
+    }
+    if copied != expected_bytes {
+        return Err(ProviderError::AndroidToolchain(format!(
+            "the artifact transfer was incomplete ({copied} of {expected_bytes} bytes)"
+        )));
+    }
+
+    Ok(())
+}
+
+/// The project shape the container can build: a Capacitor project with its Android platform
+/// added, whose Gradle wrapper is committed.
+pub(crate) fn validate_android_project(workspace_path: &Path) -> Result<PathBuf, ProviderError> {
+    let workspace_path = fs::canonicalize(workspace_path).map_err(|error| {
+        ProviderError::AndroidToolchain(format!("the approved project is unavailable: {error}"))
+    })?;
+    let has_settings = workspace_path.join("android/settings.gradle").is_file()
+        || workspace_path.join("android/settings.gradle.kts").is_file();
+    let has_app = workspace_path.join("android/app/build.gradle").is_file()
+        || workspace_path
+            .join("android/app/build.gradle.kts")
+            .is_file();
+    if !workspace_path.is_dir()
+        || !workspace_path.join("package.json").is_file()
+        || !workspace_path.join("android/gradlew").is_file()
+        || !has_settings
+        || !has_app
+    {
+        return Err(ProviderError::AndroidToolchain(
+            "the approved project must contain package.json and an android directory with its Gradle wrapper, settings and app module"
+                .to_string(),
+        ));
+    }
+
+    Ok(workspace_path)
+}
+
+pub(crate) fn android_progress(
+    phase: AndroidBuildPhase,
+    completed_bytes: u64,
+    total_bytes: u64,
+    started_at: Instant,
+    detail: &str,
+    log_line: Option<String>,
+) -> AndroidBuildProgress {
+    AndroidBuildProgress {
+        phase,
+        completed_bytes,
+        total_bytes,
+        elapsed_seconds: started_at.elapsed().as_secs(),
+        detail: detail.to_string(),
+        log_line,
+    }
+}
+
+pub(crate) fn release_progress(
+    phase: AndroidReleasePhase,
+    completed_bytes: u64,
+    total_bytes: u64,
+    started_at: Instant,
+    detail: &str,
+    log_line: Option<String>,
+) -> AndroidReleaseProgress {
+    AndroidReleaseProgress {
+        phase,
+        completed_bytes,
+        total_bytes,
+        elapsed_seconds: started_at.elapsed().as_secs(),
+        detail: detail.to_string(),
+        log_line,
+    }
+}
+
+pub(crate) fn android_build_phase(value: &str) -> Option<AndroidBuildPhase> {
+    match value {
+        "preparing_tools" => Some(AndroidBuildPhase::PreparingTools),
+        "installing_dependencies" => Some(AndroidBuildPhase::InstallingDependencies),
+        "building_web_assets" => Some(AndroidBuildPhase::BuildingWebAssets),
+        "syncing_android" => Some(AndroidBuildPhase::SyncingAndroid),
+        "building" => Some(AndroidBuildPhase::Building),
+        "inspecting" => Some(AndroidBuildPhase::Inspecting),
+        "completed" => Some(AndroidBuildPhase::Completed),
+        _ => None,
+    }
+}
+
+pub(crate) fn android_build_phase_detail(phase: AndroidBuildPhase) -> &'static str {
+    match phase {
+        AndroidBuildPhase::Snapshotting => "Creating the source snapshot",
+        AndroidBuildPhase::Transferring => "Synchronizing source",
+        AndroidBuildPhase::Extracting => "Preparing the container workspace",
+        AndroidBuildPhase::PreparingTools => "Preparing Node, pnpm, and the Android SDK",
+        AndroidBuildPhase::InstallingDependencies => "Installing locked project dependencies",
+        AndroidBuildPhase::BuildingWebAssets => "Building web assets",
+        AndroidBuildPhase::SyncingAndroid => "Synchronizing the Capacitor Android project",
+        AndroidBuildPhase::Building => "Compiling the debug APK with Gradle",
+        AndroidBuildPhase::Inspecting => "Reading the built app back",
+        AndroidBuildPhase::Completed => "Debug build complete",
+    }
+}
+
+pub(crate) fn android_release_phase(value: &str) -> Option<AndroidReleasePhase> {
+    match value {
+        "preparing" => Some(AndroidReleasePhase::Preparing),
+        "building_web_assets" => Some(AndroidReleasePhase::BuildingWebAssets),
+        "bundling" => Some(AndroidReleasePhase::Bundling),
+        "signing" => Some(AndroidReleasePhase::Signing),
+        "verifying" => Some(AndroidReleasePhase::Verifying),
+        "completed" => Some(AndroidReleasePhase::Completed),
+        _ => None,
+    }
+}
+
+pub(crate) fn android_release_phase_detail(phase: AndroidReleasePhase) -> &'static str {
+    match phase {
+        AndroidReleasePhase::Preparing => "Checking the toolchain and the upload key",
+        AndroidReleasePhase::BuildingWebAssets => {
+            "Applying the chosen environment and rebuilding the web assets"
+        }
+        AndroidReleasePhase::Bundling => "Building the release bundle and APK with Gradle",
+        AndroidReleasePhase::Signing => "Signing with the upload key",
+        AndroidReleasePhase::Verifying => "Verifying the signatures",
+        AndroidReleasePhase::Transferring => "Transferring artifacts",
+        AndroidReleasePhase::Completed => "Signed release complete",
+    }
+}
+
+/// Gradle and the tools name their failures in a handful of shapes.
+pub(crate) fn android_build_log_is_diagnostic(line: &str) -> bool {
+    let normalized = line.to_ascii_lowercase();
+
+    normalized.starts_with("error:")
+        || normalized.starts_with("e: ")
+        || normalized.contains(": error:")
+        || normalized.contains("execution failed for task")
+        || normalized.starts_with("* what went wrong")
+        || normalized.starts_with("> ")
+            && (normalized.contains("failed") || normalized.contains("error"))
+        || normalized.starts_with("failure:")
+        || normalized.contains("build failed")
+        || normalized.contains("err_pnpm")
+        || normalized.contains("exception:")
+}
+
+/// Synchronizes the approved project into the container: the same bounded, secret-filtered
+/// snapshot the macOS guest gets, streamed through the exec and extracted atomically.
+pub fn sync_android_workspace<F>(
+    container_name: &str,
+    workspace_path: &Path,
+    env: Option<&GuestEnvFiles>,
+    mut on_progress: F,
+) -> Result<WorkspaceSyncResult, ProviderError>
+where
+    F: FnMut(AndroidBuildProgress),
+{
+    let workspace_path = validate_android_project(workspace_path)?;
+    let started_at = Instant::now();
+    on_progress(android_progress(
+        AndroidBuildPhase::Snapshotting,
+        0,
+        0,
+        started_at,
+        "Inspecting the approved project and excluding local dependencies and secrets.",
+        None,
+    ));
+    let (source_file_count, source_bytes) = inspect_snapshot_tree(&workspace_path)?;
+    let temporary_archive = TemporaryArchive::new();
+    create_workspace_archive(&workspace_path, &temporary_archive.0)?;
+    let archive_bytes = fs::metadata(&temporary_archive.0)
+        .map_err(|error| {
+            ProviderError::AndroidToolchain(format!(
+                "could not inspect the source snapshot: {error}"
+            ))
+        })?
+        .len();
+    let snapshot_sha256 = snapshot_sha256(&temporary_archive.0)?;
+
+    let root = format!("{HOME_CONTAINER_DIR}/BuildBridge/workspaces");
+    let workspace = format!("{root}/active");
+    let staging = format!("{root}/active.incoming");
+    let archive = format!("{root}/active.tar.gz");
+    let env_file = format!("{root}/active.env");
+    let env_shell = format!("{root}/active.env.sh");
+    let prepare = format!(
+        "set -eu; /bin/mkdir -p '{root}'; /bin/rm -rf '{staging}'; /bin/rm -f '{archive}' '{env_file}' '{env_shell}'"
+    );
+    run_container_command(container_name, &prepare)?;
+    stream_file_to_container(
+        container_name,
+        &temporary_archive.0,
+        archive_bytes,
+        &archive,
+        |completed_bytes| {
+            on_progress(android_progress(
+                AndroidBuildPhase::Transferring,
+                completed_bytes,
+                archive_bytes,
+                started_at,
+                "Copying the secret-filtered snapshot into the container.",
+                None,
+            ));
+        },
+    )?;
+    if let Some(env) = env {
+        stream_bytes_to_container(container_name, env.dotenv.as_bytes(), &env_file, "env file")?;
+        stream_bytes_to_container(
+            container_name,
+            env.shell.as_bytes(),
+            &env_shell,
+            "env script",
+        )?;
+    }
+
+    on_progress(android_progress(
+        AndroidBuildPhase::Extracting,
+        archive_bytes,
+        archive_bytes,
+        started_at,
+        "Extracting the bounded snapshot into the container workspace.",
+        None,
+    ));
+    let extract = format!(
+        "set -eu; /bin/mkdir -p '{staging}'; /usr/bin/tar -xzf '{archive}' -C '{staging}'; /bin/test -f '{staging}/package.json'; /bin/test -f '{staging}/android/gradlew'; /bin/chmod 755 '{staging}/android/gradlew'; /bin/rm -rf '{workspace}.previous'; if /bin/test -d '{workspace}'; then /bin/mv '{workspace}' '{workspace}.previous'; fi; /bin/mv '{staging}' '{workspace}'; if /bin/test -f '{env_file}'; then /bin/mv '{env_file}' '{workspace}/.env.production.local'; /bin/chmod 600 '{workspace}/.env.production.local'; fi; if /bin/test -f '{env_shell}'; then /bin/mkdir -p '{workspace}/.buildbridge'; /bin/mv '{env_shell}' '{workspace}/.buildbridge/env.sh'; /bin/chmod 600 '{workspace}/.buildbridge/env.sh'; fi; /bin/rm -f '{archive}'; /bin/rm -rf '{workspace}.previous'"
+    );
+    run_container_command(container_name, &extract)?;
+
+    Ok(WorkspaceSyncResult {
+        guest_path: workspace,
+        snapshot_sha256,
+        source_file_count,
+        source_bytes,
+        archive_bytes,
+    })
+}
+
+/// A tab-separated marker line's fields after its name.
+fn marker_fields<'a>(line: &'a str, marker: &str) -> Option<Vec<&'a str>> {
+    let rest = line.strip_prefix(marker)?;
+    let rest = rest.strip_prefix('\t')?;
+    Some(rest.split('\t').collect())
+}
+
+pub(crate) fn valid_application_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_'))
+}
+
+pub(crate) fn valid_version_value(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 && !value.chars().any(char::is_control)
+}
+
+/// Runs the recipe body as a detachable job and streams its output back, routing the marker
+/// lines to `on_marker` and everything else to the tail and the log.
+fn run_container_job<M>(
+    container_name: &str,
+    job_name: &str,
+    toolchain: &AndroidToolchain,
+    body: &str,
+    mut on_line: M,
+) -> Result<(Vec<String>, Vec<String>, bool), ProviderError>
+where
+    M: FnMut(&str, &mut Vec<String>),
+{
+    let script = crate::device_run::guest_job_script(job_name, &toolchain.tools, "''", body);
+    let mut child = container_exec_command(container_name, &script, &[])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .tracked_spawn()
+        .map_err(|error| {
+            ProviderError::AndroidToolchain(format!("could not start the Android build: {error}"))
+        })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        ProviderError::AndroidToolchain("could not capture the Android build output".to_string())
+    })?;
+    let mut output_tail = Vec::new();
+    let mut diagnostic_lines = Vec::new();
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|error| {
+            ProviderError::AndroidToolchain(format!(
+                "could not read the Android build output: {error}"
+            ))
+        })?;
+        if line.starts_with("__BUILDBRIDGE_") {
+            on_line(&line, &mut output_tail);
+            continue;
+        }
+        let line = sanitize_build_log_line(&line);
+        if line.is_empty() {
+            continue;
+        }
+        if android_build_log_is_diagnostic(&line) {
+            diagnostic_lines.push(line.clone());
+            if diagnostic_lines.len() > ANDROID_BUILD_DIAGNOSTIC_LINES {
+                diagnostic_lines.remove(0);
+            }
+        }
+        output_tail.push(line.clone());
+        if output_tail.len() > ANDROID_BUILD_OUTPUT_TAIL_LINES {
+            output_tail.remove(0);
+        }
+        on_line(&line, &mut output_tail);
+    }
+    let status = child.wait().map_err(|error| {
+        ProviderError::AndroidToolchain(format!("could not finish the Android build: {error}"))
+    })?;
+    // A killed exec client leaves the job running for a reattach; a finished one is cleaned up.
+    if status.code().is_some() {
+        let cleanup = format!("/bin/rm -rf '{}/jobs/{job_name}'", toolchain.tools);
+        let _ = run_container_command(container_name, &cleanup);
+    }
+
+    Ok((output_tail, diagnostic_lines, status.success()))
+}
+
+/// The debug build: prepares the toolchain, installs the locked dependencies, builds the web
+/// assets, synchronizes Capacitor's Android project and compiles the debug APK, reads the app
+/// back from it, and brings the APK to `output_directory` with its size and checksum agreed.
+pub fn run_android_debug_build<F>(
+    container_name: &str,
+    output_directory: &Path,
+    mut on_progress: F,
+) -> Result<AndroidBuildResult, ProviderError>
+where
+    F: FnMut(AndroidBuildProgress),
+{
+    validate_archive_output_directory(output_directory)?;
+    let apk_path = output_directory.join(DEBUG_APK_NAME);
+    let apk_part = output_directory.join(format!("{DEBUG_APK_NAME}.part"));
+    for path in [&apk_path, &apk_part] {
+        if path.exists() {
+            return Err(ProviderError::AndroidToolchain(format!(
+                "{} already exists in the artifact directory",
+                path.display()
+            )));
+        }
+    }
+    let started_at = Instant::now();
+    let toolchain = android_toolchain(HOME_CONTAINER_DIR);
+    let prepare_tools = android_tools_preparation(&toolchain);
+    let environment = android_recipe_environment(&toolchain);
+    let AndroidToolchain {
+        pnpm,
+        build_tools,
+        workspace,
+        ..
+    } = &toolchain;
+    let body = format!(
+        r#"phase() {{ /usr/bin/printf '__BUILDBRIDGE_PHASE__:%s\n' "$1"; }}
+/bin/test -f "{workspace}/package.json"
+/bin/test -f "{workspace}/android/gradlew"
+{environment}
+if /bin/test -f "{workspace}/.buildbridge/env.sh"; then
+    . "{workspace}/.buildbridge/env.sh"
+fi
+
+phase preparing_tools
+{prepare_tools}
+
+phase installing_dependencies
+cd "{workspace}"
+"{pnpm}" install --frozen-lockfile --prefer-offline
+
+phase building_web_assets
+"{workspace}/node_modules/.bin/vp" build
+
+phase syncing_android
+"{workspace}/node_modules/.bin/cap" sync android
+
+phase building
+cd "{workspace}/android"
+./gradlew --no-daemon --console=plain assembleDebug
+
+phase inspecting
+apk="{workspace}/android/app/build/outputs/apk/debug/app-debug.apk"
+/bin/test -f "$apk"
+badging=$("{build_tools}/aapt2" dump badging "$apk" | /usr/bin/head -n 1)
+package=$(/usr/bin/printf '%s\n' "$badging" | /usr/bin/sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+version_code=$(/usr/bin/printf '%s\n' "$badging" | /usr/bin/sed -n "s/.* versionCode='\([^']*\)'.*/\1/p")
+version_name=$(/usr/bin/printf '%s\n' "$badging" | /usr/bin/sed -n "s/.* versionName='\([^']*\)'.*/\1/p")
+jdk=$("$JAVA_HOME/bin/java" -version 2>&1 | /usr/bin/head -n 1)
+apk_bytes=$(/usr/bin/stat -c %s "$apk")
+apk_sha256=$(/usr/bin/sha256sum "$apk" | /usr/bin/cut -d ' ' -f 1)
+/usr/bin/printf '__BUILDBRIDGE_APP__\t%s\t%s\t%s\n' "$package" "$version_name" "$version_code"
+/usr/bin/printf '__BUILDBRIDGE_TOOLCHAIN__\t%s\t%s\n' "$jdk" "{BUILD_TOOLS_VERSION}"
+/usr/bin/printf '__BUILDBRIDGE_APK__\t%s\t%s\n' "$apk_bytes" "$apk_sha256""#
+    );
+    // The recipe ends in the inspecting phase on purpose: the transfer that follows is this
+    // host's, and completion is reported once the APK is here.
+    let container_apk = format!("{workspace}/android/app/build/outputs/apk/debug/app-debug.apk");
+
+    let mut phase = AndroidBuildPhase::PreparingTools;
+    let mut app: Option<(String, String, String)> = None;
+    let mut apk: Option<(u64, String)> = None;
+    let mut jdk_version: Option<String> = None;
+    on_progress(android_progress(
+        phase,
+        0,
+        0,
+        started_at,
+        android_build_phase_detail(phase),
+        None,
+    ));
+    let (output_tail, diagnostic_lines, succeeded) = run_container_job(
+        container_name,
+        "android-debug-build",
+        &toolchain,
+        &body,
+        |line, tail| {
+            if let Some(value) = line.strip_prefix("__BUILDBRIDGE_PHASE__:") {
+                if let Some(next) = android_build_phase(value) {
+                    phase = next;
+                    on_progress(android_progress(
+                        phase,
+                        0,
+                        0,
+                        started_at,
+                        android_build_phase_detail(phase),
+                        None,
+                    ));
+                }
+                return;
+            }
+            if line == "__BUILDBRIDGE_REATTACHED__:yes" {
+                let message =
+                    "Reattached to the build already running in the container.".to_string();
+                tail.push(message.clone());
+                on_progress(android_progress(
+                    phase,
+                    0,
+                    0,
+                    started_at,
+                    "Reconnecting to the active build",
+                    Some(message),
+                ));
+                return;
+            }
+            if let Some(fields) = marker_fields(line, "__BUILDBRIDGE_APP__")
+                && fields.len() == 3
+            {
+                app = Some((
+                    fields[0].to_string(),
+                    fields[1].to_string(),
+                    fields[2].to_string(),
+                ));
+                return;
+            }
+            if let Some(fields) = marker_fields(line, "__BUILDBRIDGE_TOOLCHAIN__")
+                && fields.len() == 2
+            {
+                jdk_version = Some(fields[0].to_string());
+                return;
+            }
+            if let Some(fields) = marker_fields(line, "__BUILDBRIDGE_APK__")
+                && fields.len() == 2
+            {
+                apk = fields[0]
+                    .parse()
+                    .ok()
+                    .map(|bytes| (bytes, fields[1].to_string()));
+                return;
+            }
+            if !line.starts_with("__BUILDBRIDGE_") {
+                on_progress(android_progress(
+                    phase,
+                    0,
+                    0,
+                    started_at,
+                    android_build_phase_detail(phase),
+                    Some(line.to_string()),
+                ));
+            }
+        },
+    )?;
+    if !succeeded {
+        let context = build_failure_context(&diagnostic_lines, &output_tail);
+        return Err(ProviderError::AndroidToolchain(if context.is_empty() {
+            format!(
+                "the Android debug build failed during {}",
+                android_build_phase_detail(phase).to_ascii_lowercase()
+            )
+        } else {
+            format!(
+                "the Android debug build failed during {}:\n{context}",
+                android_build_phase_detail(phase).to_ascii_lowercase()
+            )
+        }));
+    }
+    let (application_id, version_name, version_code) = app.ok_or_else(|| {
+        ProviderError::AndroidToolchain("the container did not report the built app".to_string())
+    })?;
+    if !valid_application_id(&application_id)
+        || !valid_version_value(&version_name)
+        || !valid_version_value(&version_code)
+    {
+        return Err(ProviderError::AndroidToolchain(
+            "the container reported an app identity in an unexpected shape".to_string(),
+        ));
+    }
+    let (apk_bytes, apk_sha256) = apk.ok_or_else(|| {
+        ProviderError::AndroidToolchain("the container did not report the debug APK".to_string())
+    })?;
+    if !valid_sha256(&apk_sha256) || apk_bytes == 0 || apk_bytes > ANDROID_RELEASE_MAX_BYTES {
+        return Err(ProviderError::AndroidToolchain(
+            "the container reported the debug APK in an unexpected shape".to_string(),
+        ));
+    }
+    let transferred = (|| {
+        on_progress(android_progress(
+            AndroidBuildPhase::Transferring,
+            0,
+            apk_bytes,
+            started_at,
+            "Copying the debug APK to this host.",
+            None,
+        ));
+        stream_container_file(
+            container_name,
+            &container_apk,
+            &apk_part,
+            apk_bytes,
+            |copied| {
+                on_progress(android_progress(
+                    AndroidBuildPhase::Transferring,
+                    copied,
+                    apk_bytes,
+                    started_at,
+                    "Copying the debug APK to this host.",
+                    None,
+                ));
+            },
+        )?;
+        verify_local_artifact(&apk_part, apk_bytes, &apk_sha256)?;
+        fs::rename(&apk_part, &apk_path).map_err(|error| {
+            ProviderError::AndroidToolchain(format!("could not place the debug APK: {error}"))
+        })?;
+        set_artifact_permissions(&apk_path)
+    })();
+    if let Err(error) = transferred {
+        let _ = fs::remove_file(&apk_part);
+        let _ = fs::remove_file(&apk_path);
+        return Err(error);
+    }
+    on_progress(android_progress(
+        AndroidBuildPhase::Completed,
+        apk_bytes,
+        apk_bytes,
+        started_at,
+        android_build_phase_detail(AndroidBuildPhase::Completed),
+        None,
+    ));
+
+    Ok(AndroidBuildResult {
+        application_id,
+        version_name,
+        version_code,
+        toolchain: AndroidToolchainSummary {
+            jdk_version: jdk_version.unwrap_or_else(|| "unknown".to_string()),
+            build_tools_version: BUILD_TOOLS_VERSION.to_string(),
+        },
+        apk: Some(AndroidArtifact {
+            path: apk_path.to_string_lossy().to_string(),
+            bytes: apk_bytes,
+            sha256: apk_sha256.to_ascii_lowercase(),
+        }),
+        output_tail,
+    })
+}
+
+pub(crate) fn valid_key_alias(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+}
+
+/// A keystore password as `keytool` accepts one and a file can carry it: six characters or
+/// more, one line.
+pub(crate) fn valid_keystore_password(value: &str) -> bool {
+    value.chars().count() >= 6 && value.len() <= 512 && !value.chars().any(char::is_control)
+}
+
+/// The name that goes into the certificate's subject: letters, digits and a few separators,
+/// none of the characters a distinguished name gives meaning to.
+pub(crate) fn valid_certificate_name(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 64
+        && trimmed.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, ' ' | '.' | '_' | '-')
+        })
+}
+
+/// The signed release: builds the release bundle and APK, signs both with the upload key,
+/// verifies the signatures, and brings the two files to `output_directory` with their sizes
+/// and checksums agreed on both sides.
+pub fn run_signed_android_release<F>(
+    container_name: &str,
+    signing: &AndroidSigningMaterial,
+    env: Option<&GuestEnvFiles>,
+    output_directory: &Path,
+    mut on_progress: F,
+) -> Result<AndroidReleaseResult, ProviderError>
+where
+    F: FnMut(AndroidReleaseProgress),
+{
+    if !valid_key_alias(&signing.key_alias) {
+        return Err(ProviderError::AndroidToolchain(
+            "the key alias may only contain letters, digits, dots, underscores and dashes"
+                .to_string(),
+        ));
+    }
+    if !valid_keystore_password(&signing.keystore_password)
+        || !valid_keystore_password(&signing.key_password)
+    {
+        return Err(ProviderError::AndroidToolchain(
+            "the keystore and key passwords must be one line of six to 512 characters".to_string(),
+        ));
+    }
+    let keystore = fs::read(&signing.keystore_path).map_err(|error| {
+        ProviderError::AndroidToolchain(format!("could not read the keystore: {error}"))
+    })?;
+    if keystore.is_empty() || keystore.len() > 1024 * 1024 {
+        return Err(ProviderError::AndroidToolchain(
+            "the keystore file is empty or larger than a keystore can be".to_string(),
+        ));
+    }
+    validate_archive_output_directory(output_directory)?;
+    let aab_path = output_directory.join(AAB_NAME);
+    let apk_path = output_directory.join(APK_NAME);
+    let aab_part = output_directory.join(format!("{AAB_NAME}.part"));
+    let apk_part = output_directory.join(format!("{APK_NAME}.part"));
+    for path in [&aab_path, &apk_path, &aab_part, &apk_part] {
+        if path.exists() {
+            return Err(ProviderError::AndroidToolchain(format!(
+                "{} already exists in the artifact directory",
+                path.display()
+            )));
+        }
+    }
+
+    let started_at = Instant::now();
+    let toolchain = android_toolchain(HOME_CONTAINER_DIR);
+    let prepare_tools = android_tools_preparation(&toolchain);
+    let environment = android_recipe_environment(&toolchain);
+    let AndroidToolchain {
+        build_tools,
+        workspace,
+        signing: signing_dir,
+        home,
+        ..
+    } = &toolchain;
+    on_progress(release_progress(
+        AndroidReleasePhase::Preparing,
+        0,
+        0,
+        started_at,
+        android_release_phase_detail(AndroidReleasePhase::Preparing),
+        None,
+    ));
+
+    // The key and its passwords land as owner-only files and are removed by the recipe and
+    // again afterwards, whichever way the recipe ends.
+    let cleanup_signing = || {
+        let _ = run_container_command(
+            container_name,
+            &format!("/bin/rm -rf {}", shell_single_quote(signing_dir)),
+        );
+    };
+    let staged = (|| {
+        run_container_command(
+            container_name,
+            &format!(
+                "set -eu; /bin/rm -rf {0}; /bin/mkdir -p {0}; /bin/chmod 700 {0}",
+                shell_single_quote(signing_dir)
+            ),
+        )?;
+        stream_bytes_to_container(
+            container_name,
+            &keystore,
+            &format!("{signing_dir}/release.keystore"),
+            "keystore",
+        )?;
+        stream_bytes_to_container(
+            container_name,
+            signing.keystore_password.as_bytes(),
+            &format!("{signing_dir}/store.pass"),
+            "keystore password",
+        )?;
+        stream_bytes_to_container(
+            container_name,
+            signing.key_password.as_bytes(),
+            &format!("{signing_dir}/key.pass"),
+            "key password",
+        )?;
+        if let Some(env) = env {
+            stream_bytes_to_container(
+                container_name,
+                env.dotenv.as_bytes(),
+                &format!("{workspace}/.env.production.local"),
+                "env file",
+            )?;
+            stream_bytes_to_container(
+                container_name,
+                env.shell.as_bytes(),
+                &format!("{workspace}/.buildbridge/env.sh"),
+                "env script",
+            )?;
+        }
+        Ok::<_, ProviderError>(())
+    })();
+    if let Err(error) = staged {
+        cleanup_signing();
+        return Err(error);
+    }
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let staging = format!("{home}/BuildBridge/artifacts/release-{nonce}");
+    let rebuild_web_assets = if env.is_some() {
+        format!(
+            r#"phase building_web_assets
+cd "{workspace}"
+. "{workspace}/.buildbridge/env.sh"
+"{workspace}/node_modules/.bin/vp" build
+"{workspace}/node_modules/.bin/cap" sync android
+"#
+        )
+    } else {
+        String::new()
+    };
+    let key_alias = shell_single_quote(&signing.key_alias);
+    let body = format!(
+        r#"phase() {{ /usr/bin/printf '__BUILDBRIDGE_PHASE__:%s\n' "$1"; }}
+phase preparing
+/bin/test -f "{workspace}/package.json"
+/bin/test -f "{workspace}/android/gradlew"
+{environment}
+if /bin/test -f "{workspace}/.buildbridge/env.sh"; then
+    . "{workspace}/.buildbridge/env.sh"
+fi
+{prepare_tools}
+keystore="{signing_dir}/release.keystore"
+store_pass="{signing_dir}/store.pass"
+key_pass="{signing_dir}/key.pass"
+/bin/test -f "$keystore"
+/bin/test -f "$store_pass"
+/bin/test -f "$key_pass"
+"{JAVA_HOME}/bin/keytool" -list -keystore "$keystore" -storepass:file "$store_pass" -alias {key_alias} > /dev/null
+{rebuild_web_assets}
+phase bundling
+cd "{workspace}/android"
+./gradlew --no-daemon --console=plain bundleRelease assembleRelease
+
+phase signing
+staging="{staging}"
+/bin/rm -rf "$staging"
+/bin/mkdir -p "$staging"
+aab_in="{workspace}/android/app/build/outputs/bundle/release/app-release.aab"
+/bin/test -f "$aab_in"
+apk_in="{workspace}/android/app/build/outputs/apk/release/app-release-unsigned.apk"
+if /bin/test ! -f "$apk_in"; then
+    apk_in="{workspace}/android/app/build/outputs/apk/release/app-release.apk"
+fi
+/bin/test -f "$apk_in"
+"{build_tools}/zipalign" -p -f 4 "$apk_in" "$staging/aligned.apk"
+"{build_tools}/apksigner" sign --ks "$keystore" --ks-pass "file:$store_pass" --ks-key-alias {key_alias} --key-pass "file:$key_pass" --out "$staging/{APK_NAME}" "$staging/aligned.apk"
+/bin/rm -f "$staging/aligned.apk"
+"{JAVA_HOME}/bin/jarsigner" -keystore "$keystore" -storepass:file "$store_pass" -keypass:file "$key_pass" -sigalg SHA256withRSA -digestalg SHA-256 -signedjar "$staging/{AAB_NAME}" "$aab_in" {key_alias} > /dev/null
+/bin/rm -rf "{signing_dir}"
+
+phase verifying
+"{build_tools}/apksigner" verify --print-certs "$staging/{APK_NAME}" > "$staging/verify.txt"
+certificate=$(/usr/bin/sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$staging/verify.txt" | /usr/bin/head -n 1)
+/bin/rm -f "$staging/verify.txt"
+/bin/test -n "$certificate"
+"{JAVA_HOME}/bin/jarsigner" -verify "$staging/{AAB_NAME}" | /usr/bin/grep -q 'jar verified'
+badging=$("{build_tools}/aapt2" dump badging "$staging/{APK_NAME}" | /usr/bin/head -n 1)
+package=$(/usr/bin/printf '%s\n' "$badging" | /usr/bin/sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+version_code=$(/usr/bin/printf '%s\n' "$badging" | /usr/bin/sed -n "s/.* versionCode='\([^']*\)'.*/\1/p")
+version_name=$(/usr/bin/printf '%s\n' "$badging" | /usr/bin/sed -n "s/.* versionName='\([^']*\)'.*/\1/p")
+apk_bytes=$(/usr/bin/stat -c %s "$staging/{APK_NAME}")
+apk_sha256=$(/usr/bin/sha256sum "$staging/{APK_NAME}" | /usr/bin/cut -d ' ' -f 1)
+aab_bytes=$(/usr/bin/stat -c %s "$staging/{AAB_NAME}")
+aab_sha256=$(/usr/bin/sha256sum "$staging/{AAB_NAME}" | /usr/bin/cut -d ' ' -f 1)
+/usr/bin/printf '__BUILDBRIDGE_APP__\t%s\t%s\t%s\t%s\n' "$package" "$version_name" "$version_code" "$certificate"
+/usr/bin/printf '__BUILDBRIDGE_APK__\t%s\t%s\n' "$apk_bytes" "$apk_sha256"
+/usr/bin/printf '__BUILDBRIDGE_AAB__\t%s\t%s\n' "$aab_bytes" "$aab_sha256""#
+    );
+    // The recipe ends in the verifying phase on purpose: the transfer that follows is this
+    // host's, and completion is reported once the artifacts are here.
+
+    let mut phase = AndroidReleasePhase::Preparing;
+    let mut app: Option<(String, String, String, String)> = None;
+    let mut apk: Option<(u64, String)> = None;
+    let mut aab: Option<(u64, String)> = None;
+    let job = run_container_job(
+        container_name,
+        "android-release",
+        &toolchain,
+        &body,
+        |line, tail| {
+            if let Some(value) = line.strip_prefix("__BUILDBRIDGE_PHASE__:") {
+                if let Some(next) = android_release_phase(value) {
+                    phase = next;
+                    on_progress(release_progress(
+                        phase,
+                        0,
+                        0,
+                        started_at,
+                        android_release_phase_detail(phase),
+                        None,
+                    ));
+                }
+                return;
+            }
+            if line == "__BUILDBRIDGE_REATTACHED__:yes" {
+                let message =
+                    "Reattached to the release already running in the container.".to_string();
+                tail.push(message.clone());
+                on_progress(release_progress(
+                    phase,
+                    0,
+                    0,
+                    started_at,
+                    "Reconnecting to the active release",
+                    Some(message),
+                ));
+                return;
+            }
+            if let Some(fields) = marker_fields(line, "__BUILDBRIDGE_APP__")
+                && fields.len() == 4
+            {
+                app = Some((
+                    fields[0].to_string(),
+                    fields[1].to_string(),
+                    fields[2].to_string(),
+                    fields[3].to_string(),
+                ));
+                return;
+            }
+            if let Some(fields) = marker_fields(line, "__BUILDBRIDGE_APK__")
+                && fields.len() == 2
+            {
+                apk = fields[0]
+                    .parse()
+                    .ok()
+                    .map(|bytes| (bytes, fields[1].to_string()));
+                return;
+            }
+            if let Some(fields) = marker_fields(line, "__BUILDBRIDGE_AAB__")
+                && fields.len() == 2
+            {
+                aab = fields[0]
+                    .parse()
+                    .ok()
+                    .map(|bytes| (bytes, fields[1].to_string()));
+                return;
+            }
+            if !line.starts_with("__BUILDBRIDGE_") {
+                on_progress(release_progress(
+                    phase,
+                    0,
+                    0,
+                    started_at,
+                    android_release_phase_detail(phase),
+                    Some(line.to_string()),
+                ));
+            }
+        },
+    );
+    cleanup_signing();
+    let cleanup_staging = || {
+        let _ = run_container_command(
+            container_name,
+            &format!("/bin/rm -rf {}", shell_single_quote(&staging)),
+        );
+    };
+    let (output_tail, diagnostic_lines, succeeded) = match job {
+        Ok(job) => job,
+        Err(error) => {
+            cleanup_staging();
+            return Err(error);
+        }
+    };
+    if !succeeded {
+        cleanup_staging();
+        let context = build_failure_context(&diagnostic_lines, &output_tail);
+        return Err(ProviderError::AndroidToolchain(if context.is_empty() {
+            format!(
+                "the signed Android release failed during {}",
+                android_release_phase_detail(phase).to_ascii_lowercase()
+            )
+        } else {
+            format!(
+                "the signed Android release failed during {}:\n{context}",
+                android_release_phase_detail(phase).to_ascii_lowercase()
+            )
+        }));
+    }
+
+    let transferred = (|| {
+        let (application_id, version_name, version_code, certificate_sha256) =
+            app.ok_or_else(|| {
+                ProviderError::AndroidToolchain(
+                    "the container did not report the signed app".to_string(),
+                )
+            })?;
+        let (apk_bytes, apk_sha256) = apk.ok_or_else(|| {
+            ProviderError::AndroidToolchain("the container did not report the APK".to_string())
+        })?;
+        let (aab_bytes, aab_sha256) = aab.ok_or_else(|| {
+            ProviderError::AndroidToolchain(
+                "the container did not report the app bundle".to_string(),
+            )
+        })?;
+        if !valid_application_id(&application_id)
+            || !valid_version_value(&version_name)
+            || !valid_version_value(&version_code)
+            || !valid_sha256(&apk_sha256)
+            || !valid_sha256(&aab_sha256)
+            || !certificate_sha256
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+            || certificate_sha256.len() != 64
+        {
+            return Err(ProviderError::AndroidToolchain(
+                "the container reported the release in an unexpected shape".to_string(),
+            ));
+        }
+        let total_bytes = apk_bytes.checked_add(aab_bytes).ok_or_else(|| {
+            ProviderError::AndroidToolchain("the artifact sizes overflowed".to_string())
+        })?;
+        if apk_bytes == 0 || aab_bytes == 0 || total_bytes > ANDROID_RELEASE_MAX_BYTES {
+            return Err(ProviderError::AndroidToolchain(
+                "the signed artifacts are empty or exceed the 4 GiB transfer limit".to_string(),
+            ));
+        }
+        on_progress(release_progress(
+            AndroidReleasePhase::Transferring,
+            0,
+            total_bytes,
+            started_at,
+            "Copying the signed app bundle to this host.",
+            None,
+        ));
+        stream_container_file(
+            container_name,
+            &format!("{staging}/{AAB_NAME}"),
+            &aab_part,
+            aab_bytes,
+            |copied| {
+                on_progress(release_progress(
+                    AndroidReleasePhase::Transferring,
+                    copied,
+                    total_bytes,
+                    started_at,
+                    "Copying the signed app bundle to this host.",
+                    None,
+                ));
+            },
+        )?;
+        verify_local_artifact(&aab_part, aab_bytes, &aab_sha256)?;
+        stream_container_file(
+            container_name,
+            &format!("{staging}/{APK_NAME}"),
+            &apk_part,
+            apk_bytes,
+            |copied| {
+                on_progress(release_progress(
+                    AndroidReleasePhase::Transferring,
+                    aab_bytes + copied,
+                    total_bytes,
+                    started_at,
+                    "Copying the signed APK to this host.",
+                    None,
+                ));
+            },
+        )?;
+        verify_local_artifact(&apk_part, apk_bytes, &apk_sha256)?;
+        fs::rename(&aab_part, &aab_path).map_err(|error| {
+            ProviderError::AndroidToolchain(format!("could not place the app bundle: {error}"))
+        })?;
+        fs::rename(&apk_part, &apk_path).map_err(|error| {
+            ProviderError::AndroidToolchain(format!("could not place the APK: {error}"))
+        })?;
+        set_artifact_permissions(&aab_path)?;
+        set_artifact_permissions(&apk_path)?;
+
+        Ok(AndroidReleaseResult {
+            application_id,
+            version_name,
+            version_code,
+            key_alias: signing.key_alias.clone(),
+            certificate_sha256: certificate_sha256.to_ascii_lowercase(),
+            aab: AndroidArtifact {
+                path: aab_path.to_string_lossy().to_string(),
+                bytes: aab_bytes,
+                sha256: aab_sha256.to_ascii_lowercase(),
+            },
+            apk: AndroidArtifact {
+                path: apk_path.to_string_lossy().to_string(),
+                bytes: apk_bytes,
+                sha256: apk_sha256.to_ascii_lowercase(),
+            },
+            output_tail,
+        })
+    })();
+    cleanup_staging();
+    match transferred {
+        Ok(result) => {
+            on_progress(release_progress(
+                AndroidReleasePhase::Completed,
+                result.aab.bytes + result.apk.bytes,
+                result.aab.bytes + result.apk.bytes,
+                started_at,
+                android_release_phase_detail(AndroidReleasePhase::Completed),
+                None,
+            ));
+            Ok(result)
+        }
+        Err(error) => {
+            for path in [&aab_path, &apk_path, &aab_part, &apk_part] {
+                let _ = fs::remove_file(path);
+            }
+            Err(error)
+        }
+    }
+}
+
+/// The script a throwaway container runs to create an upload key: the password arrives on
+/// stdin and never as an argument, the keystore leaves on stdout, and the certificate's
+/// SHA-256 on stderr behind a marker. The alias and the name are positional arguments.
+const KEYSTORE_CREATION_SCRIPT: &str = r#"set -eu
+umask 077
+/bin/mkdir -p /tmp/buildbridge-keystore
+/bin/cat > /tmp/buildbridge-keystore/pass
+/opt/java/openjdk/bin/keytool -genkeypair -keystore /tmp/buildbridge-keystore/upload.keystore -storetype PKCS12 -alias "$1" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=$2" -storepass:file /tmp/buildbridge-keystore/pass -keypass:file /tmp/buildbridge-keystore/pass > /dev/null 2>&1
+certificate=$(/opt/java/openjdk/bin/keytool -list -v -keystore /tmp/buildbridge-keystore/upload.keystore -storepass:file /tmp/buildbridge-keystore/pass -alias "$1" | /usr/bin/sed -n 's/^[[:space:]]*SHA256: //p' | /usr/bin/head -n 1)
+/usr/bin/printf '__BUILDBRIDGE_CERTIFICATE__\t%s\n' "$certificate" >&2
+/bin/cat /tmp/buildbridge-keystore/upload.keystore
+"#;
+
+/// Creates an upload key in a throwaway container of the toolchain image and writes the
+/// keystore owner-only to `output_path`. Nothing is created on this host but that file.
+pub fn create_android_keystore(
+    output_path: &Path,
+    password: &str,
+    key_alias: &str,
+    certificate_name: &str,
+) -> Result<AndroidKeystoreSummary, ProviderError> {
+    if !valid_key_alias(key_alias) {
+        return Err(ProviderError::AndroidToolchain(
+            "the key alias may only contain letters, digits, dots, underscores and dashes"
+                .to_string(),
+        ));
+    }
+    if !valid_keystore_password(password) {
+        return Err(ProviderError::AndroidToolchain(
+            "the keystore password must be one line of six to 512 characters".to_string(),
+        ));
+    }
+    if !valid_certificate_name(certificate_name) {
+        return Err(ProviderError::AndroidToolchain(
+            "the certificate name may only contain letters, digits, spaces, dots, underscores and dashes"
+                .to_string(),
+        ));
+    }
+    if output_path.exists() {
+        return Err(ProviderError::AndroidToolchain(format!(
+            "{} already exists",
+            output_path.display()
+        )));
+    }
+    ensure_image(ANDROID_IMAGE)?;
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--interactive",
+            "--entrypoint=/bin/sh",
+            ANDROID_IMAGE,
+            "-c",
+            KEYSTORE_CREATION_SCRIPT,
+            "sh",
+            key_alias,
+            certificate_name.trim(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .tracked_spawn()
+        .map_err(|error| ProviderError::DockerUnavailable(error.to_string()))?;
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        ProviderError::AndroidToolchain("could not hand the password to keytool".to_string())
+    })?;
+    stdin.write_all(password.as_bytes()).map_err(|error| {
+        ProviderError::AndroidToolchain(format!("could not hand the password to keytool: {error}"))
+    })?;
+    drop(stdin);
+    let output = child.wait_with_output().map_err(|error| {
+        ProviderError::AndroidToolchain(format!("keytool did not finish: {error}"))
+    })?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        let message = stderr
+            .lines()
+            .filter(|line| !line.starts_with("__BUILDBRIDGE_"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(ProviderError::AndroidToolchain(format!(
+            "keytool could not create the keystore: {}",
+            message.trim().chars().take(2_000).collect::<String>()
+        )));
+    }
+    let certificate_sha256 = stderr
+        .lines()
+        .find_map(|line| marker_fields(line, "__BUILDBRIDGE_CERTIFICATE__"))
+        .and_then(|fields| {
+            fields
+                .first()
+                .map(|value| value.replace(':', "").to_ascii_lowercase())
+        })
+        .filter(|value| valid_sha256(value))
+        .ok_or_else(|| {
+            ProviderError::AndroidToolchain(
+                "keytool did not report the certificate it created".to_string(),
+            )
+        })?;
+    if output.stdout.len() < 64 || output.stdout.len() > 1024 * 1024 {
+        return Err(ProviderError::AndroidToolchain(
+            "keytool returned a keystore of an unexpected size".to_string(),
+        ));
+    }
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            ProviderError::AndroidToolchain(format!(
+                "could not create the keystore directory: {error}"
+            ))
+        })?;
+    }
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(output_path)
+        .map_err(|error| {
+            ProviderError::AndroidToolchain(format!("could not write the keystore: {error}"))
+        })?;
+    set_artifact_permissions(output_path)?;
+    file.write_all(&output.stdout).map_err(|error| {
+        ProviderError::AndroidToolchain(format!("could not write the keystore: {error}"))
+    })?;
+    file.sync_all().map_err(|error| {
+        ProviderError::AndroidToolchain(format!("could not flush the keystore: {error}"))
+    })?;
+
+    Ok(AndroidKeystoreSummary {
+        path: output_path.to_string_lossy().to_string(),
+        key_alias: key_alias.to_string(),
+        certificate_sha256,
+    })
+}
+
+/// Stops any BuildBridge job still running in the container after its host-side operation was
+/// cancelled: the builds deliberately survive their exec so a desktop restart can reattach,
+/// and a Stop must reach past that.
+pub fn stop_android_jobs(container_name: &str) -> Result<(), ProviderError> {
+    let jobs = format!("{HOME_CONTAINER_DIR}/.buildbridge/tools/jobs");
+    let script = format!(
+        "for pid_file in {0}/*/pid; do if /bin/test -f \"$pid_file\"; then pid=$(/bin/cat \"$pid_file\"); pgid=$(/bin/ps -o pgid= -p \"$pid\" 2>/dev/null | /usr/bin/tr -d ' '); if /bin/test -n \"$pgid\"; then /bin/kill -TERM -- \"-$pgid\" 2>/dev/null || /bin/true; fi; /bin/kill -TERM \"$pid\" 2>/dev/null || /bin/true; fi; done; /bin/rm -rf {0}/*; /usr/bin/true",
+        shell_single_quote(&jobs)
+    );
+    run_container_command(container_name, &script).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile() -> MachineConfig {
+        MachineConfig {
+            provider: MachineProvider::AndroidToolchain,
+            memory_gib: 6,
+            cpu_cores: 3,
+            ..MachineConfig::default()
+        }
+    }
+
+    #[test]
+    fn the_container_is_a_resource_limited_sleep_with_its_home_bound_from_this_host() {
+        let args = create_args(
+            "buildbridge-android-x",
+            &profile(),
+            Path::new("/tmp/buildbridge/x/home"),
+        );
+
+        assert_eq!(args[0], "create");
+        assert!(args.contains(&"--init".to_string()));
+        assert!(args.contains(&"--memory=6g".to_string()));
+        assert!(args.contains(&"--cpus=3".to_string()));
+        assert!(args.contains(&"--volume=/tmp/buildbridge/x/home:/root:rw".to_string()));
+        assert!(args.contains(&"--entrypoint=/bin/sleep".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("infinity"));
+        assert_eq!(args[args.len() - 2], ANDROID_IMAGE);
+        assert!(!args.iter().any(|arg| arg.contains("--privileged")));
+        assert!(!args.iter().any(|arg| arg.starts_with("--publish")));
+        assert!(!args.iter().any(|arg| arg.starts_with("--device")));
+    }
+
+    #[test]
+    fn the_toolchain_lives_under_the_home_and_leads_the_path() {
+        let toolchain = android_toolchain("/root");
+        assert_eq!(toolchain.tools, "/root/.buildbridge/tools");
+        assert_eq!(toolchain.sdk, "/root/android-sdk");
+        assert_eq!(
+            toolchain.build_tools,
+            "/root/android-sdk/build-tools/35.0.0"
+        );
+        assert_eq!(toolchain.workspace, "/root/BuildBridge/workspaces/active");
+        assert!(toolchain.path.starts_with(&format!(
+            "/root/.buildbridge/tools/node-v{NODE_VERSION}-linux-x64/bin:"
+        )));
+        assert!(toolchain.path.contains("/opt/java/openjdk/bin"));
+    }
+
+    #[test]
+    fn every_download_in_the_preparation_is_checked_against_its_pin() {
+        let script = android_tools_preparation(&android_toolchain("/root"));
+        assert!(script.contains(NODE_LINUX_X64_SHA256));
+        assert!(script.contains(CMDLINE_TOOLS_LINUX_SHA256));
+        assert!(script.contains(JDK_21_LINUX_X64_SHA256));
+        assert!(script.contains("org.gradle.java.installations.paths=%s,%s"));
+        assert!(script.contains(&format!(
+            "commandlinetools-linux-{CMDLINE_TOOLS_VERSION}_latest.zip"
+        )));
+        assert!(script.contains("sha256sum --check --status"));
+        assert!(script.contains("--licenses"));
+        assert!(script.contains(&format!("build-tools;{BUILD_TOOLS_VERSION}")));
+        assert!(
+            !script.contains("unzip"),
+            "the image ships no unzip; jar opens the zip"
+        );
+    }
+
+    #[test]
+    fn the_recipe_environment_keeps_the_gradle_daemon_off_and_names_the_sdk() {
+        let environment = android_recipe_environment(&android_toolchain("/root"));
+        assert!(environment.contains("export ANDROID_HOME=\"/root/android-sdk\""));
+        assert!(environment.contains("export GRADLE_USER_HOME=\"/root/.gradle\""));
+        assert!(environment.contains("org.gradle.daemon=false"));
+        assert!(environment.contains("export JAVA_HOME=\"/opt/java/openjdk\""));
+        // The wrapper decides: 8.5 and newer run on the second JDK.
+        assert!(environment.contains("gradle-wrapper.properties"));
+        assert!(environment.contains("-ge 5"));
+        assert!(environment.contains(&format!(
+            "export JAVA_HOME=\"/root/.buildbridge/tools/jdk-{JDK_21_VERSION}\""
+        )));
+    }
+
+    #[test]
+    fn marker_lines_split_on_tabs_after_their_name() {
+        assert_eq!(
+            marker_fields(
+                "__BUILDBRIDGE_APP__\tcom.example\t1.2.0\t7",
+                "__BUILDBRIDGE_APP__"
+            ),
+            Some(vec!["com.example", "1.2.0", "7"])
+        );
+        assert_eq!(
+            marker_fields("__BUILDBRIDGE_APP__", "__BUILDBRIDGE_APP__"),
+            None
+        );
+        assert_eq!(marker_fields("something else", "__BUILDBRIDGE_APP__"), None);
+    }
+
+    #[test]
+    fn identities_and_versions_are_bounded_to_what_android_allows() {
+        assert!(valid_application_id("nz.co.thinksolar.app"));
+        assert!(valid_application_id("com.example.app_debug"));
+        assert!(!valid_application_id(""));
+        assert!(!valid_application_id("com.example;rm"));
+        assert!(valid_version_value("3.2.0"));
+        assert!(valid_version_value("12"));
+        assert!(!valid_version_value("1\n2"));
+    }
+
+    #[test]
+    fn keystore_inputs_are_bounded_before_they_reach_keytool() {
+        assert!(valid_key_alias("upload"));
+        assert!(valid_key_alias("my-key.v2"));
+        assert!(!valid_key_alias("my key"));
+        assert!(!valid_key_alias("$(rm)"));
+        assert!(valid_keystore_password("secret-1"));
+        assert!(!valid_keystore_password("short"));
+        assert!(!valid_keystore_password("two\nlines"));
+        assert!(valid_certificate_name("Think Solar"));
+        assert!(!valid_certificate_name("Think, Solar"));
+        assert!(!valid_certificate_name("CN=x"));
+    }
+
+    #[test]
+    fn build_diagnostics_recognise_gradle_pnpm_and_kotlin_failures() {
+        assert!(android_build_log_is_diagnostic("* What went wrong:"));
+        assert!(android_build_log_is_diagnostic(
+            "Execution failed for task ':app:compileDebugKotlin'."
+        ));
+        assert!(android_build_log_is_diagnostic(
+            "e: file.kt:3:1 Unresolved reference"
+        ));
+        assert!(android_build_log_is_diagnostic(
+            " ERR_PNPM_OUTDATED_LOCKFILE  Cannot install"
+        ));
+        assert!(android_build_log_is_diagnostic(
+            "FAILURE: Build failed with an exception."
+        ));
+        assert!(!android_build_log_is_diagnostic(
+            "> Task :app:compileDebugKotlin"
+        ));
+        assert!(!android_build_log_is_diagnostic(
+            "BUILD SUCCESSFUL in 1m 2s"
+        ));
+    }
+
+    #[test]
+    fn every_phase_the_recipes_print_is_known() {
+        for name in [
+            "preparing_tools",
+            "installing_dependencies",
+            "building_web_assets",
+            "syncing_android",
+            "building",
+            "inspecting",
+            "completed",
+        ] {
+            assert!(android_build_phase(name).is_some(), "{name}");
+        }
+        for name in [
+            "preparing",
+            "building_web_assets",
+            "bundling",
+            "signing",
+            "verifying",
+            "completed",
+        ] {
+            assert!(android_release_phase(name).is_some(), "{name}");
+        }
+        assert!(android_build_phase("resolving_pods").is_none());
+    }
+
+    #[test]
+    fn the_keystore_script_takes_the_password_on_stdin_and_the_rest_as_arguments() {
+        assert!(KEYSTORE_CREATION_SCRIPT.contains("/bin/cat > /tmp/buildbridge-keystore/pass"));
+        assert!(KEYSTORE_CREATION_SCRIPT.contains("-alias \"$1\""));
+        assert!(KEYSTORE_CREATION_SCRIPT.contains("-dname \"CN=$2\""));
+        assert!(KEYSTORE_CREATION_SCRIPT.contains("-storepass:file"));
+        assert!(!KEYSTORE_CREATION_SCRIPT.contains("-storepass "));
+    }
+
+    #[test]
+    fn the_signing_material_never_prints_its_passwords() {
+        let material = AndroidSigningMaterial {
+            keystore_path: PathBuf::from("/tmp/upload.keystore"),
+            keystore_password: "store-secret".to_string(),
+            key_alias: "upload".to_string(),
+            key_password: "key-secret".to_string(),
+        };
+        let printed = format!("{material:?}");
+        assert!(printed.contains("upload"));
+        assert!(!printed.contains("secret"));
+    }
+}

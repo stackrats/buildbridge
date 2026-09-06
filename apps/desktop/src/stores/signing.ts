@@ -36,6 +36,7 @@ const state = reactive({
     creatingProfile: false,
     creatingCertificateKitId: null as string | null,
     creatingDevelopmentCertificateKitId: null as string | null,
+    creatingKeystoreKitId: null as string | null,
     downloadingProfileId: null as string | null,
     createdProfile: null as CreateAppleProfileResult | null,
     profileError: null as string | null,
@@ -72,8 +73,8 @@ export function useSigningStore() {
             try {
                 state.kits = await useBackend().saveSigningKit(input);
                 state.notice = input.kitId
-                    ? 'Signing kit updated. Secret values are not shown again.'
-                    : 'Signing kit stored in the operating-system vault.';
+                    ? 'Signing credentials updated. Secret values are not shown again.'
+                    : 'Signing credentials stored in the operating-system vault.';
                 state.verification = null;
                 return true;
             } catch (error) {
@@ -94,7 +95,7 @@ export function useSigningStore() {
                 state.verification = null;
                 state.createdProfile = null;
                 state.notice =
-                    'Signing kit removed from the vault. Machines using it are now unattached.';
+                    'Signing credentials removed from the vault. Machines using them are now unattached.';
                 return true;
             } catch (error) {
                 state.error = describeError(error);
@@ -199,6 +200,37 @@ export function useSigningStore() {
             }
         },
 
+        /**
+         * Creates an Android upload key for a kit in a throwaway container of the toolchain
+         * image. The password is the person's: nothing can recover an upload key without it.
+         */
+        async createKeystore(
+            kitId: string,
+            input: { password: string; keyAlias: string; certificateName: string },
+        ): Promise<boolean> {
+            state.creatingKeystoreKitId = kitId;
+            state.error = null;
+            state.notice = null;
+            state.messageKitId = kitId;
+            try {
+                const result = await useBackend().createAndroidKeystore(kitId, input);
+                const index = state.kits.findIndex((kit) => kit.id === result.kit.id);
+                if (index >= 0) {
+                    state.kits[index] = {
+                        ...result.kit,
+                        attachedMachines: state.kits[index].attachedMachines,
+                    };
+                }
+                state.notice = `Upload key ${result.keystore.keyAlias} created and stored in ${result.kit.name}. Keep the password: neither Google Play nor BuildBridge can recover it.`;
+                return true;
+            } catch (error) {
+                state.error = describeError(error);
+                return false;
+            } finally {
+                state.creatingKeystoreKitId = null;
+            }
+        },
+
         /** Pulls an existing Apple profile back into the machine's attached kit. */
         async downloadProfile(machineId: string, profileId: string): Promise<boolean> {
             state.downloadingProfileId = profileId;
@@ -212,7 +244,7 @@ export function useSigningStore() {
                         attachedMachines: state.kits[index].attachedMachines,
                     };
                 }
-                state.notice = `Added ${result.profile.name} to the kit.`;
+                state.notice = `Added ${result.profile.name} to the credentials.`;
                 return true;
             } catch (error) {
                 state.profileError = describeError(error);

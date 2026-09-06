@@ -268,7 +268,7 @@ onBeforeUnmount(() => {
                     :data-index="index"
                     :aria-selected="option.value === model"
                     :aria-disabled="option.disabled || undefined"
-                    class="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-[13px] transition-colors"
+                    class="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-[13px]"
                     :class="[
                         option.disabled
                             ? 'cursor-not-allowed text-zinc-400 dark:text-zinc-600'

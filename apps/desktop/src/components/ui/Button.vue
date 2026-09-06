@@ -72,7 +72,7 @@ onBeforeUnmount(hide);
             :type="type"
             :class="
                 cn(
-                    'inline-flex items-center justify-center gap-1.5 rounded-md font-medium whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 disabled:pointer-events-none disabled:opacity-45 dark:focus-visible:outline-zinc-300',
+                    'inline-flex items-center justify-center gap-1.5 rounded-md font-medium whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 disabled:pointer-events-none disabled:opacity-45 dark:focus-visible:outline-zinc-300',
                     {
                         default:
                             'bg-zinc-900 text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300',
