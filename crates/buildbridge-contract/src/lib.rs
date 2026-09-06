@@ -8,6 +8,9 @@ use ts_rs::TS;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
+mod sharing;
+pub use sharing::*;
+
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct PairRunnerRequest {
@@ -44,6 +47,11 @@ pub struct HeartbeatRequest {
     /// Additive in protocol v1: an older control plane ignores the field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub machines: Vec<MachineReport>,
+    /// Whether the owner has paused shared builds. Additive in protocol v1 like `machines`: a
+    /// runner that is not pausing sends nothing, so a strict older control plane still accepts
+    /// the heartbeat.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sharing_paused: bool,
 }
 
 /// What a control plane needs to know about one machine to queue work on it. Nothing here is a
@@ -69,6 +77,14 @@ pub struct MachineReport {
     /// plane that predates it reads every machine as an iOS one, which every machine was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolchain_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readiness_issues: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]
@@ -123,7 +139,7 @@ pub struct ClaimBuildResponse {
     pub build: ClaimedBuild,
 }
 
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct ClaimedBuild {
     pub id: String,
@@ -132,6 +148,29 @@ pub struct ClaimedBuild {
     pub lease_expires_at: String,
     #[ts(type = "number")]
     pub next_log_sequence: u64,
+    #[serde(default)]
+    pub authorization: Option<BuildAuthorization>,
+    #[serde(default)]
+    pub lease_token: Option<String>,
+}
+
+/// The lease token binds writes to one claim; it is a secret and is never printed, so a claim
+/// that ends up in a log or an error message shows only that a token is present.
+impl std::fmt::Debug for ClaimedBuild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaimedBuild")
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .field("payload", &self.payload)
+            .field("lease_expires_at", &self.lease_expires_at)
+            .field("next_log_sequence", &self.next_log_sequence)
+            .field("authorization", &self.authorization)
+            .field(
+                "lease_token",
+                &self.lease_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -331,6 +370,10 @@ mod tests {
             env_set: None,
             env_sets: Vec::new(),
             platform: None,
+            executor: None,
+            toolchain_version: None,
+            readiness_issues: Vec::new(),
+            architecture: None,
         };
         let json = serde_json::to_value(&report).expect("serializes");
         assert!(json.get("platform").is_none());
@@ -363,10 +406,56 @@ mod tests {
             version: "0.1.0".to_string(),
             capabilities: vec!["diagnostics".to_string()],
             machines: Vec::new(),
+            sharing_paused: false,
         };
         let json = serde_json::to_value(&request).expect("serializes");
 
         assert!(json.get("machines").is_none());
+        assert!(
+            json.get("sharing_paused").is_none(),
+            "a runner that is not pausing sends the original heartbeat shape"
+        );
+
+        let paused = HeartbeatRequest {
+            sharing_paused: true,
+            ..request
+        };
+        let json = serde_json::to_value(&paused).expect("serializes");
+        assert_eq!(json["sharing_paused"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn a_claimed_build_never_prints_its_lease_token() {
+        let claim: ClaimBuildResponse = serde_json::from_str(
+            r#"{
+                "protocol_version": 1,
+                "build": {
+                    "id": "build-4",
+                    "kind": "diagnostics",
+                    "payload": {},
+                    "lease_expires_at": "2026-09-01T10:00:00Z",
+                    "next_log_sequence": 1,
+                    "lease_token": "lease-secret-value"
+                }
+            }"#,
+        )
+        .expect("contract JSON should decode");
+
+        let shown = format!("{:?}", claim.build);
+        assert!(!shown.contains("lease-secret-value"), "{shown}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+        assert!(shown.contains("build-4"), "{shown}");
+        assert_eq!(
+            claim.build.lease_token.as_deref(),
+            Some("lease-secret-value")
+        );
+
+        let bare: ClaimedBuild = serde_json::from_value(serde_json::json!({
+            "id": "build-5", "kind": "diagnostics", "payload": {},
+            "lease_expires_at": "2026-09-01T10:00:00Z", "next_log_sequence": 1
+        }))
+        .expect("decodes");
+        assert!(format!("{bare:?}").contains("lease_token: None"));
     }
 
     #[test]

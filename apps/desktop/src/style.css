@@ -21,9 +21,9 @@
  * brand colour on large surfaces, which is the opposite of what this palette is for.
  *   success emerald · warning amber · failure red
  *
- * There is deliberately no accent hue. Colour is spent only on status, so an emerald, amber or
- * red anywhere on screen always means done, needs attention, or failed — and an action is
- * recognised by its weight rather than by competing for the same attention.
+ * Actions remain neutral. Status uses emerald, amber and red; active spinners use amber.
+ * Platform icons use neutral white/dark ink for Apple and emerald for Android, with distinct shapes
+ * and accessible names. Filled buttons keep contrasting spinner colours.
  *
  * Standing rules: sentence case, no uppercase styling, no gradients, one glyph per row, and
  * colour never carries meaning on its own.
@@ -52,7 +52,8 @@
     body {
         background: var(--color-zinc-50);
         color: var(--color-zinc-900);
-        font-size: 13px;
+        font-size: 14px;
+        line-height: 1.5;
     }
 
     .dark body {

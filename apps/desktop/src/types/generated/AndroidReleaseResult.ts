@@ -2,12 +2,11 @@
 import type { AndroidArtifact } from "./AndroidArtifact";
 
 /**
- * A signed release: the app bundle Google Play takes and the APK a phone installs, both
- * signed with the kit's upload key and verified before they left the container.
+ * A signed release with the selected app bundle and/or APK, verified before transfer.
  */
 export type AndroidReleaseResult = { applicationId: string, versionName: string, versionCode: string, keyAlias: string, 
 /**
  * The signing certificate's SHA-256, as `apksigner` printed it: what Google Play shows as
  * the upload key certificate.
  */
-certificateSha256: string, aab: AndroidArtifact, apk: AndroidArtifact, outputTail: Array<string>, };
+certificateSha256: string, aab: AndroidArtifact | null, apk: AndroidArtifact | null, outputTail: Array<string>, };

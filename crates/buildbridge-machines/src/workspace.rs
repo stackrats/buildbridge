@@ -281,11 +281,18 @@ pub(crate) fn snapshot_path_excluded(relative: &Path) -> bool {
         })
 }
 
-pub(crate) fn create_workspace_archive(
-    root: &Path,
-    archive_path: &Path,
-) -> Result<(), ProviderError> {
-    let mut command = Command::new("tar");
+fn workspace_archive_command(root: &Path, archive_path: &Path, macos: bool) -> Command {
+    let mut command = Command::new(if macos { "/usr/bin/tar" } else { "tar" });
+    if macos {
+        // BSD tar otherwise preserves host metadata in AppleDouble entries. A source snapshot
+        // must contain only the inspected project files, including when copied to Linux.
+        command.args([
+            "--no-mac-metadata",
+            "--no-xattrs",
+            "--no-acls",
+            "--no-fflags",
+        ]);
+    }
     command.args(["-czf"]).arg(archive_path);
     for pattern in [
         ".git",
@@ -316,19 +323,26 @@ pub(crate) fn create_workspace_archive(
         "id_dsa",
         "id_ecdsa",
         "id_ed25519",
-        "*.p8",
-        "*.p12",
-        "*.pfx",
-        "*.pem",
-        "*.key",
-        "*.mobileprovision",
+        // Match snapshot_path_excluded's case-insensitive signing-file extensions on both
+        // GNU tar and BSD tar; GNU's --ignore-case is not portable to macOS.
+        "*.[pP]8",
+        "*.[pP]12",
+        "*.[pP][fF][xX]",
+        "*.[pP][eE][mM]",
+        "*.[kK][eE][yY]",
+        "*.[mM][oO][bB][iI][lL][eE][pP][rR][oO][vV][iI][sS][iI][oO][nN]",
     ] {
         command.arg(format!("--exclude={pattern}"));
     }
-    let output = command
-        .arg("-C")
-        .arg(root)
-        .arg(".")
+    command.arg("-C").arg(root).arg(".");
+    command
+}
+
+pub(crate) fn create_workspace_archive(
+    root: &Path,
+    archive_path: &Path,
+) -> Result<(), ProviderError> {
+    let output = workspace_archive_command(root, archive_path, cfg!(target_os = "macos"))
         .tracked_output()
         .map_err(|error| {
             ProviderError::GuestBridge(format!(
@@ -346,33 +360,9 @@ pub(crate) fn create_workspace_archive(
 }
 
 pub(crate) fn snapshot_sha256(path: &Path) -> Result<String, ProviderError> {
-    let output = Command::new("sha256sum")
-        .arg(path)
-        .output()
-        .map_err(|error| {
-            ProviderError::GuestBridge(format!("could not checksum the source snapshot: {error}"))
-        })?;
-    if !output.status.success() {
-        return Err(ProviderError::GuestBridge(
-            "sha256sum could not checksum the source snapshot".to_string(),
-        ));
-    }
-    let checksum = clean_output(&output.stdout)
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    if checksum.len() != 64
-        || !checksum
-            .chars()
-            .all(|character| character.is_ascii_hexdigit())
-    {
-        return Err(ProviderError::GuestBridge(
-            "sha256sum returned an invalid source snapshot checksum".to_string(),
-        ));
-    }
-
-    Ok(checksum)
+    native_sha256(path).map_err(|error| {
+        ProviderError::GuestBridge(format!("could not checksum the source snapshot: {error}"))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -623,5 +613,158 @@ pub(crate) fn signing_progress(
         total_bytes,
         elapsed_seconds: started_at.elapsed().as_secs(),
         detail: detail.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "buildbridge-snapshot-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn macos_snapshot_uses_system_tar_without_host_metadata() {
+        let root = Path::new("/Users/Build User/project");
+        let archive = Path::new("/tmp/build snapshot.tar.gz");
+        let command = workspace_archive_command(root, archive, true);
+        assert_eq!(command.get_program(), "/usr/bin/tar");
+        let args = command.get_args().collect::<Vec<_>>();
+        for flag in [
+            "--no-mac-metadata",
+            "--no-xattrs",
+            "--no-acls",
+            "--no-fflags",
+        ] {
+            assert!(args.contains(&std::ffi::OsStr::new(flag)));
+        }
+        assert!(args.contains(&archive.as_os_str()));
+        assert_eq!(&args[args.len() - 3..], ["-C", root.to_str().unwrap(), "."]);
+    }
+
+    #[test]
+    fn source_archive_matches_secret_and_dependency_exclusions() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("project with spaces");
+        let archive = fixture.0.join("source snapshot.tar.gz");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("android/app/build")).unwrap();
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        fs::write(root.join("package.json"), "{}").unwrap();
+        fs::write(root.join("src/app.ts"), "export const app = true").unwrap();
+        for secret in [
+            ".env.production",
+            ".npmrc",
+            "id_ed25519",
+            "signing.P8",
+            "identity.p12",
+            "identity.P12",
+            "identity.pFx",
+            "cert.PEM",
+            "secret.Key",
+            "app.MOBILEprovision",
+            "android/local.properties",
+            "android/app/build/output.apk",
+            "node_modules/secret.js",
+        ] {
+            assert!(snapshot_path_excluded(Path::new(secret)), "{secret}");
+            fs::write(root.join(secret), "excluded").unwrap();
+        }
+        assert_eq!(inspect_snapshot_tree(&root).unwrap().0, 2);
+        create_workspace_archive(&root, &archive).unwrap();
+        let output = Command::new("tar")
+            .arg("-tzf")
+            .arg(&archive)
+            .tracked_output()
+            .unwrap();
+        assert!(output.status.success());
+        let listing = String::from_utf8(output.stdout).unwrap();
+        let mut files = listing
+            .lines()
+            .filter(|line| !line.ends_with('/'))
+            .collect::<Vec<_>>();
+        files.sort_unstable();
+        assert_eq!(files, ["./package.json", "./src/app.ts"]);
+    }
+
+    #[test]
+    fn snapshot_checksum_uses_the_host_tool_and_returns_canonical_sha256() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("file with spaces.txt");
+        fs::write(&path, "abc").unwrap();
+        assert_eq!(
+            snapshot_sha256(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn guest_operations_need_a_valid_username_an_unprivileged_port_and_both_pinned_files() {
+        let fixture = Fixture::new();
+        let identity = fixture.0.join("id_ed25519");
+        let known_hosts = fixture.0.join("known_hosts");
+        fs::write(&identity, "key").unwrap();
+        fs::write(&known_hosts, "host").unwrap();
+        assert!(validate_guest_operation(1024, "builder", &identity, &known_hosts).is_ok());
+        assert!(validate_guest_operation(50922, "_svc.user-1", &identity, &known_hosts).is_ok());
+        for (port, username) in [
+            (1023, "builder"),
+            (0, "builder"),
+            (2222, ""),
+            (2222, "root;id"),
+            (2222, "1builder"),
+            (2222, "builder user"),
+        ] {
+            assert!(
+                validate_guest_operation(port, username, &identity, &known_hosts).is_err(),
+                "{port} {username:?}"
+            );
+        }
+        assert!(
+            validate_guest_operation(2222, "builder", &fixture.0.join("missing"), &known_hosts)
+                .is_err()
+        );
+        assert!(
+            validate_guest_operation(2222, "builder", &identity, &fixture.0).is_err(),
+            "a directory is not a known_hosts file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_inspection_refuses_symbolic_links_outside_excluded_folders() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.0.join("src")).unwrap();
+        fs::write(fixture.0.join("src/index.ts"), "export {}").unwrap();
+        fs::write(fixture.0.join("package.json"), "{}").unwrap();
+        fs::create_dir_all(fixture.0.join("node_modules/pkg")).unwrap();
+        std::os::unix::fs::symlink("../../src", fixture.0.join("node_modules/pkg/link")).unwrap();
+        assert_eq!(inspect_snapshot_tree(&fixture.0).unwrap(), (2, 11));
+        std::os::unix::fs::symlink("/etc/hostname", fixture.0.join("src/escape")).unwrap();
+        let error = inspect_snapshot_tree(&fixture.0).unwrap_err().to_string();
+        assert!(error.contains("symbolic link"), "{error}");
+        assert!(error.contains("src/escape"), "{error}");
+        assert!(!error.contains("/etc/hostname"), "{error}");
+        assert!(!error.contains(fixture.0.to_str().unwrap()), "{error}");
     }
 }

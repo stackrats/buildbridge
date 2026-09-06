@@ -39,7 +39,7 @@ watch(open, (value) => {
 </script>
 
 <template>
-    <Modal v-model:open="open" :title="title">
+    <Modal v-model:open="open" :title="title" :busy="busy">
         <div class="space-y-3">
             <div class="flex items-start gap-2 text-xs leading-5 text-zinc-600 dark:text-zinc-300">
                 <TriangleAlert
@@ -55,23 +55,29 @@ watch(open, (value) => {
                 v-model="acknowledged"
                 block
                 :label="acknowledgement"
+                :disabled="busy"
             />
-            <div class="flex justify-end gap-2">
-                <Button variant="outline" size="sm" :disabled="busy" @click="open = false">
-                    Cancel
-                </Button>
-                <Button
-                    :variant="destructive ? 'danger' : 'default'"
-                    size="sm"
-                    :disabled="
-                        busy || confirmDisabled || (acknowledgement !== null && !acknowledged)
-                    "
-                    @click="emit('confirm')"
-                >
-                    <Spinner v-if="busy" tone="text-white dark:text-zinc-950" />
-                    {{ confirmLabel }}
-                </Button>
-            </div>
         </div>
+        <template #footer>
+            <Button variant="outline" size="sm" :disabled="busy" @click="open = false">
+                Cancel
+            </Button>
+            <Button
+                :variant="destructive ? 'danger' : 'default'"
+                size="sm"
+                :disabled="busy || confirmDisabled || (acknowledgement !== null && !acknowledged)"
+                @click="emit('confirm')"
+            >
+                <Spinner
+                    v-if="busy"
+                    :tone="
+                        destructive
+                            ? 'text-red-700 dark:text-red-400'
+                            : 'text-white dark:text-zinc-950'
+                    "
+                />
+                {{ confirmLabel }}
+            </Button>
+        </template>
     </Modal>
 </template>

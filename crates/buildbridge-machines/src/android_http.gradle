@@ -1,0 +1,178 @@
+// Loaded explicitly for one debug invocation. The synchronized project is never edited,
+// and these generated inputs are unreachable by release builds or subsequent normal builds.
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+import javax.xml.parsers.DocumentBuilderFactory
+import javax.xml.transform.TransformerFactory
+import javax.xml.transform.dom.DOMSource
+import javax.xml.transform.stream.StreamResult
+
+def androidNamespace = 'http://schemas.android.com/apk/res/android'
+def toolsNamespace = 'http://schemas.android.com/tools'
+def xmlNamespace = 'http://www.w3.org/2000/xmlns/'
+def parseXml = { File source ->
+    def factory = DocumentBuilderFactory.newInstance()
+    factory.setNamespaceAware(true)
+    factory.setFeature('http://apache.org/xml/features/disallow-doctype-decl', true)
+    factory.setFeature('http://xml.org/sax/features/external-general-entities', false)
+    factory.setFeature('http://xml.org/sax/features/external-parameter-entities', false)
+    factory.newDocumentBuilder().parse(source)
+}
+def writeXml = { document, File destination ->
+    destination.parentFile.mkdirs()
+    TransformerFactory.newInstance().newTransformer().transform(
+        new DOMSource(document), new StreamResult(destination))
+}
+def copyDirectories = { List<File> sources, File destination ->
+    def seen = new HashSet<String>()
+    sources.findAll { it.isDirectory() }.each { source ->
+        source.eachFileRecurse { file ->
+            if (file.isFile()) {
+                def relative = source.toPath().relativize(file.toPath()).toString()
+                if (!seen.add(relative)) {
+                    throw new IllegalStateException('Duplicate Android debug source: ' + relative)
+                }
+                def target = new File(destination, relative)
+                target.parentFile.mkdirs()
+                target.bytes = file.bytes
+            }
+        }
+    }
+}
+
+gradle.beforeProject { project ->
+    project.pluginManager.withPlugin('com.android.application') {
+        // finalizeDsl runs after the project's source-set customizations and before AGP
+        // creates variants/tasks. afterEvaluate can be too late for these inputs.
+        project.extensions.getByName('androidComponents').finalizeDsl { android ->
+            def main = android.sourceSets.getByName('main')
+            def debug = android.sourceSets.getByName('debug')
+            def staging = new File(project.buildDir, 'buildbridge-http-debug')
+            project.delete(staging)
+            staging.mkdirs()
+
+            def assets = new File(staging, 'assets')
+            copyDirectories(debug.assets.srcDirs.toList(), assets)
+            def config = new File(assets, 'capacitor.config.json')
+            if (!config.isFile()) {
+                def configs = main.assets.srcDirs.collect {
+                    new File(it, 'capacitor.config.json')
+                }.findAll { it.isFile() }
+                if (configs.size() != 1) {
+                    throw new IllegalStateException('Allow HTTP APIs requires one synchronized Capacitor Android config.')
+                }
+                config.parentFile.mkdirs()
+                config.bytes = configs.first().bytes
+            }
+            def capacitor = new JsonSlurper().parse(config)
+            if (!(capacitor instanceof Map) ||
+                (capacitor.android != null && !(capacitor.android instanceof Map))) {
+                throw new IllegalStateException('The Capacitor Android config must contain an Android settings object.')
+            }
+            if (capacitor.android == null) capacitor.android = [:]
+            capacitor.android.allowMixedContent = true
+            config.setText(JsonOutput.toJson(capacitor), 'UTF-8')
+
+            def manifest = new File(staging, 'AndroidManifest.xml')
+            if (debug.manifest.srcFile.isFile()) {
+                manifest.bytes = debug.manifest.srcFile.bytes
+            } else {
+                manifest.setText('<manifest/>', 'UTF-8')
+            }
+            def document = parseXml(manifest)
+            def root = document.documentElement
+            root.setAttributeNS(xmlNamespace, 'xmlns:buildbridgeAndroid', androidNamespace)
+            root.setAttributeNS(xmlNamespace, 'xmlns:buildbridgeTools', toolsNamespace)
+            def applications = root.getElementsByTagName('application')
+            def application = applications.length == 0 ?
+                root.appendChild(document.createElement('application')) : applications.item(0)
+            application.setAttributeNS(androidNamespace, 'buildbridgeAndroid:usesCleartextTraffic', 'true')
+            // Preserve other merge rules, including custom namespace prefixes.
+            ['remove', 'strict', 'replace'].each { marker ->
+                def rules = application.getAttributeNS(toolsNamespace, marker).split(',')
+                    .collect { it.trim() }.findAll { rule ->
+                        def parts = rule.split(':', 2)
+                        !(parts.length == 2 && parts[1] == 'usesCleartextTraffic' &&
+                            application.lookupNamespaceURI(parts[0]) == androidNamespace) && !rule.isEmpty()
+                    }
+                if (marker == 'replace') rules.add('buildbridgeAndroid:usesCleartextTraffic')
+                if (rules.isEmpty()) application.removeAttributeNS(toolsNamespace, marker)
+                else application.setAttributeNS(toolsNamespace, 'buildbridgeTools:' + marker, rules.join(','))
+            }
+            writeXml(document, manifest)
+
+            def resources = new File(staging, 'res')
+            copyDirectories(debug.res.srcDirs.toList(), resources)
+            // usesCleartextTraffic alone is ignored when networkSecurityConfig is present.
+            // Overlay each qualifier of those XML resources, keeping all CA/pinning/other
+            // TLS settings and source-set precedence. Never replace the security config.
+            def securityConfigs = [:]
+            [main.res.srcDirs, debug.res.srcDirs].each { sourceDirs ->
+                def inSourceSet = new HashSet<String>()
+                sourceDirs.findAll { it.isDirectory() }.each { source ->
+                    source.eachDir { directory ->
+                        if (directory.name == 'xml' || directory.name.startsWith('xml-')) {
+                            directory.eachFile { resource ->
+                                if (resource.isFile() && resource.name.endsWith('.xml')) {
+                                    def relative = directory.name + '/' + resource.name
+                                    if (!inSourceSet.add(relative)) {
+                                        throw new IllegalStateException('Duplicate Android XML resource: ' + relative)
+                                    }
+                                    def xml = parseXml(resource)
+                                    if (xml.documentElement.nodeName == 'network-security-config') {
+                                        securityConfigs[relative] = xml
+                                    } else {
+                                        securityConfigs.remove(relative)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            securityConfigs.each { relative, xml ->
+                def base = xml.documentElement.getElementsByTagName('base-config')
+                if (base.length == 0) {
+                    xml.documentElement.appendChild(xml.createElement('base-config'))
+                }
+                ['base-config', 'domain-config'].each { name ->
+                    def nodes = xml.documentElement.getElementsByTagName(name)
+                    for (int index = 0; index < nodes.length; index++) {
+                        nodes.item(index).setAttribute('cleartextTrafficPermitted', 'true')
+                    }
+                }
+                writeXml(xml, new File(resources, relative))
+            }
+            // An AAR-only policy cannot be safely replaced with a permissive default:
+            // doing so would discard its TLS settings. Fail instead of claiming that
+            // HTTP was enabled when Android would still enforce that policy.
+            def securityReference = ''
+            [main.manifest.srcFile, debug.manifest.srcFile].findAll { it.isFile() }.each { input ->
+                def apps = parseXml(input).documentElement.getElementsByTagName('application')
+                if (apps.length > 0) {
+                    def app = apps.item(0)
+                    if (['replace', 'remove', 'removeAll'].contains(app.getAttributeNS(toolsNamespace, 'node'))) {
+                        securityReference = ''
+                    }
+                    def removed = app.getAttributeNS(toolsNamespace, 'remove').split(',').any { rule ->
+                        def parts = rule.trim().split(':', 2)
+                        parts.length == 2 && parts[1] == 'networkSecurityConfig' &&
+                            app.lookupNamespaceURI(parts[0]) == androidNamespace
+                    }
+                    if (removed) securityReference = ''
+                    def reference = app.getAttributeNS(androidNamespace, 'networkSecurityConfig')
+                    if (!reference.isEmpty()) securityReference = reference
+                }
+            }
+            def localReference = securityReference =~ /^@(?:[a-zA-Z0-9_.]+:)?xml\/([a-zA-Z0-9_]+)$/
+            if (localReference.matches() && !securityConfigs.keySet().any {
+                it.endsWith('/' + localReference.group(1) + '.xml')
+            }) {
+                throw new IllegalStateException('Allow HTTP APIs requires the referenced network security XML in the app main or debug resources. Copy that policy into the app before enabling this option; its TLS settings will be preserved.')
+            }
+            debug.assets.setSrcDirs([assets])
+            debug.res.setSrcDirs([resources])
+            debug.manifest.srcFile(manifest)
+        }
+    }
+}

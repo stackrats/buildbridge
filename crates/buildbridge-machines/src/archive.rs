@@ -12,6 +12,7 @@ pub fn run_signed_apple_archive<F>(
     scheme: &str,
     keychain_password: &str,
     env: Option<&GuestEnvFiles>,
+    version: Option<&ProjectVersion>,
     output_directory: &Path,
     mut on_progress: F,
 ) -> Result<AppleArchiveResult, ProviderError>
@@ -20,6 +21,9 @@ where
 {
     validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
     validate_signing_target(&signing.development_team, &signing.bundle_identifier)?;
+    if let Some(version) = version {
+        validate_apple_version(version).map_err(ProviderError::GuestBridge)?;
+    }
     if !valid_apple_scheme(scheme) {
         return Err(ProviderError::GuestBridge(
             "the stored Xcode scheme is missing or invalid".to_string(),
@@ -155,12 +159,25 @@ where
             scheme,
             &signing.bundle_identifier,
         )?;
-        let signing_settings = apple_archive_signing_xcconfig(
+        let mut signing_settings = apple_archive_signing_xcconfig(
             &archive_target,
             &signing.development_team,
             &identity.identity_sha1,
             &profile.uuid,
         );
+        // The requested version rides in the same settings file, so the archive carries it
+        // whatever the synced project says; the archived app is checked against it below.
+        if let Some(version) = version {
+            signing_settings.push_str(&apple_version_xcconfig(version));
+            on_progress(archive_progress(
+                AppleArchivePhase::Preparing,
+                0,
+                0,
+                started_at,
+                "Preparing the fixed Release and App Store Connect export recipe.",
+                Some(format!("Archiving as version {}.", version.display())),
+            ));
+        }
         install_signing_helper(
             ssh_port,
             username,
@@ -228,6 +245,17 @@ where
             return Err(ProviderError::GuestBridge(format!(
                 "the exported archive uses bundle identifier {}, not {}",
                 inspection.bundle_identifier, signing.bundle_identifier
+            )));
+        }
+        if let Some(version) = version
+            && (inspection.marketing_version != version.version
+                || inspection.build_number != version.build)
+        {
+            return Err(ProviderError::GuestBridge(format!(
+                "the exported archive reports version {} ({}), not the requested {}; the app's Info.plist must take CFBundleShortVersionString from MARKETING_VERSION and CFBundleVersion from CURRENT_PROJECT_VERSION for a version set here to reach it",
+                inspection.marketing_version,
+                inspection.build_number,
+                version.display()
             )));
         }
         on_progress(archive_progress(
@@ -672,7 +700,9 @@ where
 pub(crate) fn archive_phase_detail(phase: AppleArchivePhase) -> &'static str {
     match phase {
         AppleArchivePhase::Preparing => "Preparing the signed Release recipe",
-        AppleArchivePhase::BuildingWebAssets => "Rebuilding the web assets with the chosen environment",
+        AppleArchivePhase::BuildingWebAssets => {
+            "Rebuilding the web assets with the chosen environment"
+        }
         AppleArchivePhase::Archiving => "Compiling and signing the Release archive",
         AppleArchivePhase::Exporting => "Exporting the App Store Connect IPA",
         AppleArchivePhase::Verifying => "Verifying the archived app signature",

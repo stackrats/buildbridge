@@ -11,7 +11,7 @@
 use crate::qmp::QmpEndpoint;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -25,7 +25,8 @@ use crate::disk::{
     validate_bind_path,
 };
 use crate::{
-    ContainerState, ProviderError, TrackedCommand, clean_output, inspect_container, run_docker,
+    ContainerState, ProviderError, TrackedCommand, clean_output, docker_command, inspect_container,
+    run_docker,
 };
 
 /// Where every container that runs a clone binds its template directory, read-only. The
@@ -254,7 +255,7 @@ where
         "Compressing the macOS disk into the template",
         Some(0),
     );
-    let mut child = Command::new("docker")
+    let mut child = docker_command()
         .args(template_compress_args(source, template.dir()))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

@@ -8,12 +8,11 @@ const SIDEBAR_WIDTH_KEY = 'buildbridge.sidebar-width';
 const SELECTION_KEY = 'buildbridge.selection';
 const LOG_WRAP_KEY = 'buildbridge.log-wrap';
 const LOG_HEIGHT_KEY = 'buildbridge.log-height';
-
-const local = typeof localStorage === 'undefined' ? null : localStorage;
+const MACHINE_ORDER_KEY = 'buildbridge.machine-order';
 
 function read(key: string): string | null {
     try {
-        return local?.getItem(key) ?? null;
+        return typeof localStorage === 'undefined' ? null : localStorage.getItem(key);
     } catch {
         return null;
     }
@@ -21,7 +20,7 @@ function read(key: string): string | null {
 
 function write(key: string, value: string): void {
     try {
-        local?.setItem(key, value);
+        if (typeof localStorage !== 'undefined') localStorage.setItem(key, value);
     } catch {
         // Storage can be unavailable in private windows; preferences simply do not persist.
     }
@@ -90,4 +89,42 @@ export function loadLogHeight(): number {
 
 export function saveLogHeight(height: number): void {
     write(LOG_HEIGHT_KEY, String(Math.round(height)));
+}
+
+export type MachineOrderPreferences = {
+    ids: string[];
+    lastUsed: Record<string, number>;
+};
+
+export function loadMachineOrder(): MachineOrderPreferences {
+    const empty: MachineOrderPreferences = { ids: [], lastUsed: {} };
+    try {
+        const value: unknown = JSON.parse(read(MACHINE_ORDER_KEY) ?? 'null');
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return empty;
+        const stored = value as Record<string, unknown>;
+        const ids = Array.isArray(stored.ids)
+            ? [...new Set(stored.ids.filter((id): id is string => typeof id === 'string' && !!id))]
+            : [];
+        const lastUsed =
+            stored.lastUsed &&
+            typeof stored.lastUsed === 'object' &&
+            !Array.isArray(stored.lastUsed)
+                ? Object.fromEntries(
+                      Object.entries(stored.lastUsed).filter(
+                          ([id, time]) =>
+                              !!id &&
+                              typeof time === 'number' &&
+                              Number.isFinite(time) &&
+                              time >= 0,
+                      ),
+                  )
+                : {};
+        return { ids, lastUsed };
+    } catch {
+        return empty;
+    }
+}
+
+export function saveMachineOrder(preferences: MachineOrderPreferences): void {
+    write(MACHINE_ORDER_KEY, JSON.stringify(preferences));
 }

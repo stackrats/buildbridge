@@ -5,8 +5,8 @@ import BrandMark from './BrandMark.vue';
 </script>
 
 <template>
-    <span class="inline-flex items-center gap-2">
-        <BrandMark class="h-5 w-auto" />
-        <span class="text-[15px] font-semibold tracking-tight">BuildBridge</span>
+    <span class="inline-flex h-6 shrink-0 items-center gap-2.5 whitespace-nowrap">
+        <BrandMark class="h-[18px] w-auto" />
+        <span class="font-mono text-base leading-none font-medium tracking-tight">BuildBridge</span>
     </span>
 </template>

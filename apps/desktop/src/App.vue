@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, onMounted } from 'vue';
 
 import HomePane from './components/home/HomePane.vue';
+import NativeMacPane from './components/native/NativeMacPane.vue';
+import { useNativeMacStore } from './stores/native-mac';
 import MachinePane from './components/machine/MachinePane.vue';
 import RunnerPane from './components/runner/RunnerPane.vue';
 import Sidebar from './components/Sidebar.vue';
@@ -22,6 +24,7 @@ const runner = useRunnerStore();
 const machines = useMachinesStore();
 const signing = useSigningStore();
 const envs = useEnvSetsStore();
+const nativeMac = useNativeMacStore();
 
 const selectedMachineId = computed(() =>
     ui.state.route.kind === 'machine' ? ui.state.route.id : null,
@@ -30,6 +33,7 @@ const selectedMachineId = computed(() =>
 onMounted(async () => {
     await machines.listenForEvents();
     await Promise.all([runner.initialize(), machines.loadList(), signing.load(), envs.load()]);
+    if (runner.state.status?.platform === 'macos') await nativeMac.initialize();
     // A remembered machine that no longer exists falls back to the overview.
     if (
         selectedMachineId.value !== null &&
@@ -42,6 +46,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
     runner.dispose();
     machines.dispose();
+    nativeMac.dispose();
 });
 </script>
 
@@ -61,6 +66,7 @@ onBeforeUnmount(() => {
                     :machine-id="selectedMachineId"
                 />
                 <RunnerPane v-else-if="ui.state.route.kind === 'runner'" />
+                <NativeMacPane v-else-if="ui.state.route.kind === 'native_mac'" />
                 <SigningKitPane v-else-if="ui.state.route.kind === 'signing'" />
                 <EnvSetPane v-else-if="ui.state.route.kind === 'envs'" />
                 <TemplatesPane v-else-if="ui.state.route.kind === 'templates'" />

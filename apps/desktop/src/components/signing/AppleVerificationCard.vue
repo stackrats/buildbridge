@@ -82,33 +82,43 @@ function heldInKit(profile: { uuid: string }): boolean {
     return kitHoldsProfile(attachedKit.value ?? null, profile.uuid);
 }
 
+/** Apple's upper-case enum values ("ENABLED", "PROCESSING") as a label. */
+function sentenceCase(value: string): string {
+    const words = value.toLowerCase().replace(/_/g, ' ');
+    return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+function activeProfile(profile: { profileState: string; expirationDate: string }): boolean {
+    return !isExpired(profile.expirationDate) && profile.profileState.toUpperCase() === 'ACTIVE';
+}
+
 function profileState(profile: { profileState: string; expirationDate: string }) {
     if (isExpired(profile.expirationDate)) {
-        return { label: 'expired', tone: 'danger' as const };
+        return { label: 'Expired', tone: 'danger' as const };
     }
-    if (profile.profileState.toUpperCase() === 'ACTIVE') {
-        return { label: 'active', tone: 'ok' as const };
+    if (activeProfile(profile)) {
+        return { label: 'Active', tone: 'ok' as const };
     }
-    return { label: profile.profileState.toLowerCase(), tone: 'warn' as const };
+    return { label: sentenceCase(profile.profileState), tone: 'warn' as const };
 }
 
 function certificateState(certificate: { certificateType: string; expirationDate: string }) {
     if (isExpired(certificate.expirationDate)) {
-        return { label: 'expired', tone: 'danger' as const };
+        return { label: 'Expired', tone: 'danger' as const };
     }
     if (
         certificate.certificateType === 'DISTRIBUTION' ||
         certificate.certificateType === 'IOS_DISTRIBUTION'
     ) {
-        return { label: 'distribution · usable', tone: 'ok' as const };
+        return { label: 'Distribution · usable', tone: 'ok' as const };
     }
     if (
         certificate.certificateType === 'DEVELOPMENT' ||
         certificate.certificateType === 'IOS_DEVELOPMENT'
     ) {
-        return { label: 'development · for iPhone builds', tone: 'neutral' as const };
+        return { label: 'Development · for iPhone builds', tone: 'neutral' as const };
     }
-    return { label: 'not for App Store signing', tone: 'neutral' as const };
+    return { label: 'Not for App Store signing', tone: 'neutral' as const };
 }
 
 /** How many phones a development or ad hoc profile lists, when Apple let us read them. */
@@ -239,7 +249,7 @@ async function createProfile(): Promise<void> {
                                 profileState(profile).label
                             }}</Badge>
                             <Button
-                                v-if="profileState(profile).label === 'active'"
+                                v-if="activeProfile(profile)"
                                 variant="outline"
                                 size="sm"
                                 class="shrink-0"
@@ -300,7 +310,7 @@ async function createProfile(): Promise<void> {
                                 >
                             </span>
                             <Badge :tone="device.status === 'ENABLED' ? 'ok' : 'warn'">{{
-                                device.status.toLowerCase()
+                                sentenceCase(device.status)
                             }}</Badge>
                         </li>
                         <li
@@ -335,71 +345,74 @@ async function createProfile(): Promise<void> {
                     and added to the signing credentials.
                 </Callout>
 
-                <div
-                    v-else-if="needsReplacement"
-                    class="mt-3 rounded-md border border-amber-500 bg-amber-50 p-3 dark:bg-amber-950/50"
-                >
-                    <p class="text-xs font-medium text-amber-700 dark:text-amber-400">
-                        No active App Store profile remains
-                    </p>
-                    <p class="mt-1 text-[11px] leading-4 text-amber-700/80 dark:text-amber-400/80">
-                        Choose an unexpired distribution certificate whose private key is inside
-                        your stored .p12. BuildBridge creates exactly one new App Store profile for
-                        the exact bundle identifier and never revokes existing profiles. This needs
-                        an Admin Team key.
-                    </p>
-                    <ul v-if="verification.certificatesAccessible" class="mt-2 space-y-1">
-                        <li
-                            v-for="certificate in verification.certificates.slice(0, 8)"
-                            :key="certificate.id"
-                            class="flex items-center gap-2 text-xs"
-                        >
-                            <span class="min-w-0 flex-1 truncate text-zinc-600 dark:text-zinc-300">
-                                {{ certificate.name }} · {{ certificate.displayName }}
+                <template v-else-if="needsReplacement">
+                    <Callout tone="warn" class="mt-3" title="No active App Store profile remains">
+                        <p>
+                            Choose an unexpired distribution certificate whose private key is inside
+                            your stored .p12. BuildBridge creates exactly one new App Store profile
+                            for the exact bundle identifier and never revokes existing profiles.
+                            This needs an Admin Team key.
+                        </p>
+                        <ul v-if="verification.certificatesAccessible" class="mt-2 space-y-1">
+                            <li
+                                v-for="certificate in verification.certificates.slice(0, 8)"
+                                :key="certificate.id"
+                                class="flex items-center gap-2 text-xs"
+                            >
                                 <span
-                                    class="font-mono text-[11px] text-zinc-500 dark:text-zinc-400"
-                                    >{{ certificate.serialNumber }}</span
+                                    class="min-w-0 flex-1 truncate text-zinc-600 dark:text-zinc-300"
                                 >
-                            </span>
-                            <span class="shrink-0 text-[11px] text-zinc-500 dark:text-zinc-400"
-                                >until {{ formatDate(certificate.expirationDate) }}</span
-                            >
-                            <Badge :tone="certificateState(certificate).tone">{{
-                                certificateState(certificate).label
-                            }}</Badge>
-                        </li>
-                    </ul>
-                    <p v-else class="mt-2 text-[11px] text-zinc-500 dark:text-zinc-400">
-                        {{ verification.certificatesIssue ?? 'Certificates were not accessible.' }}
-                    </p>
-                    <Field label="Certificate for the new profile" class="mt-3">
-                        <Select
-                            v-model="certificateId"
-                            :options="
-                                usableCertificates.map((certificate) => ({
-                                    value: certificate.id,
-                                    label: `${certificate.name} · ${certificate.serialNumber}`,
-                                }))
-                            "
-                            placeholder="Choose a distribution certificate"
-                        />
-                        <template #action>
-                            <Button
-                                :disabled="!selectedCertificate || signing.state.creatingProfile"
-                                @click="confirmOpen = true"
-                            >
-                                <Spinner
-                                    v-if="signing.state.creatingProfile"
-                                    tone="text-white dark:text-zinc-950"
-                                />
-                                Create replacement profile
-                            </Button>
-                        </template>
-                    </Field>
+                                    {{ certificate.name }} · {{ certificate.displayName }}
+                                    <span
+                                        class="font-mono text-[11px] text-zinc-500 dark:text-zinc-400"
+                                        >{{ certificate.serialNumber }}</span
+                                    >
+                                </span>
+                                <span class="shrink-0 text-[11px] text-zinc-500 dark:text-zinc-400"
+                                    >until {{ formatDate(certificate.expirationDate) }}</span
+                                >
+                                <Badge :tone="certificateState(certificate).tone">{{
+                                    certificateState(certificate).label
+                                }}</Badge>
+                            </li>
+                        </ul>
+                        <p v-else class="mt-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+                            {{
+                                verification.certificatesIssue ??
+                                'Certificates were not accessible.'
+                            }}
+                        </p>
+                        <Field label="Certificate for the new profile" class="mt-3">
+                            <Select
+                                v-model="certificateId"
+                                :options="
+                                    usableCertificates.map((certificate) => ({
+                                        value: certificate.id,
+                                        label: `${certificate.name} · ${certificate.serialNumber}`,
+                                    }))
+                                "
+                                placeholder="Choose a distribution certificate"
+                            />
+                            <template #action>
+                                <Button
+                                    :disabled="
+                                        !selectedCertificate || signing.state.creatingProfile
+                                    "
+                                    @click="confirmOpen = true"
+                                >
+                                    <Spinner
+                                        v-if="signing.state.creatingProfile"
+                                        tone="text-white dark:text-zinc-950"
+                                    />
+                                    Create replacement profile
+                                </Button>
+                            </template>
+                        </Field>
+                    </Callout>
                     <Callout v-if="signing.state.profileError" tone="danger" class="mt-2">{{
                         signing.state.profileError
                     }}</Callout>
-                </div>
+                </template>
             </template>
         </div>
 

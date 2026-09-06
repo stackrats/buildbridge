@@ -8,28 +8,35 @@ import {
     RefreshCw,
     TriangleAlert,
     Unplug,
+    ExternalLink,
 } from '@lucide/vue';
 import { computed, ref } from 'vue';
 
 import { formatTime } from '../../lib/format';
+import { useBackend } from '../../lib/backend';
+import { describeError } from '../../lib/utils';
 import { useRunnerStore } from '../../stores/runner';
 import Badge from '../ui/Badge.vue';
 import Button from '../ui/Button.vue';
 import Callout from '../ui/Callout.vue';
 import Card from '../ui/Card.vue';
+import DisclosureSummary from '../ui/DisclosureSummary.vue';
 import EmptyState from '../ui/EmptyState.vue';
 import Field from '../ui/Field.vue';
 import Input from '../ui/Input.vue';
 import KeyValue from '../ui/KeyValue.vue';
 import Spinner from '../ui/Spinner.vue';
 import ConfirmDialog from '../dialogs/ConfirmDialog.vue';
+import SharingPane from './SharingPane.vue';
 
 const runner = useRunnerStore();
 
-const serverUrl = ref('http://127.0.0.1:8001');
+const serverUrl = ref('');
 const runnerName = ref('');
 const pairingCode = ref('');
 const unpairOpen = ref(false);
+const browseServer = ref('');
+const browseError = ref<string | null>(null);
 
 const status = computed(() => runner.state.status);
 const paired = computed(() => status.value?.paired === true);
@@ -41,13 +48,13 @@ const defaultName = computed(() =>
 const realtimeBadge = computed(() => {
     switch (runner.state.realtime) {
         case 'connected':
-            return { tone: 'ok' as const, label: 'connected' };
+            return { tone: 'ok' as const, label: 'Connected' };
         case 'connecting':
-            return { tone: 'warn' as const, label: 'connecting…' };
+            return { tone: 'warn' as const, label: 'Connecting…' };
         case 'unavailable':
-            return { tone: 'danger' as const, label: 'control plane unreachable' };
+            return { tone: 'danger' as const, label: 'Dashboard unreachable' };
         default:
-            return { tone: 'neutral' as const, label: 'not connected' };
+            return { tone: 'neutral' as const, label: 'Not connected' };
     }
 });
 
@@ -83,18 +90,60 @@ async function unpair(): Promise<void> {
     await runner.unpair();
     unpairOpen.value = false;
 }
+
+async function openDashboard(): Promise<void> {
+    browseError.value = null;
+    try {
+        const address = browseServer.value.trim() || status.value?.serverUrl || '';
+        const parsed = new URL(address);
+        if (!['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password)
+            throw new Error('Enter your BuildBridge server address.');
+        await useBackend().openUrl(parsed.toString());
+    } catch (error) {
+        browseError.value = describeError(error);
+    }
+}
 </script>
 
 <template>
     <div class="mx-auto max-w-4xl space-y-4 p-5">
         <header>
-            <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">Control plane</h1>
+            <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">Remote builds</h1>
             <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-                Optional. This desktop builds on its own; pairing it to a control plane adds
-                starting builds from any browser and a record of every build. The machines here
-                still do all the building.
+                Build on another computer, or let trusted people build on this one. Local builds
+                work without a connection.
             </p>
         </header>
+
+        <Card v-if="!paired">
+            <template #title>Use a shared builder</template>
+            <template #description
+                >Open the address included with your invitation, sign in and enter the code to
+                request access.</template
+            >
+            <form class="space-y-3" @submit.prevent="openDashboard">
+                <Field
+                    label="BuildBridge server address"
+                    required
+                    hint="Use the address included with the sharing invitation."
+                    ><Input
+                        v-model="browseServer"
+                        type="url"
+                        placeholder="https://buildbridge.example"
+                /></Field>
+                <Callout v-if="browseError" tone="danger">{{ browseError }}</Callout>
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                    <p class="text-xs text-zinc-500 dark:text-zinc-400">
+                        This computer does not need to accept builds.
+                    </p>
+                    <Button type="submit" size="sm" :disabled="!browseServer.trim()"
+                        ><ExternalLink class="h-3.5 w-3.5" />Open in browser</Button
+                    >
+                </div>
+            </form>
+        </Card>
+
+        <SharingPane v-if="paired" />
 
         <Callout
             v-if="status?.credentialsMissing"
@@ -106,8 +155,9 @@ async function unpair(): Promise<void> {
                 >as <b>{{ status.runnerName }}</b></template
             >
             , but its token is gone from this host's operating-system keyring — the same thing that
-            happens when the keyring is reset. Generate a new pairing code in the control plane and
-            pair again; machines, projects and artifacts on this host are unaffected.
+            happens when the keyring is reset. Open the dashboard in your browser to generate a new
+            pairing code and pair again; machines, projects and artifacts on this host are
+            unaffected.
         </Callout>
 
         <Callout v-if="runner.state.error" tone="danger">
@@ -123,7 +173,7 @@ async function unpair(): Promise<void> {
                         <Badge :tone="realtimeBadge.tone">{{ realtimeBadge.label }}</Badge>
                     </span>
                 </template>
-                <template #description>Paired and reporting its machines</template>
+                <template #description>Remote builds run on this computer.</template>
                 <template #actions>
                     <Button
                         variant="outline"
@@ -143,31 +193,39 @@ async function unpair(): Promise<void> {
                 <KeyValue
                     :items="[
                         { label: 'Runner ID', value: status.runnerId, mono: true },
-                        { label: 'Control plane', value: status.serverUrl, mono: true },
+                        { label: 'BuildBridge server', value: status.serverUrl, mono: true },
                         { label: 'Version', value: status.version, mono: true },
                         { label: 'Host', value: `${status.platform} / ${status.architecture}` },
                         { label: 'Token storage', value: 'Operating-system credential vault' },
                     ]"
                 />
-                <p class="mt-3 text-[11px] leading-4 text-zinc-500 dark:text-zinc-400">
-                    Builds are claimed when the channel connects or a queue event arrives, and the
-                    20-second heartbeat reports back anything still waiting, so a missed event is
-                    caught within a heartbeat. The heartbeat also reports the machines here, so the
-                    control plane can queue a signed archive on any machine that is ready — of the
-                    approved folder as it is, or of a branch, tag, or commit of the same project.
-                </p>
+                <details class="mt-3">
+                    <DisclosureSummary
+                        class="cursor-pointer text-xs font-medium text-zinc-700 dark:text-zinc-200"
+                    >
+                        How remote builds work
+                    </DisclosureSummary>
+                    <p class="mt-2 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                        Queue builds for projects you have approved on this computer. Native Mac
+                        builds require a full commit SHA. Virtual Mac and Android builders can use
+                        the approved local folder or a Git revision.
+                    </p>
+                </details>
             </Card>
 
             <Card v-else>
-                <template #title>Pair this host with the control plane</template>
+                <template #title>Connect this computer to accept builds</template>
                 <template #description>
-                    Nothing here is needed to build locally. Pair when you want to queue a signed
-                    archive from another device, or keep build history somewhere the desktop is not.
-                    Generate a single-use code in the control plane and enter it here; the resulting
-                    token is stored only in the operating-system vault.
+                    Open the dashboard in your browser and choose Pair runner to get a pairing code.
+                    Enter it here to connect this computer to your account. You approve access for
+                    other people separately.
                 </template>
                 <form class="space-y-3" @submit.prevent="pair">
-                    <Field label="Control plane URL">
+                    <Field
+                        label="BuildBridge server address"
+                        required
+                        hint="Use the same address where you generated the pairing code."
+                    >
                         <Input
                             v-model="serverUrl"
                             type="url"
@@ -175,12 +233,12 @@ async function unpair(): Promise<void> {
                         />
                     </Field>
                     <Field
-                        label="Runner name"
+                        label="Name for this desktop"
                         :hint="`Defaults to ${defaultName || 'platform-architecture'}`"
                     >
                         <Input v-model="runnerName" :placeholder="defaultName" :maxlength="80" />
                     </Field>
-                    <Field label="Pairing code">
+                    <Field label="Pairing code" required>
                         <Input
                             v-model="pairingCode"
                             mono
@@ -193,14 +251,16 @@ async function unpair(): Promise<void> {
                         <Button
                             type="submit"
                             size="sm"
-                            :disabled="runner.state.pairing || !pairingCode.trim()"
+                            :disabled="
+                                runner.state.pairing || !pairingCode.trim() || !serverUrl.trim()
+                            "
                         >
                             <Spinner
                                 v-if="runner.state.pairing"
                                 tone="text-white dark:text-zinc-950"
                             />
                             <Plus v-else class="h-3.5 w-3.5" />
-                            Pair securely
+                            Connect this computer
                         </Button>
                     </div>
                 </form>
@@ -257,7 +317,7 @@ async function unpair(): Promise<void> {
                 The runner token is removed from the operating-system vault and this desktop stops
                 receiving builds. Machines and their disks are not affected.
             </p>
-            <p>Revoke the runner in the web control plane as well so the token cannot be reused.</p>
+            <p>Also remove this builder in the dashboard to revoke its access.</p>
         </ConfirmDialog>
     </div>
 </template>

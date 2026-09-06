@@ -17,6 +17,8 @@ use reqwest::{Client, StatusCode, Url};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+mod sharing;
+
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
     #[error("invalid control-plane URL: {0}")]
@@ -27,13 +29,31 @@ pub enum RunnerError {
     Api { status: StatusCode, message: String },
     #[error("runner protocol {actual} is incompatible with protocol {expected}")]
     ProtocolMismatch { expected: u32, actual: u32 },
+    #[error("artifact transfer failed: {0}")]
+    Artifact(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ApiClient {
     base_url: Url,
     token: String,
     http: Client,
+    lease_token: Option<String>,
+}
+
+/// The runner token and the build lease are secrets; a client that reaches a log or an error
+/// message shows where it talks to and that it holds them, never their values.
+impl std::fmt::Debug for ApiClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiClient")
+            .field("base_url", &self.base_url.as_str())
+            .field("token", &"<redacted>")
+            .field(
+                "lease_token",
+                &self.lease_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl ApiClient {
@@ -42,6 +62,7 @@ impl ApiClient {
             base_url: normalize_base_url(server_url)?,
             token: token.into(),
             http: http_client()?,
+            lease_token: None,
         })
     }
 
@@ -129,9 +150,10 @@ impl ApiClient {
         build_id: &str,
         lines: Vec<BuildLogLine>,
     ) -> Result<(), RunnerError> {
+        let path = build_path(build_id, "logs")?;
         for chunk in lines.chunks(100) {
             self.post_empty(
-                &format!("api/runner/builds/{build_id}/logs"),
+                &path,
                 &AppendLogsRequest {
                     lines: chunk.to_vec(),
                 },
@@ -145,15 +167,11 @@ impl ApiClient {
     /// Extends the lease on a running build. Long jobs call this well inside the lease window,
     /// otherwise the control plane treats the build as abandoned and offers it again.
     pub async fn renew_lease(&self, build_id: &str) -> Result<RenewLeaseResponse, RunnerError> {
-        let response = self
+        let request = self
             .http
-            .post(endpoint(
-                &self.base_url,
-                &format!("api/runner/builds/{build_id}/lease"),
-            )?)
-            .bearer_auth(&self.token)
-            .send()
-            .await?;
+            .post(endpoint(&self.base_url, &build_path(build_id, "lease")?)?)
+            .bearer_auth(&self.token);
+        let response = self.lease_request(request).send().await?;
 
         decode(response).await
     }
@@ -163,7 +181,7 @@ impl ApiClient {
         build_id: &str,
         request: &CompleteBuildRequest,
     ) -> Result<(), RunnerError> {
-        self.post_empty(&format!("api/runner/builds/{build_id}/complete"), request)
+        self.post_empty(&build_path(build_id, "complete")?, request)
             .await
     }
 
@@ -172,13 +190,12 @@ impl ApiClient {
         path: &str,
         body: &T,
     ) -> Result<(), RunnerError> {
-        let response = self
+        let request = self
             .http
             .post(endpoint(&self.base_url, path)?)
             .bearer_auth(&self.token)
-            .json(body)
-            .send()
-            .await?;
+            .json(body);
+        let response = self.lease_request(request).send().await?;
 
         ensure_success(response).await
     }
@@ -421,6 +438,15 @@ fn endpoint(base_url: &Url, path: &str) -> Result<Url, RunnerError> {
         .map_err(|error| RunnerError::InvalidUrl(error.to_string()))
 }
 
+/// The path of one build's sub-resource. A build id the control plane issued is a plain
+/// identifier; one that could reshape the path is refused before any request is made.
+fn build_path(build_id: &str, resource: &str) -> Result<String, RunnerError> {
+    Ok(format!(
+        "api/runner/builds/{}/{resource}",
+        sharing::checked_id(build_id)?
+    ))
+}
+
 fn ensure_protocol(actual: u32) -> Result<(), RunnerError> {
     if actual == PROTOCOL_VERSION {
         Ok(())
@@ -494,5 +520,51 @@ mod tests {
         assert!(normalize_base_url("http://localhost:8000").is_ok());
         assert!(normalize_base_url("http://127.0.0.1:8000").is_ok());
         assert!(normalize_base_url("http://[::1]:8000").is_ok());
+    }
+
+    #[test]
+    fn build_ids_cannot_reshape_the_log_lease_and_completion_paths() {
+        assert_eq!(
+            build_path("build-1", "logs").unwrap(),
+            "api/runner/builds/build-1/logs"
+        );
+        assert_eq!(
+            build_path("01J-TEST_42", "lease").unwrap(),
+            "api/runner/builds/01J-TEST_42/lease"
+        );
+        for build_id in ["", "../sharing", "a/b", "a?x=1", "a#x", "a%2Fb", "a b"] {
+            for resource in ["logs", "lease", "complete"] {
+                let error = build_path(build_id, resource).expect_err(build_id);
+                assert!(
+                    error.to_string().contains("invalid resource identifier"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_client_never_prints_its_runner_token_or_lease() {
+        let client = ApiClient::new("https://builds.example.test", "runner-secret-token")
+            .expect("valid client");
+        let build = ClaimedBuild {
+            id: "build-1".into(),
+            kind: BuildKind::Diagnostics,
+            payload: serde_json::json!({}),
+            lease_expires_at: "2999-01-01T00:00:00Z".into(),
+            next_log_sequence: 1,
+            authorization: None,
+            lease_token: Some("lease-secret-value".into()),
+        };
+        for shown in [
+            format!("{client:?}"),
+            format!("{:?}", client.for_build(&build)),
+            format!("{:#?}", client.for_build(&build)),
+        ] {
+            assert!(!shown.contains("runner-secret-token"), "{shown}");
+            assert!(!shown.contains("lease-secret-value"), "{shown}");
+            assert!(shown.contains("builds.example.test"), "{shown}");
+            assert!(shown.contains("<redacted>"), "{shown}");
+        }
     }
 }

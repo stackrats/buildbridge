@@ -135,11 +135,8 @@ async function remove(): Promise<void> {
 
         <div class="space-y-3">
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                BuildBridge creates a dedicated keychain in the guest, imports the attached
-                identities as non-extractable, installs the matching profiles, and proves each
-                private key works by signing and strictly verifying a disposable binary. Passwords
-                travel from the vault to a fixed native helper over protected SSH input and never
-                appear in arguments or logs.
+                Prepares the attached credentials for signing on this machine and verifies they
+                work. Do this once, then repeat after changing credentials or renewing certificates.
             </p>
 
             <Callout
@@ -194,6 +191,13 @@ async function remove(): Promise<void> {
                 ]"
             />
         </div>
+
+        <template #details>
+            BuildBridge creates a dedicated guest keychain, imports identities as non-extractable,
+            installs matching profiles, and tests each private key by signing and verifying a
+            disposable binary. Passwords travel from the host vault over protected SSH input and
+            never appear in arguments or logs.
+        </template>
 
         <ConfirmDialog
             v-model:open="removeOpen"

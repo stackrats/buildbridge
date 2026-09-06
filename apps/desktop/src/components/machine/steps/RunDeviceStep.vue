@@ -554,7 +554,7 @@ const runFacts = computed(() =>
 </script>
 
 <template>
-    <StepPanel :step="step">
+    <StepPanel :step="step" details-label="Build recipe and device checks">
         <template #action>
             <span
                 v-if="readiness.substate === 'attach' && usbOptions.length > 1"
@@ -817,64 +817,72 @@ const runFacts = computed(() =>
             </p>
         </template>
 
-        <div class="space-y-3">
-            <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                Builds the App scheme in the Debug configuration with the development identity,
-                installs it on the phone through <span class="font-mono">devicectl</span>, launches
-                it, and streams its console into the log drawer until you stop. The phone is handed
-                to QEMU by USB bus and port, so it disappears from this host while attached.
-            </p>
-            <KeyValue :items="recipe" :columns="3" />
-            <!-- Every rung at once: the ladder says what to do next, this says where it stands. -->
-            <p class="text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400">
-                Every check, in order · {{ passedChecks }} of {{ checks.length }} passed
-            </p>
-            <ul class="grid gap-2 sm:grid-cols-2">
-                <li
-                    v-for="check in checks"
-                    :key="check.label"
-                    class="flex items-start gap-2 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950"
-                >
-                    <CircleCheck
-                        v-if="check.ok"
-                        class="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-700 dark:text-emerald-400"
-                    />
-                    <Circle
-                        v-else
-                        class="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500"
-                    />
-                    <span class="min-w-0">
-                        <span class="block text-xs font-medium text-zinc-700 dark:text-zinc-200">{{
-                            check.label
-                        }}</span>
-                        <span
-                            class="block truncate text-xs text-zinc-500 dark:text-zinc-400"
-                            :title="check.detail"
-                            >{{ check.detail }}</span
-                        >
-                    </span>
-                </li>
-            </ul>
-            <div class="flex flex-wrap items-center gap-2">
-                <Button
-                    v-if="usb.host.rule === 'installed'"
-                    variant="ghost"
-                    size="sm"
-                    :disabled="busy"
-                    title="Restores usbmuxd handling of iPhones on this host"
-                    @click="machines.removeUsbRule(session.id)"
-                >
-                    <Spinner v-if="session.operation === 'usb-rule'" />
-                    <Smartphone v-else class="h-3.5 w-3.5" />
-                    Remove host rule
-                </Button>
-                <p class="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                    Self-hosted and experimental. Passthrough depends on the host releasing the
-                    phone and on QEMU's USB stack; Apple's supported route to a physical device is a
-                    Mac. Xcode's debugger and Instruments are not part of this step.
+        <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
+            Builds, installs, and launches a Debug version on your iPhone, then streams its console.
+            While attached, the phone belongs to this machine and is unavailable to other apps on
+            the host. Stop ends the console session; the app stays installed.
+        </p>
+        <p class="mt-2 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+            Self-hosted and experimental. USB passthrough depends on the host and machine. Apple's
+            supported route to a physical device is a Mac. Xcode's debugger and Instruments are not
+            part of this step.
+        </p>
+
+        <template #details>
+            <div class="space-y-3">
+                <p>
+                    Builds the App scheme in Debug with the development identity. Xcode's
+                    <span class="font-mono">devicectl</span> installs and launches the app on the
+                    attached phone; its console streams until you stop the session.
                 </p>
+                <KeyValue :items="recipe" :columns="3" />
+                <!-- Every rung at once: the ladder says what to do next, this says where it stands. -->
+                <p class="text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400">
+                    Every check, in order · {{ passedChecks }} of {{ checks.length }} passed
+                </p>
+                <ul class="grid gap-2 sm:grid-cols-2">
+                    <li
+                        v-for="check in checks"
+                        :key="check.label"
+                        class="flex items-start gap-2 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950"
+                    >
+                        <CircleCheck
+                            v-if="check.ok"
+                            class="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-700 dark:text-emerald-400"
+                        />
+                        <Circle
+                            v-else
+                            class="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500"
+                        />
+                        <span class="min-w-0">
+                            <span
+                                class="block text-xs font-medium text-zinc-700 dark:text-zinc-200"
+                                >{{ check.label }}</span
+                            >
+                            <span
+                                class="block truncate text-xs text-zinc-500 dark:text-zinc-400"
+                                v-tip="check.detail"
+                                >{{ check.detail }}</span
+                            >
+                        </span>
+                    </li>
+                </ul>
+                <div class="flex flex-wrap items-center gap-2">
+                    <Button
+                        v-if="usb.host.rule === 'installed'"
+                        variant="ghost"
+                        size="sm"
+                        :disabled="busy"
+                        title="Restores usbmuxd handling of iPhones on this host"
+                        @click="machines.removeUsbRule(session.id)"
+                    >
+                        <Spinner v-if="session.operation === 'usb-rule'" />
+                        <Smartphone v-else class="h-3.5 w-3.5" />
+                        Remove host rule
+                    </Button>
+                </div>
             </div>
-        </div>
+        </template>
 
         <ConfirmDialog
             v-model:open="rebuildOpen"

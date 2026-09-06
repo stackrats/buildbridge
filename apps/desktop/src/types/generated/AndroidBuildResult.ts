@@ -10,4 +10,4 @@ export type AndroidBuildResult = { applicationId: string, versionName: string, v
 /**
  * The debug APK, retained on this host; `None` on records from before it was kept.
  */
-apk: AndroidArtifact | null, outputTail: Array<string>, };
+apk: AndroidArtifact | null, allowHttp: boolean, outputTail: Array<string>, };

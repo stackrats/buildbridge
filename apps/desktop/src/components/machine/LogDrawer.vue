@@ -11,6 +11,7 @@ import { clamp } from '../../lib/utils';
 import { activityLabel, useMachinesStore, type MachineSession } from '../../stores/machines';
 import { useUi, type LogSource } from '../../stores/ui';
 import type { LogLine } from '../ui/LogView.vue';
+import Button from '../ui/Button.vue';
 import Chip from '../ui/Chip.vue';
 import LogView from '../ui/LogView.vue';
 
@@ -273,14 +274,18 @@ onBeforeUnmount(() => {
                     }}</span>
                 </Chip>
             </div>
-            <button
-                type="button"
-                class="flex h-6 w-6 shrink-0 items-center justify-center rounded-[5px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50 dark:focus-visible:outline-zinc-300"
+            <Button
+                variant="ghost"
+                size="iconSm"
+                class="shrink-0"
+                :title="open ? 'Collapse log' : 'Expand log'"
+                :aria-label="open ? 'Collapse log' : 'Expand log'"
+                :aria-expanded="open"
                 @click="toggle"
             >
                 <ChevronDown v-if="open" class="h-3.5 w-3.5" />
                 <ChevronUp v-else class="h-3.5 w-3.5" />
-            </button>
+            </Button>
         </div>
         <Transition
             enter-active-class="transition-opacity duration-150 motion-reduce:transition-none"

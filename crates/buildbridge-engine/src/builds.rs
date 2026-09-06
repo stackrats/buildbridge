@@ -441,6 +441,15 @@ pub(crate) async fn sync_apple_workspace_from(
     machine_id: &str,
     source: Option<(PathBuf, WorkspaceSource)>,
 ) -> Result<SyncAppleWorkspaceResult, String> {
+    sync_apple_workspace_with_env(app, machine_id, source, None).await
+}
+
+pub(crate) async fn sync_apple_workspace_with_env(
+    app: &Engine,
+    machine_id: &str,
+    source: Option<(PathBuf, WorkspaceSource)>,
+    env_override: Option<Option<String>>,
+) -> Result<SyncAppleWorkspaceResult, String> {
     let paths = MachinePaths::resolve(app, machine_id)?;
     let profile = machines::load_registry(app)?
         .find(machine_id)?
@@ -460,7 +469,12 @@ pub(crate) async fn sync_apple_workspace_from(
             WorkspaceSource::folder(),
         )
     });
-    let env_files = guest_env_files_for(app, machine_id).await?;
+    let env_files = match env_override {
+        Some(id) => guest_env_files_for_set(id.as_deref())
+            .await?
+            .map(|(_, files)| files),
+        None => guest_env_files_for(app, machine_id).await?,
+    };
     let guard = begin_machine_operation(app, machine_id, "synchronizing")?;
 
     let event_app = app.clone();
@@ -574,10 +588,14 @@ pub async fn run_apple_smoke_build(
 
     Ok(RunAppleSmokeBuildResult { view, build })
 }
+/// The signed archive. A requested version is written into the project on the host and
+/// applied inside the guest for this archive, so the project and the IPA say the same thing
+/// without a new sync; with none, the archive carries the version the synced project has.
 pub async fn run_apple_signed_archive(
     app: &Engine,
     machine_id: String,
     env_set_id: Option<String>,
+    version: Option<ProjectVersionInput>,
 ) -> Result<RunAppleArchiveResult, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     remove_apple_archive_error(&paths)?;
@@ -601,6 +619,7 @@ pub async fn run_apple_signed_archive(
                 .to_string(),
         );
     }
+    let requested_version = resolve_apple_project_version(&workspace.local_path, version)?;
     let current = build_machine_view(app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let signing = current
@@ -642,6 +661,14 @@ pub async fn run_apple_signed_archive(
             return Err(error);
         }
     };
+    // The project takes the version before the archive does, so it is never behind an IPA.
+    if let Some(version) = &requested_version
+        && let Err(error) = write_apple_project_version(&workspace.local_path, version)
+    {
+        drop(guard);
+        let _ = fs::remove_dir(&output_directory);
+        return Err(error);
+    }
 
     let event_app = app.clone();
     let event_machine_id = machine_id.clone();
@@ -661,6 +688,7 @@ pub async fn run_apple_signed_archive(
             &scheme,
             &keychain_password,
             chosen_env.as_ref().map(|(_, files)| files),
+            requested_version.as_ref(),
             &operation_output_directory,
             |progress: AppleArchiveProgress| {
                 emit_machine_progress(
@@ -726,6 +754,7 @@ pub async fn reveal_apple_archive(app: &Engine, machine_id: String) -> Result<()
 }
 pub async fn clear_apple_archive(app: &Engine, machine_id: String) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
+    let guard = begin_machine_operation(app, &machine_id, "clearing_archive")?;
     if let Some(stored) = load_apple_archive(&paths)? {
         let directory = validated_apple_archive_directory(&paths, &stored.result)?;
         fs::remove_dir_all(directory)
@@ -734,5 +763,6 @@ pub async fn clear_apple_archive(app: &Engine, machine_id: String) -> Result<Mac
     remove_apple_archive_record(&paths)?;
     remove_apple_archive_error(&paths)?;
 
+    drop(guard);
     build_machine_view(app, &paths).await
 }

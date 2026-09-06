@@ -7,6 +7,9 @@
 
 import type { Backend, DragDropEvent, Unlisten } from './backend';
 import type * as T from '../types/backend';
+import { isAndroid, machinePorts, providerLabel } from '../model/providers';
+import { createSharingPreview } from './backend-sharing-mock';
+import { createCredentialPreview } from './backend-credentials-mock';
 
 type Handler<P> = (payload: P) => void;
 
@@ -145,6 +148,8 @@ interface MockMachine {
     xcodeSelected: boolean;
     iosSimulatorRuntime: string | null;
     workspace: T.StoredAppleWorkspace | null;
+    /** What the approved project's own files declare; a build that sets one writes it here. */
+    projectVersion: T.ProjectVersion | null;
     signing: T.SigningProvisioningResult | null;
     archive: T.AppleArchiveResult | null;
     archiveError: string | null;
@@ -221,6 +226,7 @@ function readyMachine(): MockMachine {
             lastBuildTarget: 'simulator',
             debugBundleIdentifier: null,
         },
+        projectVersion: { version: '3.2.0', build: '15' },
         signing: {
             keychainPath: '/Users/builder/Library/Keychains/buildbridge-signing.keychain-db',
             distributionIdentity: {
@@ -318,6 +324,7 @@ function freshMachine(): MockMachine {
         xcodeSelected: false,
         iosSimulatorRuntime: null,
         workspace: null,
+        projectVersion: null,
         signing: null,
         archive: null,
         archiveError: null,
@@ -356,6 +363,7 @@ function androidMachine(): MockMachine {
         startedAt: new Date(Date.now() - 40 * 60 * 1000).toISOString(),
         usbContainer: false,
         phoneController: false,
+        projectVersion: { version: '3.2.0', build: '12' },
         android: {
             workspace: {
                 localPath: '/home/you/projects/example-app',
@@ -367,6 +375,7 @@ function androidMachine(): MockMachine {
                 lastSyncBytes: 28_278_463,
                 lastBuildSucceeded: true,
                 lastBuild: {
+                    allowHttp: false,
                     applicationId: 'com.example.app.debug',
                     versionName: '3.2.0',
                     versionCode: '12',
@@ -421,6 +430,7 @@ function slug(name: string): string {
 
 export function createMockBackend(): Backend {
     const emitter = new Emitter();
+    const googlePlayConnections = new Map<string, T.GooglePlayConnection>();
     // A few optimizer items so the section can be previewed; the real catalogue lives in Rust.
     const appliedOptimizations = new Set<string>(['default:reduce-motion']);
     const optimizationCatalogue: Omit<T.GuestOptimization, 'applied'>[] = [
@@ -580,6 +590,7 @@ export function createMockBackend(): Backend {
     const vaultCleared =
         typeof location !== 'undefined' && new URLSearchParams(location.search).has('vaultCleared');
     const storedKits = () => (vaultCleared ? [] : kits);
+    const credentials = createCredentialPreview(storedKits);
     const kitComplete = (kit: T.SigningKitSummary, machine: MockMachine) =>
         machine.android
             ? kit.androidKeystoreConfigured && kit.androidKeystorePasswordStored
@@ -693,6 +704,10 @@ export function createMockBackend(): Backend {
                 devices: running ? machine.guestDevices.map((device) => ({ ...device })) : [],
             },
             appleWorkspace: machine.workspace ? { ...machine.workspace } : null,
+            projectVersion:
+                machine.workspace || machine.android?.workspace
+                    ? machine.projectVersion && { ...machine.projectVersion }
+                    : null,
             signing: machine.signing ? { ...machine.signing } : null,
             archive: machine.archive ? { ...machine.archive } : null,
             archiveEnvSet: machine.archiveEnvSet ?? null,
@@ -746,6 +761,23 @@ export function createMockBackend(): Backend {
         };
     };
 
+    // Either half alone keeps the other as the project declares it, as the engine resolves it;
+    // the project is then updated, the way the engine writes the version into its files.
+    const applyVersion = (
+        machine: MockMachine,
+        input: T.ProjectVersionInput | null | undefined,
+    ): T.ProjectVersion | null => {
+        if (!input || (!input.version?.trim() && !input.build?.trim())) return null;
+        const version = input.version?.trim() || machine.projectVersion?.version;
+        const build = input.build?.trim() || machine.projectVersion?.build;
+        if (!version || !build)
+            throw new Error(
+                'BuildBridge could not read one version and build number from the project, so give both to set them.',
+            );
+        machine.projectVersion = { version, build };
+        return machine.projectVersion;
+    };
+
     const list = (): T.MachineListView => ({
         host: hostReady,
         machines: machines.map((machine) => ({
@@ -788,6 +820,7 @@ export function createMockBackend(): Backend {
     ];
 
     return {
+        ...createSharingPreview(emitter, query),
         async getRunnerStatus() {
             await sleep(150);
             return {
@@ -796,8 +829,8 @@ export function createMockBackend(): Backend {
                 serverUrl: paired ? 'https://buildbridge.test' : null,
                 runnerId: paired ? '9c1f2a3b-4d5e-4f60-8a7b-1c2d3e4f5a6b' : null,
                 runnerName: paired ? 'linux-builder' : null,
-                platform: 'linux',
-                architecture: 'x86_64',
+                platform: query.has('nativeMac') ? 'macos' : 'linux',
+                architecture: query.has('nativeMac') ? 'aarch64' : 'x86_64',
                 version: '0.1.0',
             };
         },
@@ -829,9 +862,14 @@ export function createMockBackend(): Backend {
         },
         async createMachine(profile, templateId) {
             await sleep(200);
-            if (machines.some((machine) => machine.config.sshPort === profile.sshPort)) {
+            const ports = machinePorts(profile);
+            if (
+                machines.some((machine) =>
+                    machinePorts(machine.config).some((port) => ports.includes(port)),
+                )
+            ) {
                 throw new Error(
-                    `SSH port ${profile.sshPort} is already used by another machine. Choose a different port.`,
+                    `SSH or screen port ${profile.sshPort} is already used by another machine. Choose a different port.`,
                 );
             }
             const machine = freshMachine();
@@ -842,6 +880,16 @@ export function createMockBackend(): Backend {
                 const template = templates.find((entry) => entry.id === templateId);
                 if (!template) {
                     throw new Error('That template is no longer stored.');
+                }
+                if (isAndroid(profile.provider)) {
+                    throw new Error(
+                        'An Android toolchain has no disk to clone; templates are for macOS machines.',
+                    );
+                }
+                if (template.provider !== profile.provider) {
+                    throw new Error(
+                        `The template ${template.name} was saved from a ${providerLabel[template.provider]} machine; choose that provider to clone it.`,
+                    );
                 }
                 machine.templateId = templateId;
                 template.machineNames.push(machine.config.name);
@@ -1311,6 +1359,11 @@ export function createMockBackend(): Backend {
         async openUrl(url) {
             window.open(url, '_blank', 'noopener');
         },
+        async openAndroidInspector() {
+            throw new Error(
+                'Open inspector is available in the desktop app. Copy the inspector URL into Chrome or Chromium to inspect your device.',
+            );
+        },
         async openDeveloperTools() {
             // The browser preview already has its own developer tools.
         },
@@ -1339,9 +1392,10 @@ export function createMockBackend(): Backend {
                 };
             });
         },
-        async runSignedArchive(machineId, envSetId) {
+        async runSignedArchive(machineId, envSetId, version = null) {
             const machine = find(machineId);
             machine.archiveEnvSet = envSets.find((set) => set.id === envSetId)?.name ?? null;
+            const requested = applyVersion(machine, version);
             return busy(machine, 'Building the signed archive', async () => {
                 const phases: T.AppleArchivePhase[] = [
                     'preparing',
@@ -1368,12 +1422,44 @@ export function createMockBackend(): Backend {
                     );
                     await sleep(600);
                 }
-                machine.archive = readyMachine().archive;
+                const archive = readyMachine().archive as T.AppleArchiveResult;
+                if (requested) {
+                    archive.marketingVersion = requested.version;
+                    archive.buildNumber = requested.build;
+                }
+                machine.archive = archive;
                 machine.archiveError = null;
-                return { view: view(machine), archive: machine.archive as T.AppleArchiveResult };
+                return { view: view(machine), archive };
             });
         },
         async revealArchive() {},
+        async uploadAppleArchive(machineId, expectedSha256) {
+            const machine = find(machineId);
+            const current = view(machine);
+            if (!current.archive || current.archive.ipa.sha256 !== expectedSha256) {
+                throw new Error(
+                    'The retained IPA changed. Review the current release before uploading.',
+                );
+            }
+            if (!current.signingKit?.appStoreConnectConfigured) {
+                throw new Error(
+                    'Attach signing credentials with an App Store Connect Team API key first.',
+                );
+            }
+            if (
+                current.runtime.state !== 'running' ||
+                !current.guest.ssh.reachable ||
+                current.guest.ssh.trust !== 'trusted' ||
+                !current.guest.diagnostics.authenticated
+            ) {
+                throw new Error(
+                    'Start the macOS machine and authorize trusted guest access first.',
+                );
+            }
+            await busy(machine, 'uploading_archive', async () => {
+                await sleep(1500);
+            });
+        },
         async cancelMachineOperation(machineId) {
             // Every preview operation is a short timer except the device console, which streams
             // until asked to stop.
@@ -1461,7 +1547,7 @@ export function createMockBackend(): Backend {
                 };
             });
         },
-        async runAndroidDebugBuild(machineId) {
+        async runAndroidDebugBuild(machineId, allowHttp = false) {
             const machine = find(machineId);
             return busy(machine, 'Running the debug build', async () => {
                 const phases: T.AndroidBuildPhase[] = [
@@ -1489,6 +1575,7 @@ export function createMockBackend(): Backend {
                     await sleep(500);
                 }
                 const build: T.AndroidBuildResult = {
+                    allowHttp,
                     applicationId: 'com.example.app.debug',
                     versionName: '3.2.0',
                     versionCode: '12',
@@ -1511,8 +1598,9 @@ export function createMockBackend(): Backend {
                 return { view: view(machine), build };
             });
         },
-        async runAndroidRelease(machineId, envSetId) {
+        async runAndroidRelease(machineId, envSetId, outputs = 'both', version = null) {
             const machine = find(machineId);
+            const requested = applyVersion(machine, version);
             return busy(machine, 'Building the signed release', async () => {
                 const phases: T.AndroidReleasePhase[] = [
                     'preparing',
@@ -1539,6 +1627,12 @@ export function createMockBackend(): Backend {
                     await sleep(600);
                 }
                 const release = androidMachine().android?.release as T.AndroidReleaseResult;
+                if (requested) {
+                    release.versionName = requested.version;
+                    release.versionCode = requested.build;
+                }
+                if (outputs === 'aab') release.apk = null;
+                if (outputs === 'apk') release.aab = null;
                 if (machine.android) {
                     machine.android.release = release;
                     machine.android.releaseError = null;
@@ -1550,6 +1644,85 @@ export function createMockBackend(): Backend {
         },
         async revealAndroidRelease() {},
         async revealAndroidDebugApk() {},
+        async listAndroidDevices(machineId) {
+            find(machineId);
+            await sleep(250);
+            return {
+                available: true,
+                issue: null,
+                devices: [
+                    { serial: 'emulator-5554', state: 'device', model: 'Pixel 9' },
+                    { serial: 'USB-PHONE', state: 'unauthorized', model: null },
+                ],
+            };
+        },
+        async runAndroidDevice(machineId, input) {
+            const machine = find(machineId);
+            const build =
+                input.kind === 'debug'
+                    ? machine.android?.workspace?.lastBuild
+                    : machine.android?.release;
+            if (!build?.apk || build.apk.sha256 !== input.expectedSha256)
+                throw new Error('The retained APK changed. Review it before installing.');
+            if (input.serial !== 'emulator-5554')
+                throw new Error('Authorize the device and refresh devices before installing.');
+            return busy(machine, 'running_android_device', async () => {
+                await sleep(1000);
+                return {
+                    serial: input.serial,
+                    applicationId: build.applicationId,
+                    sha256: build.apk!.sha256,
+                    installed: true,
+                    launched: true,
+                };
+            });
+        },
+        async googlePlayConnection(machineId) {
+            find(machineId);
+            return (
+                googlePlayConnections.get(machineId) ?? {
+                    configured: false,
+                    clientEmail: null,
+                    projectId: null,
+                }
+            );
+        },
+        async exportGooglePlayCredential() {
+            throw new Error(
+                'Open the desktop app to export the service account key. The browser preview has not saved a file.',
+            );
+        },
+        async configureGooglePlay(machineId, _path) {
+            find(machineId);
+            const connection = {
+                configured: true,
+                clientEmail: 'buildbridge@example.iam.gserviceaccount.com',
+                projectId: 'example',
+            };
+            googlePlayConnections.set(machineId, connection);
+            return connection;
+        },
+        async disconnectGooglePlay(machineId) {
+            googlePlayConnections.delete(machineId);
+        },
+        async uploadGooglePlay(machineId, expectedSha256) {
+            const machine = find(machineId);
+            const release = machine.android?.release;
+            if (!release?.aab || release.aab.sha256 !== expectedSha256)
+                throw new Error('The retained AAB changed. Review it before uploading.');
+            if (!googlePlayConnections.get(machineId)?.configured)
+                throw new Error('Import a Google Play service account first.');
+            return busy(machine, 'uploading_google_play', async () => {
+                await sleep(1500);
+                return {
+                    packageName: release.applicationId,
+                    versionCode: release.versionCode,
+                    track: 'internal',
+                    status: 'draft',
+                    sha256: expectedSha256,
+                };
+            });
+        },
         async downloadXcode(machineId, query) {
             // The preview has no Apple to talk to: the archive arrives over a few seconds.
             const fileName = `${query.replace(/\s+/g, '_')}.xip`;
@@ -1956,6 +2129,7 @@ export function createMockBackend(): Backend {
             await sleep(80);
             return storedKits().map((kit) => ({ ...kit }));
         },
+        ...credentials.backend,
         async saveSigningKit(input) {
             await sleep(250);
             const name = input.name.trim();
@@ -2017,6 +2191,7 @@ export function createMockBackend(): Backend {
             } else {
                 kits.push(merged);
             }
+            credentials.remember(merged.id, input);
             return kits.map((kit) => ({ ...kit }));
         },
         async deleteSigningKit(kitId) {
@@ -2025,6 +2200,7 @@ export function createMockBackend(): Backend {
                 throw new Error('These signing credentials are no longer stored.');
             }
             kits.splice(index, 1);
+            credentials.forget(kitId);
             for (const [machineId, attached] of Object.entries(attachments)) {
                 if (attached === kitId) {
                     attachments[machineId] = null;
@@ -2220,6 +2396,31 @@ export function createMockBackend(): Backend {
             ];
         },
 
+        async verifyAndroidSigningKit(kitId) {
+            await sleep(900);
+            const kit = kits.find((entry) => entry.id === kitId);
+            if (
+                !kit?.androidKeystoreConfigured ||
+                !kit.androidKeystorePasswordStored ||
+                !kit.androidKeyAlias
+            ) {
+                throw new Error(
+                    'Add a keystore, key alias and password before checking Android signing.',
+                );
+            }
+            return {
+                kitId,
+                keyAlias: kit.androidKeyAlias,
+                certificateSha256: '2f7c1e9a'.repeat(8),
+                certificateSha1: '17c54a98812074d03bc8127d6e445601fac38924',
+                algorithm: 'RSA',
+                keyBits: 2048,
+                validFromEpochSeconds: 1704067200,
+                validUntilEpochSeconds: 2493072000,
+                verifiedAtEpochSeconds: Math.floor(Date.now() / 1000),
+            };
+        },
+
         async createAndroidKeystore(kitId, input) {
             await sleep(900);
             const kit = kits.find((entry) => entry.id === kitId);
@@ -2239,6 +2440,7 @@ export function createMockBackend(): Backend {
             kit.androidKeyAlias = input.keyAlias.trim() || 'upload';
             kit.androidKeystorePasswordStored = true;
             kit.androidKeyPasswordStored = false;
+            credentials.remember(kitId, { androidKeystorePassword: input.password });
             return {
                 keystore: {
                     path: `/home/you/.config/dev.buildbridge.desktop/android-builder/keystores/upload-${Math.floor(Date.now() / 1000)}/upload.keystore`,
@@ -2303,6 +2505,9 @@ export function createMockBackend(): Backend {
                 return [`/path/to/AppStore.${extension ?? 'file'}`];
             }
             return [`/path/to/chosen.${extension ?? 'file'}`];
+        },
+        async pickSavePath(request) {
+            return `/path/to/${request.defaultPath}`;
         },
     };
 }

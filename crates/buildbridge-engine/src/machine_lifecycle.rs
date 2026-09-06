@@ -107,6 +107,20 @@ pub async fn delete_machine(
         drop(guard);
         return Err(error);
     }
+    // Remove this machine's publishing credential while its nonsecret vault reference
+    // still exists. Reusing a deleted machine's name must not reconnect its Play account.
+    // The marker goes with the machine's files either way, so a vault that will not answer
+    // cannot keep a machine on the host: its credential is unreachable without the marker.
+    if !provider.is_macos()
+        && let Err(error) = remove_google_play_credentials(app, &machine_id).await
+    {
+        emit_machine_progress(
+            app,
+            "machine-delete-warning",
+            &machine_id,
+            serde_json::json!({ "detail": error }),
+        );
+    }
     // The removal of the files runs while the operation is still held: emptying an Android
     // home goes through a container of its own, which a Stop must be able to reach.
     let files = tokio::task::spawn_blocking({
@@ -246,13 +260,21 @@ pub async fn launch_machine(app: &Engine, machine_id: String) -> Result<MachineV
 }
 pub async fn stop_machine(app: &Engine, machine_id: String) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
-    machines::load_registry(app)?.find(&machine_id)?;
+    let provider = machines::load_registry(app)?
+        .find(&machine_id)?
+        .config
+        .provider;
     let guard = begin_machine_operation(app, &machine_id, "stopping")?;
     let container_name = paths.container_name.clone();
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
         let _operation = buildbridge_machines::enter_operation(scope);
+        if !provider.is_macos() {
+            // A desktop restart may leave a detached job without an engine operation scope.
+            // Stop clears its job and staged credentials before the container is shut down.
+            let _ = buildbridge_machines::stop_android_jobs(&container_name);
+        }
         buildbridge_machines::stop(&container_name).map_err(|error| error.to_string())
     })
     .await

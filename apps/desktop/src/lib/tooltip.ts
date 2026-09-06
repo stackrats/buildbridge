@@ -34,7 +34,11 @@ export function showTip(element: HTMLElement, text: string): void {
         tooltip.anchor = element;
         tooltip.text = text;
         tooltip.open = true;
-        element.setAttribute('aria-describedby', TOOLTIP_ID);
+        const descriptions = new Set(
+            (element.getAttribute('aria-describedby') ?? '').split(/\s+/).filter(Boolean),
+        );
+        descriptions.add(TOOLTIP_ID);
+        element.setAttribute('aria-describedby', [...descriptions].join(' '));
     }, OPEN_DELAY_MS);
 }
 
@@ -43,7 +47,17 @@ export function hideTip(element?: HTMLElement): void {
         clearTimeout(timer);
         timer = null;
     }
-    (element ?? tooltip.anchor)?.removeAttribute('aria-describedby');
+    const owner = element ?? tooltip.anchor;
+    if (owner) {
+        const descriptions = (owner.getAttribute('aria-describedby') ?? '')
+            .split(/\s+/)
+            .filter((id) => id && id !== TOOLTIP_ID);
+        if (descriptions.length) {
+            owner.setAttribute('aria-describedby', descriptions.join(' '));
+        } else {
+            owner.removeAttribute('aria-describedby');
+        }
+    }
     tooltip.open = false;
     tooltip.anchor = null;
 }

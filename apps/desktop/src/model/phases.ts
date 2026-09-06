@@ -105,7 +105,7 @@ export const projectPhaseLabel: Record<AppleProjectPhase, string> = {
     building_web_assets: 'Building web assets',
     syncing_ios: 'Synchronizing Capacitor iOS',
     resolving_pods: 'Resolving CocoaPods',
-    building: 'Compiling for the Simulator',
+    building: 'Compiling the iOS app',
     completed: 'Completed',
 };
 

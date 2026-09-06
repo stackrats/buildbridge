@@ -14,8 +14,17 @@ import type {
 import { formatBytes, formatElapsed, relativeTime, secondsSince } from '../lib/format';
 import { isLive } from '../lib/status';
 import { deviceNextSummary, deviceReadiness, deviceWorkingSummary } from './device';
-import { isAndroid } from './providers';
-import { androidKitShortfall, kitIsProvisionable, kitShortfall, kitSignsAndroid } from './signing';
+import { androidDeviceApks } from './android-device';
+import type { AndroidDeviceRun } from './android-device';
+import { isAndroid, providerHostIssues, providerHostReady } from './providers';
+import { formatVersion } from './version';
+import {
+    androidKitShortfall,
+    kitIsProvisionable,
+    kitReadiness,
+    kitShortfall,
+    kitSignsAndroid,
+} from './signing';
 
 export type StepStatus = 'done' | 'active' | 'running' | 'pending' | 'failed';
 
@@ -32,7 +41,7 @@ export type StepKind = 'automatic' | 'manual' | 'assisted';
 // A device run is its own section rather than the tail of the build: it is optional, it needs
 // hardware on the desk, and counting it with the required steps made the journey look unfinished
 // on a machine that is doing exactly what was asked of it.
-export type StepPhase = 'setup' | 'build' | 'device';
+export type StepPhase = 'setup' | 'build' | 'device' | 'publish';
 
 export interface Step<Id extends string> {
     id: Id;
@@ -91,7 +100,7 @@ export type AndroidStepId =
     | 'signing-kit'
     | 'release';
 
-export type JourneyStepId = SetupStepId | BuildStepId | AndroidStepId;
+export type JourneyStepId = SetupStepId | BuildStepId | AndroidStepId | 'publish';
 
 export type SetupStep = Step<SetupStepId>;
 export type BuildStep = Step<BuildStepId>;
@@ -102,6 +111,7 @@ export const phaseLabel: Record<StepPhase, string> = {
     setup: 'Machine setup',
     build: 'Project build',
     device: 'On a real device',
+    publish: 'Publishing',
 };
 
 export const stepKindLabel: Record<StepKind, string> = {
@@ -113,7 +123,8 @@ export const stepKindLabel: Record<StepKind, string> = {
 export const stepKindDescription: Record<StepKind, string> = {
     automatic: 'BuildBridge performs this step end to end.',
     manual: 'BuildBridge cannot do this for you; follow the instructions and it verifies the result.',
-    assisted: 'BuildBridge starts this step and you confirm inside macOS or on the device.',
+    assisted:
+        'BuildBridge prepares this step; you finish it in the relevant app, service or device.',
 };
 
 /** Short, lowercase names for places with room for a few words, such as the sidebar. */
@@ -133,6 +144,7 @@ export const stepShortTitle: Record<JourneyStepId, string> = {
     archive: 'signed archive',
     release: 'signed release',
     'run-device': 'run on the device',
+    publish: 'publish the release',
 };
 
 /** What a pending step is waiting for. A pending row never just says "waiting". */
@@ -152,9 +164,11 @@ const unlockedBy: Record<JourneyStepId, string> = {
     archive: 'after signing is provisioned',
     release: 'after credentials with an upload key are attached',
     'run-device': 'after signing is provisioned',
+    publish: 'after a signed release is retained',
 };
 
 export interface StepContext {
+    androidDeviceRun?: AndroidDeviceRun | null;
     /** Step whose native operation this client started and is still awaiting. */
     runningStep: string | null;
     /**
@@ -213,6 +227,29 @@ export const unsignedBuildTargetLabel: Record<UnsignedBuildTarget, string> = {
     device_sdk: 'device SDK',
     simulator: 'Simulator',
 };
+
+/**
+ * The two compile targets of the unsigned build, as the one list every picker draws from. The
+ * Simulator entry names the installed runtime when the guest has one, and the download otherwise.
+ */
+export function unsignedBuildTargetOptions(
+    simulatorRuntime: string | null,
+): { value: UnsignedBuildTarget; label: string; description: string }[] {
+    return [
+        {
+            value: 'device_sdk',
+            label: 'iOS device SDK',
+            description: 'Recommended · installs the iOS platform only if Xcode requires it',
+        },
+        {
+            value: 'simulator',
+            label: 'iOS Simulator',
+            description: simulatorRuntime
+                ? `Runtime ${simulatorRuntime} installed · compiles only`
+                : 'About 8 GB download · compiles only',
+        },
+    ];
+}
 
 /** `Built with Xcode 26.6 · device SDK`; records from before the choice existed name no target. */
 function builtWith(workspace: {
@@ -500,7 +537,9 @@ export function deriveBuildSteps(view: MachineView, context: StepContext): Build
                   : kitReady
                     ? signingKit.signingCertificateConfigured
                         ? `${signingKit.name} · ${signingKit.signingCertificateName ?? 'certificate'} · ${profileCount} profile${profileCount === 1 ? '' : 's'}`
-                        : `${signingKit.name} · development identity only · phone builds, no archive`
+                        : kitReadiness(signingKit).archive === 'team_key'
+                          ? `${signingKit.name} · Team key · distribution signing created when provisioned`
+                          : `${signingKit.name} · development identity only · phone builds, no archive`
                     : signingKit === null
                       ? built
                           ? 'Attach signing credentials stored on this host, or store new ones'
@@ -559,8 +598,13 @@ export function deriveBuildSteps(view: MachineView, context: StepContext): Build
                     ? 'Locked: the credentials hold only a development identity; add a distribution identity and an App Store profile, then provision again'
                     : provisioned && built
                       ? workspace?.lastNativeLockUpdated
-                          ? 'Blocked: commit the refreshed Podfile.lock on the host and synchronize again'
-                          : 'Release configuration · App Store Connect export · app target only'
+                          ? 'Adopt the refreshed Podfile.lock into the project before signing, then commit it'
+                          : [
+                                formatVersion(view.projectVersion),
+                                'Release configuration · App Store Connect export · app target only',
+                            ]
+                                .filter(Boolean)
+                                .join(' · ')
                       : unlockedBy.archive,
     });
 
@@ -752,7 +796,7 @@ export function deriveAndroidSteps(view: MachineView, context: StepContext): And
     steps.push({
         id: 'release',
         phase: 'build',
-        title: 'Build the signed bundle and APK',
+        title: 'Build the signed release',
         kind: 'automatic',
         status: isRunning('release')
             ? 'running'
@@ -766,13 +810,18 @@ export function deriveAndroidSteps(view: MachineView, context: StepContext): And
         summary: isRunning('release')
             ? runningSummary(context, 'Bundling, signing, verifying, and transferring artifacts')
             : release
-              ? `${release.versionName} (${release.versionCode}) · bundle ${formatBytes(release.aab.bytes)} · APK ${formatBytes(release.apk.bytes)}`
+              ? `${release.versionName} (${release.versionCode}) · ${[release.aab ? `AAB ${formatBytes(release.aab.bytes)}` : null, release.apk ? `APK ${formatBytes(release.apk.bytes)}` : null].filter(Boolean).join(' · ')}`
               : releaseError
                 ? 'The last signed release failed; the diagnostic is kept below'
                 : credentialsLost
                   ? 'Blocked: the signing credentials are missing, and their upload key is needed to sign'
                   : kitReady && built
-                    ? 'Release build type · app bundle for Google Play · APK for direct install'
+                    ? [
+                          formatVersion(view.projectVersion),
+                          'Choose an AAB for Google Play, an APK for direct install, or both',
+                      ]
+                          .filter(Boolean)
+                          .join(' · ')
                     : unlockedBy.release,
     });
 
@@ -780,14 +829,69 @@ export function deriveAndroidSteps(view: MachineView, context: StepContext): And
 }
 
 /**
- * The whole journey for one machine: setup first, then build. Fourteen steps on a macOS
- * machine, seven on an Android one.
+ * Setup and build first, followed by optional device preview and publishing on both platforms.
  */
 export function deriveJourney(view: MachineView, context: StepContext): JourneyStep[] {
     if (isAndroid(view.profile.provider)) {
-        return deriveAndroidSteps(view, context);
+        return [
+            ...deriveAndroidSteps(view, context),
+            deriveAndroidDeviceStep(androidDeviceApks(view.android).length > 0, context),
+            derivePublishStep(!!view.android?.release),
+        ];
     }
-    return [...deriveSetupSteps(view, context), ...deriveBuildSteps(view, context)];
+    return [
+        ...deriveSetupSteps(view, context),
+        ...deriveBuildSteps(view, context),
+        derivePublishStep(!!view.archive),
+    ];
+}
+
+/** Completion comes only from the retained APK's confirmed installation and launch. */
+export function deriveAndroidDeviceStep(hasApk?: boolean, context?: StepContext): JourneyStep {
+    const run = context?.androidDeviceRun;
+    const running = context?.runningStep === 'run-device';
+    return {
+        id: 'run-device',
+        phase: 'device',
+        title: 'Run on an Android device',
+        kind: 'automatic',
+        optional: true,
+        status: running
+            ? 'running'
+            : run?.status === 'complete'
+              ? 'done'
+              : run?.status === 'failed'
+                ? 'failed'
+                : hasApk
+                  ? 'active'
+                  : 'pending',
+        summary: running
+            ? 'Installing and opening the selected APK on Android'
+            : run?.status === 'complete'
+              ? `Installed and opened on ${run.serial}`
+              : run?.status === 'failed'
+                ? (run.error ?? 'Installation did not finish')
+                : hasApk
+                  ? 'Build and run fresh source, or install a retained APK on a connected device'
+                  : hasApk === false
+                    ? 'Connect a device, then build and run a debug APK'
+                    : 'Open this machine to check for a retained APK and set up your device',
+    };
+}
+
+/** Store upload is a separate optional handoff; a local file never proves publication. */
+export function derivePublishStep(hasRelease: boolean): JourneyStep {
+    return {
+        id: 'publish',
+        phase: 'publish',
+        title: 'Publish the release',
+        kind: 'assisted',
+        status: hasRelease ? 'active' : 'pending',
+        optional: true,
+        summary: hasRelease
+            ? 'Upload the release and finish in the store console; publication is not checked'
+            : unlockedBy.publish,
+    };
 }
 
 /** The coarse Android journey from the list row alone; the exact one replaces it once probed. */
@@ -796,7 +900,7 @@ function summarizeAndroidJourney(
     host: HostPrerequisites | null,
     runningStep: string | null,
 ): JourneyStep[] {
-    const hostReady = host?.ready ?? true;
+    const hostReady = providerHostReady(host, summary.config.provider);
     const live = isLive(summary.state);
     const dead = summary.state === 'dead' || summary.state === 'unavailable';
     const approved = summary.workspaceName !== null;
@@ -817,7 +921,11 @@ function summarizeAndroidJourney(
             title: 'Check the host',
             kind: 'automatic',
             done: hostReady,
-            fact: hostReady ? 'Docker ready' : (host?.issues.join(' ') ?? ''),
+            fact: hostReady
+                ? 'Docker ready'
+                : host
+                  ? providerHostIssues(host, summary.config.provider).join(' ')
+                  : 'Checking host requirements',
         },
         {
             id: 'launch',
@@ -868,10 +976,10 @@ function summarizeAndroidJourney(
         {
             id: 'release',
             phase: 'build',
-            title: 'Build the signed bundle and APK',
+            title: 'Build the signed release',
             kind: 'automatic',
             done: released,
-            fact: 'Bundle and APK retained',
+            fact: 'release retained',
         },
     ];
 
@@ -882,7 +990,7 @@ function summarizeAndroidJourney(
         if (runningStep === row.id) {
             status = 'running';
         } else if (row.id === 'host' && !hostReady) {
-            status = 'failed';
+            status = host ? 'failed' : 'pending';
             blocked = true;
         } else if (row.id === 'launch' && dead) {
             status = 'failed';
@@ -902,7 +1010,7 @@ function summarizeAndroidJourney(
             kind: row.kind,
             status,
             summary:
-                status === 'done' || status === 'failed'
+                row.id === 'host' || status === 'done' || status === 'failed'
                     ? row.fact
                     : row.id === 'approve'
                       ? 'after the toolchain starts'
@@ -916,7 +1024,7 @@ function summarizeAndroidJourney(
  * machine has been probed. The flags only say what was reached, so steps between two reached
  * points are inferred; the exact model replaces it once the machine's view is loaded.
  */
-export function summarizeJourney(
+function summarizeBuildJourney(
     summary: MachineSummary,
     host: HostPrerequisites | null,
     runningStep: string | null = null,
@@ -924,7 +1032,7 @@ export function summarizeJourney(
     if (isAndroid(summary.config.provider)) {
         return summarizeAndroidJourney(summary, host, runningStep);
     }
-    const hostReady = host?.ready ?? true;
+    const hostReady = providerHostReady(host, summary.config.provider);
     const live = isLive(summary.state);
     const dead = summary.state === 'dead' || summary.state === 'unavailable';
     const approved = summary.workspaceName !== null;
@@ -952,7 +1060,13 @@ export function summarizeJourney(
             title: 'Check the Linux host',
             kind: 'automatic',
             done: hostReady,
-            fact: hostReady ? 'Docker, KVM and display ready' : (host?.issues.join(' ') ?? ''),
+            fact: hostReady
+                ? summary.config.provider === 'dockur_macos'
+                    ? 'Docker, KVM and tun ready'
+                    : 'Docker, KVM and display ready'
+                : host
+                  ? providerHostIssues(host, summary.config.provider).join(' ')
+                  : 'Checking host requirements',
         },
         {
             id: 'launch',
@@ -1076,7 +1190,7 @@ export function summarizeJourney(
         if (runningStep === row.id) {
             status = 'running';
         } else if (row.id === 'host' && !hostReady) {
-            status = 'failed';
+            status = host ? 'failed' : 'pending';
             blocked = true;
         } else if (row.id === 'launch' && dead) {
             status = 'failed';
@@ -1096,12 +1210,26 @@ export function summarizeJourney(
             kind: row.kind,
             status,
             summary:
-                status === 'done' ? row.fact : status === 'failed' ? row.fact : unlockedBy[row.id],
+                row.id === 'host' || status === 'done' || status === 'failed'
+                    ? row.fact
+                    : unlockedBy[row.id],
             ...(row.expected ? { expected: row.expected } : {}),
             ...(row.optional ? { optional: true } : {}),
             ...(row.experimental ? { experimental: true } : {}),
         };
     });
+}
+
+export function summarizeJourney(
+    summary: MachineSummary,
+    host: HostPrerequisites | null,
+    runningStep: string | null = null,
+): JourneyStep[] {
+    return [
+        ...summarizeBuildJourney(summary, host, runningStep),
+        ...(isAndroid(summary.config.provider) ? [deriveAndroidDeviceStep()] : []),
+        derivePublishStep(summary.archiveRetained),
+    ];
 }
 
 /**
@@ -1142,7 +1270,7 @@ export interface PhaseGroup<Id extends string> {
 
 /** The journey split into its phases, in order, skipping any phase with no steps. */
 export function groupByPhase<Id extends string>(steps: Step<Id>[]): PhaseGroup<Id>[] {
-    const phases: StepPhase[] = ['setup', 'build', 'device'];
+    const phases: StepPhase[] = ['setup', 'build', 'device', 'publish'];
     return phases
         .map((phase) => {
             const own = steps.filter((step) => step.phase === phase);
@@ -1169,6 +1297,17 @@ export function journeyHeadline(steps: JourneyStep[]): string {
         const signed = steps.find((step) => step.id === 'archive' || step.id === 'release');
         if (signed?.status === 'done') {
             return `signed ${signed.summary.split(' · ')[0]}`;
+        }
+        const remaining = requiredSteps(steps).find((step) => step.status !== 'done');
+        if (remaining) {
+            const device = steps.find((step) => step.id === 'run-device');
+            if (
+                remaining.id === 'archive' &&
+                (device?.status === 'active' || device?.status === 'done')
+            ) {
+                return 'device builds ready · release signing needed';
+            }
+            return `${stepShortTitle[remaining.id]} is not ready`;
         }
         return steps.length ? 'all steps done' : '';
     }

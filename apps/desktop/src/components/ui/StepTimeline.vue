@@ -1,7 +1,7 @@
 <script setup lang="ts" generic="Id extends string">
 // The whole journey as one full-width timeline: a progress header, a section per phase, and a
-// row per step carrying its result. The step you are on opens in place and shows everything it
-// has — no side panel, no second layout, nothing folded away.
+// row per step carrying its result. The selected step opens in place; its essential actions stay
+// visible while individual steps can disclose their technical reference separately.
 import { Check, ChevronDown, TriangleAlert, X } from '@lucide/vue';
 import { computed, nextTick, ref, watch } from 'vue';
 
@@ -54,7 +54,12 @@ function yoursRemaining(phaseSteps: Step<Id>[]): number {
 
 // A finished phase folds to its header so the timeline stays short; it reopens on click, and
 // whenever the step you are looking at is inside it.
-const expanded = ref<Record<StepPhase, boolean>>({ setup: true, build: true, device: true });
+const expanded = ref<Record<StepPhase, boolean>>({
+    setup: true,
+    build: true,
+    device: true,
+    publish: true,
+});
 function phaseOf(id: Id | null): StepPhase | null {
     return steps.find((step) => step.id === id)?.phase ?? null;
 }
@@ -96,16 +101,16 @@ function togglePhase(group: PhaseGroup<Id>): void {
     expanded.value[group.phase] = !expanded.value[group.phase];
 }
 
-function move(offset: number): void {
+async function move(from: Id, offset: number): Promise<void> {
     const list = visible.value;
-    if (!selected.value) {
-        selected.value = list[0]?.id ?? null;
-        return;
-    }
-    const index = list.findIndex((step) => step.id === selected.value);
+    const index = list.findIndex((step) => step.id === from);
     const next = list[Math.min(Math.max(index + offset, 0), list.length - 1)];
     if (next) {
         selected.value = next.id;
+        await nextTick();
+        rows.value[next.id]
+            ?.querySelector<HTMLButtonElement>('button')
+            ?.focus({ preventScroll: true });
     }
 }
 
@@ -187,7 +192,7 @@ function meta(step: Step<Id>): string {
 </script>
 
 <template>
-    <div @keydown.up.prevent="move(-1)" @keydown.down.prevent="move(1)">
+    <div>
         <header class="flex items-center gap-3 px-2 pb-3">
             <span class="text-xs font-semibold text-zinc-900 dark:text-zinc-50">
                 {{ done }} of {{ required.length }} done
@@ -305,6 +310,10 @@ function meta(step: Step<Id>): string {
                             :aria-current="selected === step.id ? 'step' : undefined"
                             :aria-expanded="selected === step.id"
                             @click="selected = selected === step.id ? null : step.id"
+                            @keydown.up.prevent.stop="move(step.id, -1)"
+                            @keydown.down.prevent.stop="move(step.id, 1)"
+                            @keydown.home.prevent.stop="move(step.id, -visible.length)"
+                            @keydown.end.prevent.stop="move(step.id, visible.length)"
                         >
                             <span
                                 :class="
@@ -322,16 +331,12 @@ function meta(step: Step<Id>): string {
                                     v-else-if="step.status === 'running' && step.live"
                                     class="h-2 w-2 animate-pulse rounded-full bg-emerald-500 motion-reduce:animate-none"
                                 />
-                                <Spinner
-                                    v-else-if="step.status === 'running'"
-                                    size="h-3.5 w-3.5"
-                                    tone="text-zinc-900 dark:text-zinc-100"
-                                />
+                                <Spinner v-else-if="step.status === 'running'" size="h-3.5 w-3.5" />
                                 <template v-else>{{ steps.indexOf(step) + 1 }}</template>
                             </span>
                             <span class="min-w-0 flex-1">
                                 <span
-                                    class="block truncate text-[13px]"
+                                    class="block text-sm leading-5"
                                     :class="titleClass[step.status]"
                                 >
                                     {{ step.title }}
@@ -348,7 +353,7 @@ function meta(step: Step<Id>): string {
                                         v-if="step.status === 'failed'"
                                         class="h-3 w-3 shrink-0"
                                     />
-                                    <span class="truncate">{{ step.summary }}</span>
+                                    <span class="leading-5">{{ step.summary }}</span>
                                 </span>
                             </span>
                             <span

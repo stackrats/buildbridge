@@ -3,6 +3,8 @@
 
 import { computed, reactive } from 'vue';
 
+import { useMachineOrder } from './machine-order';
+
 import {
     loadLogHeight,
     loadSelection,
@@ -13,6 +15,7 @@ import {
 } from '../lib/prefs';
 
 export type LogSource = 'activity' | 'build' | 'archive' | 'device' | 'console';
+export type MachineSection = 'build' | 'preview' | 'publish' | 'setup' | 'steps';
 
 export type Route =
     | { kind: 'home' }
@@ -20,6 +23,7 @@ export type Route =
     | { kind: 'signing' }
     | { kind: 'envs' }
     | { kind: 'templates' }
+    | { kind: 'native_mac' }
     | { kind: 'machine'; id: string };
 
 function devParams(): URLSearchParams | null {
@@ -64,6 +68,7 @@ const state = reactive({
     sidebarWidth: loadSidebarWidth(),
     /** The step each machine page is showing; the focus step when unset. */
     machineSteps: initialSteps(),
+    machineSections: {} as Record<string, MachineSection>,
     logOpen: initialLogOpen(),
     logSource: {} as Record<string, LogSource>,
     logHeight: loadLogHeight(),
@@ -81,6 +86,7 @@ function parseSelection(value: string | null): Route {
         value === 'signing' ||
         value === 'envs' ||
         value === 'templates' ||
+        value === 'native_mac' ||
         value === 'home'
     ) {
         return { kind: value };
@@ -102,14 +108,22 @@ export function useUi() {
         navigate(route: Route): void {
             state.route = route;
             saveSelection(serializeRoute(route));
+            if (route.kind === 'machine') {
+                useMachineOrder().markUsed(route.id);
+            }
         },
         /** Show a machine, optionally on one step; without a step it opens on its focus step. */
         openMachine(id: string, stepId?: string): void {
             if (stepId) {
                 state.machineSteps[id] = stepId;
+                state.machineSections[id] = 'steps';
+            } else {
+                delete state.machineSteps[id];
+                delete state.machineSections[id];
             }
             state.route = { kind: 'machine', id };
             saveSelection(serializeRoute(state.route));
+            useMachineOrder().markUsed(id);
         },
         /** A step id, '' when the person closed it, or null when they have not chosen. */
         selectedStep(id: string): string | null {

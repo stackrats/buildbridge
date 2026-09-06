@@ -4,6 +4,7 @@ import type { SigningKitSummary } from '../types/backend';
 import {
     androidKitShortfall,
     appStoreConnectIsPartial,
+    compareAndroidCertificate,
     draftKitSummary,
     emptySigningKitDraft,
     kitHoldsProfile,
@@ -11,9 +12,48 @@ import {
     kitSignsAndroid,
     kitShortfall,
     missingKitRequirements,
+    signingKitPlatforms,
 } from './signing';
 
 const emptyDraft = emptySigningKitDraft;
+
+describe('Android certificate fingerprint comparison', () => {
+    const actual = 'abcdef0123456789'.repeat(4);
+
+    it('matches complete fingerprints regardless of case, colon separators, or whitespace', () => {
+        expect(compareAndroidCertificate(actual.toUpperCase(), actual)).toBe('match');
+        expect(compareAndroidCertificate(actual, actual.toUpperCase())).toBe('match');
+        const pairs = actual.toUpperCase().match(/.{2}/g)!;
+        expect(compareAndroidCertificate(`  ${pairs.join(':')}  `, actual)).toBe('match');
+        expect(compareAndroidCertificate(pairs.join(' \n\t'), actual)).toBe('match');
+    });
+
+    it('rejects prefixes, arbitrary punctuation, non-hex characters, and incomplete hashes', () => {
+        for (const expected of [
+            `SHA-256: ${actual}`,
+            `0x${actual}`,
+            `${actual.slice(0, 32)}-${actual.slice(32)}`,
+            `${actual}!`,
+            `g${actual.slice(1)}`,
+            actual.slice(0, 63),
+            `${actual}0`,
+            ': :',
+        ]) {
+            expect(compareAndroidCertificate(expected, actual)).toBe('invalid');
+        }
+    });
+
+    it('keeps missing or malformed checked fingerprints unverified', () => {
+        for (const unchecked of [undefined, '', 'not a hash', actual.slice(0, 63)]) {
+            expect(compareAndroidCertificate(actual, unchecked)).toBe('unchecked');
+        }
+    });
+
+    it('distinguishes an empty comparison from a valid different certificate', () => {
+        expect(compareAndroidCertificate(' \n\t', actual)).toBe('empty');
+        expect(compareAndroidCertificate('0'.repeat(64), actual)).toBe('mismatch');
+    });
+});
 
 function storedKit(overrides: Partial<SigningKitSummary> = {}): SigningKitSummary {
     return {
@@ -39,6 +79,40 @@ function storedKit(overrides: Partial<SigningKitSummary> = {}): SigningKitSummar
         ...overrides,
     };
 }
+
+describe('signing credential platforms', () => {
+    it('does not classify names or the automatically created guest password as signing material', () => {
+        expect(
+            signingKitPlatforms(
+                storedKit({ name: 'Android and iOS', guestKeychainConfigured: true }),
+            ),
+        ).toEqual([]);
+    });
+
+    it('includes incomplete Apple credentials before they are ready to provision', () => {
+        expect(signingKitPlatforms(storedKit({ signingCertificateConfigured: true }))).toEqual([
+            'ios',
+        ]);
+        expect(
+            signingKitPlatforms(storedKit({ provisioningProfileNames: ['app.mobileprovision'] })),
+        ).toEqual(['ios']);
+    });
+
+    it('keeps Android credentials discoverable while the upload-key setup is incomplete', () => {
+        expect(signingKitPlatforms(storedKit({ androidKeystoreConfigured: true }))).toEqual([
+            'android',
+        ]);
+        expect(signingKitPlatforms(storedKit({ androidKeyAlias: 'upload' }))).toEqual(['android']);
+    });
+
+    it('identifies shared credentials from the material held for both platforms', () => {
+        expect(
+            signingKitPlatforms(
+                storedKit({ appStoreConnectConfigured: true, androidKeystoreConfigured: true }),
+            ),
+        ).toEqual(['ios', 'android']);
+    });
+});
 
 describe('distribution files', () => {
     it('names all three files for an empty new kit', () => {

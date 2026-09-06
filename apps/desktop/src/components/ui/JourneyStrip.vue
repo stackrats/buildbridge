@@ -31,8 +31,24 @@ const statusWord: Record<StepStatus, string> = {
 const caption = computed(() =>
     groups.value
         .map((group) => {
-            const word = group.phase === 'setup' ? 'setup' : 'build';
-            return `${word} ${group.done}/${group.steps.length}`;
+            if (group.phase === 'publish') return 'publishing optional';
+            if (group.phase === 'device') {
+                const step = group.steps[0];
+                if (step?.status === 'failed') {
+                    return 'device needs attention';
+                }
+                if (step?.status === 'running' && !step.live) {
+                    return 'device running';
+                }
+                return step?.live
+                    ? 'device live'
+                    : step?.status === 'done'
+                      ? 'device previewed'
+                      : 'device optional';
+            }
+            const required = group.steps.filter((step) => !step.optional);
+            const done = required.filter((step) => step.status === 'done').length;
+            return `${group.phase === 'setup' ? 'setup' : 'build'} ${done}/${required.length}`;
         })
         .join(' · '),
 );

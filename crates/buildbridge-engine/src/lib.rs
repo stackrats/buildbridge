@@ -12,16 +12,17 @@ pub use buildbridge_contract::{
     PROTOCOL_VERSION, PairRunnerRequest, RealtimeAuthorizationRequest, RealtimeConfiguration,
     valid_git_ref,
 };
+pub use buildbridge_contract::{SharingGrant, SharingInvitation, SharingState};
 pub use buildbridge_machines::{
     AndroidArtifact, AndroidBuildPhase, AndroidBuildProgress, AndroidBuildResult,
-    AndroidKeystoreSummary, AndroidReleasePhase, AndroidReleaseProgress, AndroidReleaseResult,
-    AndroidSigningMaterial, AndroidToolchainSummary, AppleArchiveArtifact, AppleArchiveProgress,
-    AppleArchiveResult, AppleDeviceRunProgress, AppleDeviceRunResult, AppleProjectProgress,
-    AppleSmokeBuildResult, ContainerState, GuestDiagnostics, GuestEnvFiles, GuestOptimization,
-    GuestSshStatus, GuestTrustState, HostPrerequisites, MacOsRelease, MachineConfig,
-    MachinePlatform, MachineProvider, OperationScope, PodfileLockChanges, RuntimeStatus,
-    SigningProvisioningProgress, SigningProvisioningResult, UnsignedBuildTarget,
-    WorkspaceSyncResult, XcodeImportProgress,
+    AndroidKeystoreSummary, AndroidReleaseOutputs, AndroidReleasePhase, AndroidReleaseProgress,
+    AndroidReleaseResult, AndroidSigningAlgorithm, AndroidSigningMaterial, AndroidToolchainSummary,
+    AppleArchiveArtifact, AppleArchiveProgress, AppleArchiveResult, AppleDeviceRunProgress,
+    AppleDeviceRunResult, AppleProjectProgress, AppleSmokeBuildResult, ContainerState,
+    GuestDiagnostics, GuestEnvFiles, GuestOptimization, GuestSshStatus, GuestTrustState,
+    HostPrerequisites, MacOsRelease, MachineConfig, MachinePlatform, MachineProvider,
+    OperationScope, PodfileLockChanges, ProjectVersion, RuntimeStatus, SigningProvisioningProgress,
+    SigningProvisioningResult, UnsignedBuildTarget, WorkspaceSyncResult, XcodeImportProgress,
 };
 use buildbridge_runner::{ApiClient, execute};
 use keyring::Entry;
@@ -33,35 +34,54 @@ mod engine;
 pub use engine::*;
 
 mod android_builds;
+mod android_devices;
+mod android_inspector;
 pub mod apple_api;
 mod apple_profiles;
 mod builds;
 mod certificates;
+mod credentials;
 mod devices;
 mod env_sets;
+mod google_play;
 mod guest_access;
 mod machine_lifecycle;
 pub mod machines;
+mod native_mac;
 mod ops;
 mod optimizations;
+mod project_version;
+mod publishing;
 mod records;
 mod runner;
+mod sharing;
+#[cfg(test)]
+mod sharing_transport_tests;
 mod signing_kits;
 mod templates;
 mod usb;
 mod views;
 pub use android_builds::*;
+pub use android_devices::*;
+pub use android_inspector::*;
 pub use apple_profiles::*;
+pub use buildbridge_machines::{AndroidDevice, AndroidDeviceRunResult, AndroidDevices};
 pub use builds::*;
 pub use certificates::*;
+pub use credentials::*;
 pub use devices::*;
 pub use env_sets::*;
+pub use google_play::*;
 pub use guest_access::*;
 pub use machine_lifecycle::*;
+pub use native_mac::*;
 pub use ops::*;
 pub use optimizations::*;
+pub use project_version::*;
+pub use publishing::*;
 pub use records::*;
 pub use runner::*;
+pub use sharing::*;
 pub use signing_kits::*;
 pub use templates::*;
 use ts_rs::TS;
@@ -661,6 +681,11 @@ pub struct MachineView {
     vault_issue: Option<String>,
     guest: MacGuestAccessView,
     apple_workspace: Option<StoredAppleWorkspace>,
+    /// The version and build number the approved project declares on this host right now,
+    /// read from its own files each time the view is built; `None` until a project is
+    /// approved, or when it does not declare exactly one of each. A build that asks for a
+    /// different one writes it back into those files.
+    project_version: Option<ProjectVersion>,
     signing: Option<SigningProvisioningResult>,
     archive: Option<AppleArchiveResult>,
     /// The env set the retained archive was built with, if any.
@@ -937,6 +962,32 @@ mod tests {
             android_key_alias: String::new(),
             android_key_password: String::new(),
         }
+    }
+
+    #[test]
+    fn android_passwords_preserve_spaces_when_saved_and_blank_keeps_existing_secret() {
+        let mut input = empty_secret_input();
+        input.android_keystore_password = " store password ".to_string();
+        input.android_key_password = " different key password ".to_string();
+        let stored = normalize_signing_kit(input).unwrap();
+        assert_eq!(
+            stored.android_keystore_password.as_deref(),
+            Some(" store password ")
+        );
+        assert_eq!(
+            stored.android_key_password.as_deref(),
+            Some(" different key password ")
+        );
+        let merged =
+            merge_signing_kit(stored, normalize_signing_kit(empty_secret_input()).unwrap());
+        assert_eq!(
+            merged.android_keystore_password.as_deref(),
+            Some(" store password ")
+        );
+        assert_eq!(
+            merged.android_key_password.as_deref(),
+            Some(" different key password ")
+        );
     }
 
     #[test]

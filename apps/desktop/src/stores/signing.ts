@@ -1,4 +1,4 @@
-// Signing kits: named sets of Apple material held once in this host's operating-system vault.
+// Signing kits: named sets of Apple and Android credentials on this host.
 //
 // A kit is host-level so the files and passwords are entered once. Each machine is attached to
 // one kit, and provisioning imports that kit's identity into that machine's guest keychain — so
@@ -9,6 +9,7 @@ import { computed, reactive } from 'vue';
 import { useBackend } from '../lib/backend';
 import { describeError } from '../lib/utils';
 import type {
+    AndroidSigningVerification,
     AppleTeamVerification,
     CreateAppleProfileResult,
     SigningKitInput,
@@ -33,6 +34,9 @@ const state = reactive({
     verificationMachineId: null as string | null,
     verifying: false,
     verificationError: null as string | null,
+    androidVerification: {} as Record<string, AndroidSigningVerification | undefined>,
+    androidVerificationErrors: {} as Record<string, string | undefined>,
+    androidVerifying: {} as Record<string, boolean | undefined>,
     creatingProfile: false,
     creatingCertificateKitId: null as string | null,
     creatingDevelopmentCertificateKitId: null as string | null,
@@ -41,6 +45,15 @@ const state = reactive({
     createdProfile: null as CreateAppleProfileResult | null,
     profileError: null as string | null,
 });
+
+// An edit or removal invalidates an in-flight check too, even when the old file name stays the same.
+const androidCheckVersions = new Map<string, number>();
+function invalidateAndroidCheck(kitId: string): void {
+    androidCheckVersions.set(kitId, (androidCheckVersions.get(kitId) ?? 0) + 1);
+    delete state.androidVerification[kitId];
+    delete state.androidVerificationErrors[kitId];
+    delete state.androidVerifying[kitId];
+}
 
 /** A kit can provision only when it holds an identity, a profile, and a keychain password. */
 export { kitIsProvisionable } from '../model/signing';
@@ -66,12 +79,14 @@ export function useSigningStore() {
         },
 
         async save(input: SigningKitInput): Promise<boolean> {
+            if (input.kitId) invalidateAndroidCheck(input.kitId);
             state.saving = true;
             state.error = null;
             state.notice = null;
             state.messageKitId = null;
             try {
                 state.kits = await useBackend().saveSigningKit(input);
+                if (input.kitId) invalidateAndroidCheck(input.kitId);
                 state.notice = input.kitId
                     ? 'Signing credentials updated. Secret values are not shown again.'
                     : 'Signing credentials stored in the operating-system vault.';
@@ -86,12 +101,14 @@ export function useSigningStore() {
         },
 
         async remove(kitId: string): Promise<boolean> {
+            invalidateAndroidCheck(kitId);
             state.deleting = true;
             state.error = null;
             state.notice = null;
             state.messageKitId = null;
             try {
                 state.kits = await useBackend().deleteSigningKit(kitId);
+                invalidateAndroidCheck(kitId);
                 state.verification = null;
                 state.createdProfile = null;
                 state.notice =
@@ -116,6 +133,31 @@ export function useSigningStore() {
                 state.verificationError = describeError(error);
             } finally {
                 state.verifying = false;
+            }
+        },
+
+        async verifyAndroid(kitId: string): Promise<void> {
+            if (state.androidVerifying[kitId]) return;
+            invalidateAndroidCheck(kitId);
+            const version = androidCheckVersions.get(kitId);
+            state.androidVerifying[kitId] = true;
+            try {
+                const result = await useBackend().verifyAndroidSigningKit(kitId);
+                if (androidCheckVersions.get(kitId) !== version) return;
+                if (result.kitId !== kitId) {
+                    throw new Error(
+                        'The signing check returned different credentials. Check again.',
+                    );
+                }
+                state.androidVerification[kitId] = result;
+            } catch (error) {
+                if (androidCheckVersions.get(kitId) === version) {
+                    state.androidVerificationErrors[kitId] = describeError(error);
+                }
+            } finally {
+                if (androidCheckVersions.get(kitId) === version) {
+                    delete state.androidVerifying[kitId];
+                }
             }
         },
 
@@ -208,6 +250,7 @@ export function useSigningStore() {
             kitId: string,
             input: { password: string; keyAlias: string; certificateName: string },
         ): Promise<boolean> {
+            invalidateAndroidCheck(kitId);
             state.creatingKeystoreKitId = kitId;
             state.error = null;
             state.notice = null;
@@ -221,7 +264,7 @@ export function useSigningStore() {
                         attachedMachines: state.kits[index].attachedMachines,
                     };
                 }
-                state.notice = `Upload key ${result.keystore.keyAlias} created and stored in ${result.kit.name}. Keep the password: neither Google Play nor BuildBridge can recover it.`;
+                state.notice = `Upload key ${result.keystore.keyAlias} created and stored in ${result.kit.name}. Keep a backup and its password, then check the signing key below.`;
                 return true;
             } catch (error) {
                 state.error = describeError(error);

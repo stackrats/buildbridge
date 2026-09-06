@@ -1,22 +1,28 @@
 <script setup lang="ts">
 import { House, KeyRound, Layers, Variable, Plus, Radio } from '@lucide/vue';
-import { computed, onBeforeUnmount } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref } from 'vue';
 
 import { machineStateDot, machineStateLabel } from '../lib/status';
 import { clamp } from '../lib/utils';
 import { journeyHeadline } from '../model/steps';
+import { providerPlatform } from '../model/providers';
 import { useEnvSetsStore } from '../stores/envs';
+import { useMachineOrder } from '../stores/machine-order';
 import { busyKeyLabel, useMachinesStore } from '../stores/machines';
 import { useSigningStore } from '../stores/signing';
 import { useUi } from '../stores/ui';
+import { useRunnerStore } from '../stores/runner';
 import type { MachineSummary } from '../types/backend';
 import Spinner from './ui/Spinner.vue';
 import StatusDot from './ui/StatusDot.vue';
+import PlatformIcon from './ui/PlatformIcon.vue';
 
 const ui = useUi();
 const machines = useMachinesStore();
+const machineOrder = useMachineOrder();
 const signing = useSigningStore();
 const envs = useEnvSetsStore();
+const runner = useRunnerStore();
 
 // What each shared resource holds, so the count is answered without opening the page.
 const kitCount = computed(() => signing.kits.value.length);
@@ -42,6 +48,202 @@ function machineSecondary(machine: MachineSummary): string {
 }
 
 const machineCount = computed(() => machines.machines.value.length);
+
+const navigation = ref<HTMLElement | null>(null);
+const machineList = ref<HTMLElement | null>(null);
+const draggedMachineId = ref<string | null>(null);
+const machineDrop = ref<{ id: string; after: boolean } | null>(null);
+const reorderAnnouncement = ref('');
+let suppressMachineClick = false;
+let scrollFrame: number | null = null;
+let machineDrag: {
+    id: string;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    x: number;
+    y: number;
+    element: HTMLElement;
+} | null = null;
+
+function moveMachine(id: string, targetId: string, after: boolean): void {
+    const current = machines.sidebarMachines.value.map((machine) => machine.id);
+    if (id === targetId || !current.includes(id) || !current.includes(targetId)) {
+        return;
+    }
+    const reordered = current.filter((machineId) => machineId !== id);
+    const index = reordered.indexOf(targetId) + Number(after);
+    reordered.splice(index, 0, id);
+    if (reordered.every((machineId, position) => machineId === current[position])) {
+        return;
+    }
+    machineOrder.reorder(reordered);
+    const name = machines.sidebarMachines.value.find((machine) => machine.id === id)?.config.name;
+    reorderAnnouncement.value = `${name ?? 'Machine'} moved to position ${index + 1} of ${reordered.length}.`;
+}
+
+function updateMachineDrop(): void {
+    const drag = machineDrag;
+    const bounds = navigation.value?.getBoundingClientRect();
+    if (!drag || !draggedMachineId.value || !bounds) {
+        return;
+    }
+    machineDrop.value = null;
+    if (
+        drag.x < bounds.left ||
+        drag.x > bounds.right ||
+        drag.y < bounds.top ||
+        drag.y > bounds.bottom
+    ) {
+        return;
+    }
+    const rows = Array.from(
+        machineList.value?.querySelectorAll<HTMLElement>('[data-machine-id]') ?? [],
+    ).filter((row) => row.dataset.machineId !== drag.id);
+    const next = rows.find((row) => {
+        const rect = row.getBoundingClientRect();
+        return drag.y < rect.top + rect.height / 2;
+    });
+    const target = next ?? rows.at(-1);
+    if (target?.dataset.machineId) {
+        machineDrop.value = { id: target.dataset.machineId, after: !next };
+    }
+}
+
+function scrollDuringMachineDrag(): void {
+    scrollFrame = null;
+    const drag = machineDrag;
+    const nav = navigation.value;
+    if (!drag || !draggedMachineId.value || !nav) {
+        return;
+    }
+    const bounds = nav.getBoundingClientRect();
+    if (
+        drag.x >= bounds.left &&
+        drag.x <= bounds.right &&
+        drag.y >= bounds.top &&
+        drag.y <= bounds.bottom
+    ) {
+        const speed =
+            drag.y < bounds.top + 32
+                ? -clamp((bounds.top + 32 - drag.y) / 32, 0, 1) * 8
+                : clamp((drag.y - bounds.bottom + 32) / 32, 0, 1) * 8;
+        if (speed) {
+            nav.scrollTop += speed;
+            updateMachineDrop();
+        }
+    }
+    scrollFrame = requestAnimationFrame(scrollDuringMachineDrag);
+}
+
+function moveMachineDrag(event: PointerEvent): void {
+    const drag = machineDrag;
+    if (!drag || event.pointerId !== drag.pointerId) {
+        return;
+    }
+    drag.x = event.clientX;
+    drag.y = event.clientY;
+    if (!draggedMachineId.value) {
+        if (Math.hypot(drag.x - drag.startX, drag.y - drag.startY) < 5) {
+            return;
+        }
+        draggedMachineId.value = drag.id;
+        suppressMachineClick = true;
+        drag.element.setPointerCapture(event.pointerId);
+        scrollFrame = requestAnimationFrame(scrollDuringMachineDrag);
+    }
+    event.preventDefault();
+    updateMachineDrop();
+}
+
+function stopMachineDrag(): void {
+    const drag = machineDrag;
+    machineDrag = null;
+    draggedMachineId.value = null;
+    machineDrop.value = null;
+    if (scrollFrame !== null) {
+        cancelAnimationFrame(scrollFrame);
+        scrollFrame = null;
+    }
+    if (drag?.element.hasPointerCapture(drag.pointerId)) {
+        drag.element.releasePointerCapture(drag.pointerId);
+    }
+    window.removeEventListener('pointermove', moveMachineDrag);
+    window.removeEventListener('pointerup', finishMachineDrag);
+    window.removeEventListener('pointercancel', stopMachineDrag);
+    window.removeEventListener('blur', stopMachineDrag);
+    window.removeEventListener('keydown', cancelMachineDrag);
+}
+
+function finishMachineDrag(event: PointerEvent): void {
+    if (event.pointerId !== machineDrag?.pointerId) {
+        return;
+    }
+    machineDrag.x = event.clientX;
+    machineDrag.y = event.clientY;
+    updateMachineDrop();
+    if (draggedMachineId.value && machineDrop.value) {
+        moveMachine(draggedMachineId.value, machineDrop.value.id, machineDrop.value.after);
+    }
+    stopMachineDrag();
+}
+
+function cancelMachineDrag(event: KeyboardEvent): void {
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        stopMachineDrag();
+    }
+}
+
+function startMachineDrag(event: PointerEvent, id: string): void {
+    if (!event.isPrimary || event.button !== 0 || machineCount.value < 2) {
+        return;
+    }
+    stopMachineDrag();
+    suppressMachineClick = false;
+    machineDrag = {
+        id,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        x: event.clientX,
+        y: event.clientY,
+        element: event.currentTarget as HTMLElement,
+    };
+    window.addEventListener('pointermove', moveMachineDrag);
+    window.addEventListener('pointerup', finishMachineDrag);
+    window.addEventListener('pointercancel', stopMachineDrag);
+    window.addEventListener('blur', stopMachineDrag);
+    window.addEventListener('keydown', cancelMachineDrag);
+}
+
+function handleMachineClick(event: MouseEvent): void {
+    if (suppressMachineClick && event.detail !== 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        suppressMachineClick = false;
+    }
+}
+
+function reorderWithKeyboard(event: KeyboardEvent, id: string): void {
+    if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) {
+        return;
+    }
+    event.preventDefault();
+    const current = machines.sidebarMachines.value;
+    const index = current.findIndex((machine) => machine.id === id);
+    const after = event.key === 'ArrowDown';
+    const target = current[index + (after ? 1 : -1)];
+    if (target) {
+        stopMachineDrag();
+        const button = event.currentTarget as HTMLElement;
+        moveMachine(id, target.id, after);
+        void nextTick(() => {
+            button.focus();
+            button.scrollIntoView({ block: 'nearest' });
+        });
+    }
+}
 
 // A template being saved shows on the Templates entry as well as on its machine, since the
 // save outlives its dialog and the page it started on; the first one names the tooltip.
@@ -79,6 +281,7 @@ function startDrag(event: MouseEvent): void {
 
 onBeforeUnmount(() => {
     dragging = false;
+    stopMachineDrag();
 });
 </script>
 
@@ -87,7 +290,11 @@ onBeforeUnmount(() => {
         class="relative flex shrink-0 flex-col border-r border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
         :style="{ width: `${ui.state.sidebarWidth}px` }"
     >
-        <nav class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-2">
+        <nav
+            ref="navigation"
+            class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-2"
+            @scroll="updateMachineDrop"
+        >
             <button
                 type="button"
                 :class="[itemBase, ui.state.route.kind === 'home' ? itemActive : itemIdle]"
@@ -95,6 +302,16 @@ onBeforeUnmount(() => {
             >
                 <House class="h-4 w-4 shrink-0" />
                 Overview
+            </button>
+
+            <button
+                v-if="runner.state.status?.platform === 'macos'"
+                type="button"
+                :class="[itemBase, ui.state.route.kind === 'native_mac' ? itemActive : itemIdle]"
+                @click="ui.navigate({ kind: 'native_mac' })"
+            >
+                <PlatformIcon platform="ios" class="h-4 w-4" />
+                This Mac
             </button>
 
             <div class="mt-4 flex h-6 items-center justify-between pr-1 pl-2.5">
@@ -106,19 +323,51 @@ onBeforeUnmount(() => {
                     type="button"
                     class="flex h-5 w-5 items-center justify-center rounded-[5px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50 dark:focus-visible:outline-zinc-300"
                     v-tip="'New machine'"
+                    aria-label="New machine"
                     @click="ui.state.newMachineOpen = true"
                 >
                     <Plus class="h-3.5 w-3.5" />
                 </button>
             </div>
 
-            <ul class="mt-0.5 flex flex-col gap-0.5">
-                <li v-for="machine in machines.machines.value" :key="machine.id">
+            <p id="machine-reorder-help" class="sr-only">
+                Drag a machine to reorder it, or focus it and press Alt with the Up and Down arrow
+                keys.
+            </p>
+            <p class="sr-only" aria-live="polite" aria-atomic="true">{{ reorderAnnouncement }}</p>
+            <ul ref="machineList" class="mt-0.5 flex flex-col gap-0.5">
+                <li
+                    v-for="machine in machines.sidebarMachines.value"
+                    :key="machine.id"
+                    :data-machine-id="machine.id"
+                    :class="[
+                        itemBase,
+                        isMachine(machine.id) ? itemActive : itemIdle,
+                        'touch-pan-y select-none',
+                        { 'opacity-50': draggedMachineId === machine.id },
+                    ]"
+                    @pointerdown="startMachineDrag($event, machine.id)"
+                    @click.capture="handleMachineClick"
+                    @click="ui.openMachine(machine.id)"
+                    @dragstart.prevent
+                >
+                    <span
+                        v-if="machineDrop?.id === machine.id"
+                        aria-hidden="true"
+                        class="pointer-events-none absolute right-0 left-0 z-10 h-0.5 rounded-full bg-emerald-500"
+                        :class="machineDrop.after ? '-bottom-0.5' : '-top-0.5'"
+                    />
                     <button
                         type="button"
-                        :class="[itemBase, isMachine(machine.id) ? itemActive : itemIdle]"
-                        @click="ui.openMachine(machine.id)"
+                        aria-describedby="machine-reorder-help"
+                        aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
+                        class="flex min-w-0 flex-1 items-center gap-2.5 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300"
+                        @keydown="reorderWithKeyboard($event, machine.id)"
                     >
+                        <PlatformIcon
+                            :platform="providerPlatform[machine.config.provider]"
+                            class="h-4 w-4"
+                        />
                         <span class="min-w-0 flex-1">
                             <span class="block truncate">{{ machine.config.name }}</span>
                             <span
@@ -210,7 +459,7 @@ onBeforeUnmount(() => {
                 @click="ui.navigate({ kind: 'runner' })"
             >
                 <Radio class="h-4 w-4 shrink-0" />
-                <span class="flex-1">Control plane</span>
+                <span class="flex-1">Remote builds</span>
             </button>
         </div>
 

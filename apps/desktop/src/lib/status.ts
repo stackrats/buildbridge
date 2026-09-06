@@ -6,15 +6,15 @@ import type { ContainerState } from '../types/backend';
 export type BadgeTone = 'neutral' | 'ok' | 'warn' | 'danger' | 'info' | 'primary' | 'outline';
 
 export const machineStateLabel: Record<ContainerState, string> = {
-    missing: 'not created',
-    created: 'created',
-    running: 'running',
-    paused: 'paused',
-    restarting: 'restarting',
-    exited: 'stopped',
-    dead: 'needs attention',
-    unavailable: 'docker unavailable',
-    unknown: 'unknown',
+    missing: 'Not created',
+    created: 'Created',
+    running: 'Running',
+    paused: 'Paused',
+    restarting: 'Restarting',
+    exited: 'Stopped',
+    dead: 'Needs attention',
+    unavailable: 'Docker unavailable',
+    unknown: 'Unknown',
 };
 
 export const machineStateBadge: Record<ContainerState, BadgeTone> = {

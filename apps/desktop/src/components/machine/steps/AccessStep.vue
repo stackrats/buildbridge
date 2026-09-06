@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronRight, KeyRound, RefreshCw } from '@lucide/vue';
+import { KeyRound, RefreshCw } from '@lucide/vue';
 import { computed, ref, watch } from 'vue';
 
 import type { JourneyStep } from '../../../model/steps';
@@ -7,6 +7,7 @@ import { useMachinesStore, type MachineSession } from '../../../stores/machines'
 import Button from '../../ui/Button.vue';
 import Callout from '../../ui/Callout.vue';
 import CopyButton from '../../ui/CopyButton.vue';
+import DisclosureSummary from '../../ui/DisclosureSummary.vue';
 import FailureBlock from '../../ui/FailureBlock.vue';
 import Field from '../../ui/Field.vue';
 import Input from '../../ui/Input.vue';
@@ -23,7 +24,6 @@ const done = computed(() => step.status === 'done');
 const username = ref(guest.value.username ?? '');
 // Held only until the install is attempted; cleared before the call goes out either way.
 const password = ref('');
-const showManual = ref(false);
 const failure = computed(() =>
     session.lastFailure?.operation === 'guest-authorize' ? session.lastFailure : null,
 );
@@ -144,20 +144,12 @@ const installCommand = computed(() =>
                 </template>
             </Field>
 
-            <div v-if="!done">
-                <button
-                    type="button"
-                    class="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-600 dark:text-zinc-400 dark:hover:text-zinc-300"
-                    @click="showManual = !showManual"
-                >
-                    <ChevronRight
-                        class="h-3 w-3 transition-transform motion-reduce:transition-none"
-                        :class="showManual ? 'rotate-90' : ''"
-                    />
+            <details v-if="!done">
+                <DisclosureSummary class="text-xs font-medium text-zinc-600 dark:text-zinc-300">
                     Add the key from the guest Terminal instead
-                </button>
+                </DisclosureSummary>
                 <div
-                    v-if="showManual && guest.publicKey"
+                    v-if="guest.publicKey"
                     class="mt-2 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950"
                 >
                     <div class="flex items-center justify-between gap-2">
@@ -179,7 +171,7 @@ const installCommand = computed(() =>
                         >{{ installCommand }}</pre>
                 </div>
                 <div
-                    v-else-if="showManual"
+                    v-else
                     class="mt-2 flex items-center justify-between gap-3 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950"
                 >
                     <p class="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
@@ -197,7 +189,7 @@ const installCommand = computed(() =>
                         Generate access key
                     </Button>
                 </div>
-            </div>
+            </details>
         </form>
     </StepPanel>
 </template>

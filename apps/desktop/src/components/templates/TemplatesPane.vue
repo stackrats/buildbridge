@@ -8,6 +8,7 @@ import { computed, onMounted, ref } from 'vue';
 
 import { formatBytes, formatDate } from '../../lib/format';
 import { templateSavePhaseLabel } from '../../model/phases';
+import { providerPlatform } from '../../model/providers';
 import { useMachinesStore } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
 import type { MachineTemplateSummary } from '../../types/backend';
@@ -16,8 +17,10 @@ import Badge from '../ui/Badge.vue';
 import Button from '../ui/Button.vue';
 import Callout from '../ui/Callout.vue';
 import Card from '../ui/Card.vue';
+import DisclosureSummary from '../ui/DisclosureSummary.vue';
 import EmptyState from '../ui/EmptyState.vue';
 import KeyValue from '../ui/KeyValue.vue';
+import PlatformIcon from '../ui/PlatformIcon.vue';
 import ProgressRow from '../ui/ProgressRow.vue';
 import Spinner from '../ui/Spinner.vue';
 
@@ -86,13 +89,15 @@ function detailsFor(template: MachineTemplateSummary) {
     <div class="mx-auto max-w-4xl space-y-4 p-5">
         <header class="flex items-start justify-between gap-4">
             <div>
-                <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">Templates</h1>
+                <h1
+                    class="flex items-center gap-2 text-lg font-bold text-zinc-900 dark:text-zinc-50"
+                >
+                    <PlatformIcon platform="ios" class="h-4 w-4" />
+                    macOS templates
+                </h1>
                 <p class="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                    A template is a machine you prepared once, saved on this host as a compressed
-                    copy of its disk. A new machine cloned from it starts in seconds with macOS,
-                    Xcode and its access already in place, and its journey begins at the first
-                    project step. Save one from a machine's menu once it has Xcode activated; the
-                    save runs in the background and shows here while it does.
+                    Start new macOS machines with macOS and Xcode already prepared. Save a template
+                    from a ready machine's menu, then reuse it here to skip installation.
                 </p>
             </div>
         </header>
@@ -104,8 +109,9 @@ function detailsFor(template: MachineTemplateSummary) {
         <Card v-for="save in saves" :key="`saving-${save.machineId}`">
             <template #title>
                 <span class="flex flex-wrap items-center gap-2">
+                    <PlatformIcon platform="ios" class="h-4 w-4" />
                     {{ save.name ?? 'A template' }}
-                    <Badge tone="warn">saving</Badge>
+                    <Badge tone="warn">Saving</Badge>
                 </span>
             </template>
             <template #description>
@@ -161,9 +167,10 @@ function detailsFor(template: MachineTemplateSummary) {
         <Card v-for="template in templates" :key="template.id">
             <template #title>
                 <span class="flex flex-wrap items-center gap-2">
+                    <PlatformIcon :platform="providerPlatform[template.provider]" class="h-4 w-4" />
                     {{ template.name }}
-                    <Badge v-if="template.ready" tone="ok">ready</Badge>
-                    <Badge v-else tone="warn">incomplete</Badge>
+                    <Badge v-if="template.ready" tone="ok">Ready</Badge>
+                    <Badge v-else tone="warn">Incomplete</Badge>
                 </span>
             </template>
             <template #actions>
@@ -174,7 +181,7 @@ function detailsFor(template: MachineTemplateSummary) {
                     @click="cloneFrom(template)"
                 >
                     <Plus class="h-3.5 w-3.5" />
-                    New machine from this template
+                    Create machine
                 </Button>
                 <Button
                     variant="ghost"
@@ -200,21 +207,22 @@ function detailsFor(template: MachineTemplateSummary) {
             </p>
         </Card>
 
-        <Card tone="well">
-            <template #title>
-                <span class="flex items-center gap-2">
-                    <Layers class="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
-                    What a clone shares with its template
-                </span>
-            </template>
-            <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
+        <details
+            class="rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-950"
+        >
+            <DisclosureSummary
+                class="cursor-pointer text-xs font-medium text-zinc-700 dark:text-zinc-200"
+            >
+                How templates share storage and access
+            </DisclosureSummary>
+            <p class="mt-3 text-xs leading-5 text-zinc-600 dark:text-zinc-300">
                 A clone's disk is a copy-on-write overlay over the template, so it costs nothing
                 until it writes and the template can only be deleted once every clone is gone. A
                 clone boots with the template's SSH identity, which BuildBridge pins for it, and is
                 given its own access key through the template's, which is then retired from the
                 clone. Templates stay on this host: nothing of Apple's is redistributed.
             </p>
-        </Card>
+        </details>
 
         <ConfirmDialog
             :open="removing !== null"
@@ -226,8 +234,8 @@ function detailsFor(template: MachineTemplateSummary) {
         >
             <p>
                 <b>{{ removing?.name }}</b> and its {{ formatBytes(removing?.sizeBytes ?? 0) }} of
-                files are deleted from this host. Machines already cloned from it are not affected
-                only because none exist; the source machine keeps its own disk.
+                files are deleted from this host. This template has no dependent clones. The source
+                machine keeps its own disk.
             </p>
             <Callout v-if="error" tone="danger">{{ error }}</Callout>
             <p v-if="deleting" class="flex items-center gap-2">

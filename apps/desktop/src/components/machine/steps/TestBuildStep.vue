@@ -4,7 +4,7 @@ import { computed, ref, watch } from 'vue';
 
 import { percent } from '../../../lib/format';
 import { projectPhaseLabel } from '../../../model/phases';
-import type { JourneyStep } from '../../../model/steps';
+import { unsignedBuildTargetOptions, type JourneyStep } from '../../../model/steps';
 import { activityLabel, useMachinesStore, type MachineSession } from '../../../stores/machines';
 import { useUi } from '../../../stores/ui';
 import type { UnsignedBuildTarget } from '../../../types/backend';
@@ -59,8 +59,8 @@ const failure = computed(() =>
 );
 
 // The target follows whatever last built here, so "again" repeats the same build. The device
-// SDK is the default: it ships inside Xcode, needs nothing downloaded, and is what the signed
-// archive and the phone build compile against.
+// SDK is the default and is what signed archives and phone builds compile against. Newer
+// Xcodes can still require a one-time iOS platform download for that target.
 const target = ref<UnsignedBuildTarget>(workspace.value?.lastBuildTarget ?? 'device_sdk');
 watch(
     () => workspace.value?.lastBuildTarget,
@@ -73,24 +73,13 @@ watch(
 const downloadsSimulator = computed(
     () => target.value === 'simulator' && simulatorRuntime.value === null,
 );
-const targetOptions = computed(() => [
-    {
-        value: 'device_sdk',
-        label: 'iOS device SDK · downloads the iOS platform only if Xcode asks',
-    },
-    {
-        value: 'simulator',
-        label: simulatorRuntime.value
-            ? `iOS Simulator · runtime ${simulatorRuntime.value} installed`
-            : 'iOS Simulator · about 8 GB download',
-    },
-]);
+const targetOptions = computed(() => unsignedBuildTargetOptions(simulatorRuntime.value));
 </script>
 
 <template>
     <StepPanel :step="step">
         <template #action>
-            <span class="w-72 max-w-full">
+            <span class="w-48 max-w-full">
                 <Select
                     v-model="target"
                     :options="targetOptions"
@@ -115,7 +104,7 @@ const targetOptions = computed(() => [
                 <Hammer v-else class="h-3.5 w-3.5" />
                 {{
                     downloadsSimulator
-                        ? 'Download the Simulator and run the test build'
+                        ? 'Download and build'
                         : workspace?.lastBuildSucceeded
                           ? 'Run the test build again'
                           : 'Run the test build'
@@ -235,14 +224,18 @@ const targetOptions = computed(() => [
         </template>
 
         <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-            Compiles the App scheme with signing disabled, proving the toolchain before any
-            certificate is involved. The device SDK ships inside Xcode and is what the signed
-            archive and the phone build use; newer Xcodes still ask for Apple's iOS platform before
-            building for it, and it is installed once only if they do. The Simulator is the only
-            target that can run on screen inside the guest, and it always needs that platform first.
-            The first run on a machine bootstraps pinned Node, pnpm, Ruby, and CocoaPods and
-            installs locked dependencies. If this desktop restarts mid-build, running it again
-            reattaches to the job instead of starting a second one.
+            Checks that your synchronized project compiles without signing credentials. This step
+            does not launch the app, including when Simulator is selected. Synchronize again first
+            to include changes from your project folder.
         </p>
+
+        <template #details>
+            Compiles the App scheme with signing disabled. The device SDK is also used by signed
+            archives and phone builds. Xcode may require a one-time iOS platform download for it;
+            the Simulator target always requires that platform. The first run on a machine
+            bootstraps pinned Node, pnpm, Ruby, and CocoaPods and installs locked dependencies. If
+            this desktop restarts mid-build, running it again reattaches to the job instead of
+            starting a second one.
+        </template>
     </StepPanel>
 </template>

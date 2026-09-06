@@ -12,6 +12,7 @@ pub async fn approve_android_workspace(
     let paths = MachinePaths::resolve(app, &machine_id)?;
     ensure_android_machine(app, &machine_id)?;
     let approved = inspect_android_workspace(input.path.trim())?;
+    let guard = begin_machine_operation(app, &machine_id, "approving_android_workspace")?;
     let workspace = match load_android_workspace(&paths)? {
         Some(existing) if existing.local_path == approved.local_path => StoredAndroidWorkspace {
             name: approved.name,
@@ -22,6 +23,7 @@ pub async fn approve_android_workspace(
     };
     save_android_workspace(&paths, &workspace)?;
 
+    drop(guard);
     build_machine_view(app, &paths).await
 }
 
@@ -30,8 +32,10 @@ pub async fn clear_android_workspace(
     machine_id: String,
 ) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
+    let guard = begin_machine_operation(app, &machine_id, "clearing_android_workspace")?;
     remove_file_if_present(&paths.android_workspace())?;
 
+    drop(guard);
     build_machine_view(app, &paths).await
 }
 
@@ -49,8 +53,18 @@ pub(crate) async fn sync_android_workspace_from(
     machine_id: &str,
     source: Option<(PathBuf, WorkspaceSource)>,
 ) -> Result<SyncAndroidWorkspaceResult, String> {
+    sync_android_workspace_with_env(app, machine_id, source, None).await
+}
+
+pub(crate) async fn sync_android_workspace_with_env(
+    app: &Engine,
+    machine_id: &str,
+    source: Option<(PathBuf, WorkspaceSource)>,
+    env_override: Option<Option<String>>,
+) -> Result<SyncAndroidWorkspaceResult, String> {
     let paths = MachinePaths::resolve(app, machine_id)?;
     ensure_android_machine(app, machine_id)?;
+    let guard = begin_machine_operation(app, machine_id, "synchronizing")?;
     let mut workspace = load_android_workspace(&paths)?
         .ok_or_else(|| "Approve a local Android project first.".to_string())?;
     let current = build_machine_view(app, &paths).await?;
@@ -61,9 +75,12 @@ pub(crate) async fn sync_android_workspace_from(
             WorkspaceSource::folder(),
         )
     });
-    let env_files = guest_env_files_for(app, machine_id).await?;
-    let guard = begin_machine_operation(app, machine_id, "synchronizing")?;
-
+    let env_files = match env_override {
+        Some(id) => guest_env_files_for_set(id.as_deref())
+            .await?
+            .map(|(_, files)| files),
+        None => guest_env_files_for(app, machine_id).await?,
+    };
     let event_app = app.clone();
     let event_machine_id = machine_id.to_string();
     let container_name = paths.container_name.clone();
@@ -88,7 +105,6 @@ pub(crate) async fn sync_android_workspace_from(
     })
     .await
     .map_err(|error| error.to_string());
-    drop(guard);
     let sync = finish_operation(&cancel_probe, joined)?;
 
     workspace.last_snapshot_sha256 = Some(sync.snapshot_sha256.clone());
@@ -98,19 +114,23 @@ pub(crate) async fn sync_android_workspace_from(
     workspace.last_build = None;
     workspace.last_source = Some(source);
     save_android_workspace(&paths, &workspace)?;
+    drop(guard);
     let view = build_machine_view(app, &paths).await?;
 
     Ok(SyncAndroidWorkspaceResult { view, sync })
 }
 
 /// The debug build: the Android counterpart of the unsigned test build. The first run also
-/// prepares the toolchain, which is where its download shows its progress.
+/// prepares the toolchain, which is where its download shows its progress. `allow_http` applies
+/// only to this APK; neither the workspace nor a subsequent release inherits the override.
 pub async fn run_android_debug_build(
     app: &Engine,
     machine_id: String,
+    allow_http: bool,
 ) -> Result<RunAndroidBuildResult, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     ensure_android_machine(app, &machine_id)?;
+    let guard = begin_machine_operation(app, &machine_id, "test_building")?;
     let mut workspace = load_android_workspace(&paths)?
         .ok_or_else(|| "Approve and synchronize a local Android project first.".to_string())?;
     if workspace.last_snapshot_sha256.is_none() {
@@ -118,17 +138,10 @@ pub async fn run_android_debug_build(
     }
     let current = build_machine_view(app, &paths).await?;
     ensure_android_container_ready(&current)?;
-    // One debug APK is kept per machine: the previous build's directory goes before this one
-    // starts, so a failed build leaves the last good APK in place until it is replaced.
+    // Hold the operation lock before removing the previous APK so an in-flight device
+    // installation can finish reading it. A new debug build replaces this retained output.
     remove_android_debug_outputs(&paths)?;
     let output_directory = prepare_android_debug_output_dir(&paths)?;
-    let guard = match begin_machine_operation(app, &machine_id, "test_building") {
-        Ok(guard) => guard,
-        Err(error) => {
-            let _ = fs::remove_dir(&output_directory);
-            return Err(error);
-        }
-    };
     workspace.last_build_succeeded = false;
     workspace.last_build = None;
     if let Err(error) = save_android_workspace(&paths, &workspace) {
@@ -148,6 +161,7 @@ pub async fn run_android_debug_build(
         buildbridge_machines::run_android_debug_build(
             &container_name,
             &operation_output_directory,
+            allow_http,
             |progress: AndroidBuildProgress| {
                 emit_machine_progress(
                     &event_app,
@@ -161,7 +175,6 @@ pub async fn run_android_debug_build(
     })
     .await
     .map_err(|error| error.to_string());
-    drop(guard);
     let build = match finish_operation(&cancel_probe, joined) {
         Ok(build) => build,
         Err(error) => {
@@ -173,20 +186,26 @@ pub async fn run_android_debug_build(
     workspace.last_build_succeeded = true;
     workspace.last_build = Some(build.clone());
     save_android_workspace(&paths, &workspace)?;
+    drop(guard);
     let view = build_machine_view(app, &paths).await?;
 
     Ok(RunAndroidBuildResult { view, build })
 }
 
 /// The signed release: the attached kit's upload key signs the release bundle and APK, and
-/// both are retained under the machine's artifacts with their checksums.
+/// both are retained under the machine's artifacts with their checksums. A requested version
+/// is written into the project on the host and into the synced copy in the container, so
+/// the project and the release say the same thing without a new sync.
 pub async fn run_android_signed_release(
     app: &Engine,
     machine_id: String,
     env_set_id: Option<String>,
+    outputs: Option<AndroidReleaseOutputs>,
+    version: Option<ProjectVersionInput>,
 ) -> Result<RunAndroidReleaseResult, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     ensure_android_machine(app, &machine_id)?;
+    let guard = begin_machine_operation(app, &machine_id, "releasing")?;
     remove_android_release_error(&paths)?;
     let chosen_env = guest_env_files_for_set(env_set_id.as_deref()).await?;
     let workspace = load_android_workspace(&paths)?
@@ -194,6 +213,7 @@ pub async fn run_android_signed_release(
     if !workspace.last_build_succeeded || workspace.last_snapshot_sha256.is_none() {
         return Err("Complete the debug build first.".to_string());
     }
+    let requested_version = resolve_android_project_version(&workspace.local_path, version)?;
     let current = build_machine_view(app, &paths).await?;
     ensure_android_container_ready(&current)?;
     let kit = resolve_signing_kit_for(app, &machine_id).await?;
@@ -208,13 +228,13 @@ pub async fn run_android_signed_release(
         .clone()
         .expect("checked above");
     let output_directory = prepare_android_release_output_dir(&paths)?;
-    let guard = match begin_machine_operation(app, &machine_id, "releasing") {
-        Ok(guard) => guard,
-        Err(error) => {
-            let _ = fs::remove_dir(&output_directory);
-            return Err(error);
-        }
-    };
+    // The project takes the version before the release does, so it is never behind an APK.
+    if let Some(version) = &requested_version
+        && let Err(error) = write_android_project_version(&workspace.local_path, version)
+    {
+        let _ = fs::remove_dir_all(&output_directory);
+        return Err(error);
+    }
 
     let event_app = app.clone();
     let event_machine_id = machine_id.clone();
@@ -229,6 +249,8 @@ pub async fn run_android_signed_release(
             &container_name,
             &signing,
             chosen_env.as_ref().map(|(_, files)| files),
+            outputs.unwrap_or_default(),
+            requested_version.as_ref(),
             &operation_output_directory,
             |progress: AndroidReleaseProgress| {
                 emit_machine_progress(
@@ -243,7 +265,6 @@ pub async fn run_android_signed_release(
     })
     .await
     .map_err(|error| error.to_string());
-    drop(guard);
     let release = match finish_operation(&cancel_probe, joined) {
         Ok(release) => release,
         Err(error) => {
@@ -268,6 +289,7 @@ pub async fn run_android_signed_release(
         return Err(error);
     }
     remove_android_release_error(&paths)?;
+    drop(guard);
     let view = build_machine_view(app, &paths).await?;
 
     Ok(RunAndroidReleaseResult { view, release })
@@ -313,6 +335,7 @@ pub async fn clear_android_release(
     machine_id: String,
 ) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
+    let guard = begin_machine_operation(app, &machine_id, "clearing_android_release")?;
     if let Some(stored) = load_android_release(&paths)? {
         let directory = validated_android_release_directory(&paths, &stored.result)?;
         fs::remove_dir_all(directory)
@@ -321,6 +344,7 @@ pub async fn clear_android_release(
     remove_android_release_record(&paths)?;
     remove_android_release_error(&paths)?;
 
+    drop(guard);
     build_machine_view(app, &paths).await
 }
 
@@ -337,4 +361,77 @@ fn ensure_android_machine(app: &Engine, machine_id: &str) -> Result<(), String> 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod operation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retained_android_files_cannot_change_during_installation_or_upload() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "buildbridge-android-artifact-lock-{}-{nonce}",
+            std::process::id()
+        ));
+        let app = Engine::new(EngineDeps {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            events: Arc::new(NoEvents),
+        });
+        let id = "android-artifact-lock".to_string();
+        machines::save_registry(
+            &app,
+            &machines::MachineRegistry {
+                machines: vec![StoredMachine {
+                    id: id.clone(),
+                    config: MachineConfig {
+                        provider: MachineProvider::AndroidToolchain,
+                        ..MachineConfig::default()
+                    },
+                    created_at_epoch_seconds: 0,
+                    signing_kit_id: None,
+                    env_set_id: None,
+                    template_id: None,
+                }],
+            },
+        )
+        .unwrap();
+        let paths = MachinePaths::resolve(&app, &id).unwrap();
+        let debug = paths.artifacts_dir().join("debug-retained");
+        fs::create_dir_all(&debug).unwrap();
+        let apk = debug.join("app-debug.apk");
+        fs::write(&apk, b"retained APK").unwrap();
+        write_restricted_file(&paths.android_workspace(), b"retained workspace").unwrap();
+        for label in ["running_android_device", "uploading_google_play"] {
+            let guard = begin_machine_operation(&app, &id, label).unwrap();
+            let errors = [
+                clear_android_workspace(&app, id.clone()).await.unwrap_err(),
+                clear_android_release(&app, id.clone()).await.unwrap_err(),
+                run_android_debug_build(&app, id.clone(), false)
+                    .await
+                    .unwrap_err(),
+                run_android_signed_release(&app, id.clone(), None, None, None)
+                    .await
+                    .unwrap_err(),
+                sync_android_workspace(&app, id.clone()).await.unwrap_err(),
+            ];
+            for error in errors {
+                assert!(
+                    error.contains("Another operation is still running"),
+                    "{error}"
+                );
+            }
+            assert_eq!(fs::read(&apk).unwrap(), b"retained APK");
+            assert_eq!(
+                fs::read(paths.android_workspace()).unwrap(),
+                b"retained workspace"
+            );
+            drop(guard);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 }

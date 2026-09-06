@@ -7,10 +7,11 @@
 // the key creates the rest. The guest keychain password is invented when left blank, since nothing
 // but BuildBridge ever asks for it. The form says at the bottom exactly what the kit will be able
 // to do if saved now.
-import { ChevronRight, CircleCheck, Lock, Plus } from '@lucide/vue';
-import { computed, reactive, ref, watch } from 'vue';
+import { CircleCheck, Eye, Lock, Plus } from '@lucide/vue';
+import { computed, reactive, ref, useId, watch } from 'vue';
 
 import { useBackend } from '../../lib/backend';
+import type { ListboxOption } from '../../lib/listbox';
 import { mergePathList } from '../../lib/paths';
 import {
     appStoreConnectIsPartial,
@@ -19,23 +20,59 @@ import {
     kitReadiness,
     kitShortfall,
     missingKitRequirements,
+    signingKitPlatforms,
 } from '../../model/signing';
 import { useSigningStore } from '../../stores/signing';
-import type { ManagedAppleProfile, SigningKitSummary } from '../../types/backend';
+import type { MachinePlatform, ManagedAppleProfile, SigningKitSummary } from '../../types/backend';
 import Button from '../ui/Button.vue';
 import Callout from '../ui/Callout.vue';
+import DisclosureSummary from '../ui/DisclosureSummary.vue';
 import CopyButton from '../ui/CopyButton.vue';
 import Field from '../ui/Field.vue';
 import Input from '../ui/Input.vue';
 import Modal from '../ui/Modal.vue';
 import PathField from '../ui/PathField.vue';
 import PathListField from '../ui/PathListField.vue';
+import Select from '../ui/Select.vue';
 import Spinner from '../ui/Spinner.vue';
+import SigningCredentialsDialog from './SigningCredentialsDialog.vue';
 
 const open = defineModel<boolean>('open', { default: false });
-const { kit = null } = defineProps<{ kit?: SigningKitSummary | null }>();
+const { kit = null, defaultPlatform = 'ios' } = defineProps<{
+    kit?: SigningKitSummary | null;
+    defaultPlatform?: MachinePlatform;
+}>();
 
 const signing = useSigningStore();
+const reviewing = ref(false);
+watch(
+    () => [open.value, kit?.id],
+    () => (reviewing.value = false),
+    { flush: 'sync' },
+);
+const formId = useId();
+const platform = ref('ios');
+const platformOptions: ListboxOption[] = [
+    {
+        value: 'ios',
+        label: 'Apple (iOS)',
+        platforms: ['ios'],
+        description: 'Team key or existing signing files',
+    },
+    {
+        value: 'android',
+        label: 'Android',
+        platforms: ['android'],
+        description: 'Upload keystore for Google Play and signed APKs',
+    },
+    {
+        value: 'both',
+        label: 'Apple and Android',
+        platforms: ['ios', 'android'],
+        description: 'Keep both platforms in one set of credentials',
+    },
+];
+const showApple = computed(() => platform.value !== 'android');
 
 const APPLE_CERTIFICATES_URL = 'https://developer.apple.com/account/resources/certificates/list';
 const APPLE_PROFILES_URL = 'https://developer.apple.com/account/resources/profiles/list';
@@ -63,7 +100,17 @@ const editing = computed(() => kit !== null);
 const showTeamKey = ref(true);
 const showFiles = ref(false);
 const showAndroid = ref(false);
+watch(platform, (value) => {
+    if (value !== 'ios') {
+        showAndroid.value = true;
+    }
+});
 const developmentStatus = computed(() => developmentIdentityStatus(form, kit));
+
+/** A section's open state follows its disclosure, so the seeding above can still set it. */
+function disclosureOpen(event: Event): boolean {
+    return (event.currentTarget as HTMLDetailsElement).open;
+}
 
 // Every profile BuildBridge downloads is kept on this host. A vault that loses its paths — a
 // cleared keyring, a new machine profile — does not lose those files, so they are offered back
@@ -151,11 +198,19 @@ watch([open, () => kit], ([value]) => {
         form.androidKeystorePassword = '';
         form.androidKeyAlias = '';
         form.androidKeyPassword = '';
-        showAndroid.value = kit?.androidKeystoreConfigured ?? false;
         const holdsFiles =
             (kit?.signingCertificateConfigured ?? false) ||
             (kit?.developmentCertificateConfigured ?? false) ||
             (kit?.provisioningProfileNames.length ?? 0) > 0;
+        const storedPlatforms = kit ? signingKitPlatforms(kit) : [];
+        platform.value = kit
+            ? storedPlatforms.includes('android')
+                ? storedPlatforms.includes('ios')
+                    ? 'both'
+                    : 'android'
+                : 'ios'
+            : defaultPlatform;
+        showAndroid.value = platform.value !== 'ios';
         showTeamKey.value = kit ? kit.appStoreConnectConfigured || !holdsFiles : true;
         showFiles.value = holdsFiles;
         signing.clearMessages();
@@ -190,9 +245,10 @@ async function save(): Promise<void> {
     <Modal
         v-model:open="open"
         :title="editing ? 'Edit signing credentials' : 'New signing credentials'"
+        :busy="signing.state.saving"
         wide
     >
-        <form class="space-y-4" @submit.prevent="save">
+        <form :id="formId" class="space-y-4" @submit.prevent="save">
             <!-- The transparent border and p-3 mirror the sections below, so every box in the
                  form shares one left and right edge. -->
             <div class="space-y-3 border border-transparent px-3">
@@ -208,39 +264,36 @@ async function save(): Promise<void> {
                     />
                 </Field>
                 <Field
-                    label="Guest keychain password"
-                    :stored="kit?.guestKeychainConfigured"
-                    hint="Leave it blank and BuildBridge invents one. It locks a keychain BuildBridge creates inside each macOS machine for these credentials; nothing else ever asks for it. Type your own only if you want to know it. Not an Apple password."
+                    label="Platform"
+                    hint="Choose the fields to show. Switching keeps anything already entered or stored."
                 >
-                    <Input
-                        v-model="form.guestKeychainPassword"
-                        type="password"
-                        autocomplete="new-password"
-                    />
+                    <Select v-model="platform" :options="platformOptions" />
                 </Field>
             </div>
 
             <Callout v-if="editing" tone="neutral">
-                Leave a field blank to keep what is already stored. Secret values are never shown
-                again, so an empty box does not mean an empty vault.
+                <p>
+                    Leave a field blank to keep what is already stored. Review saved values or
+                    export files before making changes.
+                </p>
+                <Button variant="outline" size="sm" class="mt-2" @click="reviewing = true">
+                    <Eye class="h-3.5 w-3.5" />
+                    Review saved credentials
+                </Button>
             </Callout>
 
-            <p class="px-3 text-[11px] leading-4 text-zinc-500 dark:text-zinc-400">
-                Then one of the two routes below. A Team key alone is enough; files exported from a
-                Mac work too, and the credentials can hold both — files are used where they exist
-                and the key creates the rest.
+            <p v-if="showApple" class="px-3 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                A Team key is the simplest route. BuildBridge creates signing files as needed and
+                generates the guest keychain password for you. Existing files work too.
             </p>
 
-            <section class="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-                <button
-                    type="button"
-                    class="flex w-full items-center gap-2 text-left"
-                    @click="showTeamKey = !showTeamKey"
-                >
-                    <ChevronRight
-                        class="h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform"
-                        :class="showTeamKey ? 'rotate-90' : ''"
-                    />
+            <details
+                v-if="showApple"
+                :open="showTeamKey"
+                class="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800"
+                @toggle="showTeamKey = disclosureOpen($event)"
+            >
+                <DisclosureSummary>
                     <span class="min-w-0 flex-1">
                         <span
                             class="block text-[13px] font-semibold text-zinc-900 dark:text-zinc-50"
@@ -263,9 +316,9 @@ async function save(): Promise<void> {
                     >
                         {{ kit.appStoreConnectKeyId }}
                     </span>
-                </button>
+                </DisclosureSummary>
 
-                <div v-if="showTeamKey" class="mt-3 space-y-3">
+                <div class="mt-3 space-y-3">
                     <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
                         Created in App Store Connect under Users and Access, Integrations, App Store
                         Connect API, with the <b>Admin</b> role. Apple lets the private key be
@@ -274,7 +327,7 @@ async function save(): Promise<void> {
                     <Field
                         label="Private key (.p8)"
                         :stored="kit?.appStoreConnectConfigured"
-                        hint="A conventional AuthKey_<KEY_ID>.p8 name fills the key ID in. Only the contents are stored, in the vault."
+                        hint="Choose the key downloaded from Apple, then enter its Key ID and Issuer ID below. The key contents are stored in the vault."
                     >
                         <PathField
                             v-model="form.appStoreConnectPrivateKeyPath"
@@ -312,18 +365,15 @@ async function save(): Promise<void> {
                         label="Copy App Store Connect link"
                     />
                 </div>
-            </section>
+            </details>
 
-            <section class="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-                <button
-                    type="button"
-                    class="flex w-full items-center gap-2 text-left"
-                    @click="showFiles = !showFiles"
-                >
-                    <ChevronRight
-                        class="h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform"
-                        :class="showFiles ? 'rotate-90' : ''"
-                    />
+            <details
+                v-if="showApple"
+                :open="showFiles"
+                class="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800"
+                @toggle="showFiles = disclosureOpen($event)"
+            >
+                <DisclosureSummary>
                     <span class="min-w-0 flex-1">
                         <span
                             class="block text-[13px] font-semibold text-zinc-900 dark:text-zinc-50"
@@ -344,7 +394,7 @@ async function save(): Promise<void> {
                         class="inline-flex shrink-0 items-center gap-1 text-[11px] text-emerald-700 dark:text-emerald-400"
                     >
                         <CircleCheck class="h-3.5 w-3.5" />
-                        complete
+                        Complete
                     </span>
                     <span
                         v-else-if="filesStarted"
@@ -352,23 +402,23 @@ async function save(): Promise<void> {
                     >
                         {{ 3 - missingFiles.length }}/3
                     </span>
-                </button>
+                </DisclosureSummary>
 
-                <div v-if="showFiles" class="mt-3 space-y-3">
-                    <details class="group">
-                        <summary
-                            class="flex cursor-pointer list-none items-center gap-1 text-[11px] text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+                <div class="mt-3 space-y-3">
+                    <details>
+                        <DisclosureSummary
+                            class="text-[11px] text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
                         >
-                            <ChevronRight
-                                class="h-3 w-3 transition-transform group-open:rotate-90"
-                            />
                             Where do these come from?
-                        </summary>
+                        </DisclosureSummary>
                         <ol
                             class="mt-2 space-y-1.5 text-xs leading-5 text-zinc-600 dark:text-zinc-300"
                         >
                             <li class="flex gap-2">
-                                <span class="shrink-0 font-semibold text-zinc-400">1</span>
+                                <span
+                                    class="shrink-0 font-semibold text-zinc-400 dark:text-zinc-500"
+                                    >1</span
+                                >
                                 <span>
                                     In Xcode, open Settings, then Accounts, then Manage
                                     Certificates, create an <b>Apple Distribution</b> identity if
@@ -379,7 +429,10 @@ async function save(): Promise<void> {
                                 </span>
                             </li>
                             <li class="flex gap-2">
-                                <span class="shrink-0 font-semibold text-zinc-400">2</span>
+                                <span
+                                    class="shrink-0 font-semibold text-zinc-400 dark:text-zinc-500"
+                                    >2</span
+                                >
                                 <span>
                                     In Certificates, Identifiers &amp; Profiles, create a
                                     Distribution <b>App Store Connect</b> profile for the exact
@@ -510,18 +563,38 @@ async function save(): Promise<void> {
                         A development identity needs both the .p12 and its export password.
                     </p>
                 </div>
-            </section>
+            </details>
 
-            <section class="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-                <button
-                    type="button"
-                    class="flex w-full items-center gap-2 text-left"
-                    @click="showAndroid = !showAndroid"
+            <details
+                v-if="showApple"
+                class="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800"
+            >
+                <DisclosureSummary
+                    class="cursor-pointer text-xs font-medium text-zinc-700 dark:text-zinc-200"
                 >
-                    <ChevronRight
-                        class="h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform"
-                        :class="showAndroid ? 'rotate-90' : ''"
+                    Advanced: guest keychain password
+                </DisclosureSummary>
+                <Field
+                    class="mt-3"
+                    label="Guest keychain password"
+                    :stored="kit?.guestKeychainConfigured"
+                    hint="Optional. Leave blank to keep the stored password or generate one for new credentials. This protects BuildBridge's signing keychain in macOS; it is not your Apple password."
+                >
+                    <Input
+                        v-model="form.guestKeychainPassword"
+                        type="password"
+                        autocomplete="new-password"
                     />
+                </Field>
+            </details>
+
+            <details
+                v-if="platform !== 'ios'"
+                :open="showAndroid"
+                class="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800"
+                @toggle="showAndroid = disclosureOpen($event)"
+            >
+                <DisclosureSummary>
                     <span class="min-w-0 flex-1">
                         <span
                             class="block text-[13px] font-semibold text-zinc-900 dark:text-zinc-50"
@@ -543,13 +616,13 @@ async function save(): Promise<void> {
                     >
                         {{ kit.androidKeystoreName }}
                     </span>
-                </button>
+                </DisclosureSummary>
 
-                <div v-if="showAndroid" class="mt-3 space-y-3">
+                <div class="mt-3 space-y-3">
                     <Field
                         label="Keystore (.jks, .keystore or .p12)"
                         :stored="kit?.androidKeystoreConfigured"
-                        hint="Stored as a path; the file stays where it is. Keep it backed up: Google Play cannot recover an upload key."
+                        hint="Stored as a path; the file stays where it is. Keep the keystore and its password backed up."
                     >
                         <PathField
                             v-model="form.androidKeystorePath"
@@ -599,26 +672,15 @@ async function save(): Promise<void> {
                         />
                     </Field>
                 </div>
-            </section>
+            </details>
 
             <!-- What the credentials will be able to do if saved now, in the reader's terms. -->
-            <div
-                class="rounded-lg p-3 text-[11px] leading-4"
-                :class="
-                    readiness.provisionable || readiness.android
-                        ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300'
-                        : 'bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300'
-                "
-            >
-                <p v-if="readiness.android" class="flex items-center gap-1 font-medium">
-                    <CircleCheck class="h-3.5 w-3.5" />
-                    These credentials can sign an Android release.
+            <Callout :tone="readiness.provisionable || readiness.android ? 'ok' : 'warn'">
+                <p v-if="readiness.android" class="font-semibold">
+                    Android credentials complete. Save, then check the signing key.
                 </p>
                 <template v-if="readiness.provisionable">
-                    <p class="flex items-center gap-1 font-medium">
-                        <CircleCheck class="h-3.5 w-3.5" />
-                        These credentials can provision a machine.
-                    </p>
+                    <p class="font-semibold">These credentials can provision a machine.</p>
                     <ul class="mt-1 space-y-0.5">
                         <li>
                             App Store archives:
@@ -642,33 +704,45 @@ async function save(): Promise<void> {
                         </li>
                     </ul>
                 </template>
-                <p v-else :class="readiness.android ? 'mt-1' : ''">
+                <p v-else-if="showApple" :class="readiness.android ? 'mt-1' : ''">
                     {{ readiness.android ? 'For iOS it' : 'Not usable yet: it' }} still needs
                     {{ shortfall.join(' and ') }}. Credentials can be saved now and finished later.
                 </p>
-            </div>
-
-            <Callout v-if="signing.state.error" tone="danger">{{ signing.state.error }}</Callout>
-
-            <div class="flex items-center justify-end gap-2">
-                <Button
-                    variant="outline"
-                    size="sm"
-                    :disabled="signing.state.saving"
-                    @click="open = false"
-                >
-                    Cancel
-                </Button>
-                <Button
-                    type="submit"
-                    size="sm"
-                    :disabled="signing.state.saving || form.name.trim() === ''"
-                >
-                    <Spinner v-if="signing.state.saving" tone="text-white dark:text-zinc-950" />
-                    <Lock v-else class="h-3.5 w-3.5" />
-                    {{ editing ? 'Save changes' : 'Store in the OS vault' }}
-                </Button>
-            </div>
+                <p v-if="platform === 'android' && !readiness.android">
+                    Add an existing keystore above, or save these credentials and choose
+                    <b>Create Android upload key</b> on their card.
+                </p>
+            </Callout>
         </form>
+
+        <template #footer>
+            <div class="w-full space-y-3">
+                <Callout v-if="signing.state.error" tone="danger">{{
+                    signing.state.error
+                }}</Callout>
+
+                <div class="flex items-center justify-end gap-2">
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        :disabled="signing.state.saving"
+                        @click="open = false"
+                    >
+                        Cancel
+                    </Button>
+                    <Button
+                        type="submit"
+                        :form="formId"
+                        size="sm"
+                        :disabled="signing.state.saving || form.name.trim() === ''"
+                    >
+                        <Spinner v-if="signing.state.saving" tone="text-white dark:text-zinc-950" />
+                        <Lock v-else class="h-3.5 w-3.5" />
+                        {{ editing ? 'Save changes' : 'Store in the OS vault' }}
+                    </Button>
+                </div>
+            </div>
+        </template>
     </Modal>
+    <SigningCredentialsDialog v-if="open && kit && reviewing" v-model:open="reviewing" :kit="kit" />
 </template>

@@ -4,16 +4,23 @@
 import { FolderOpen, Package, ScrollText } from '@lucide/vue';
 import { computed, onMounted, ref, watch } from 'vue';
 
-import { formatBytes, percent, shortHash } from '../../../lib/format';
+import { formatBytes, percent } from '../../../lib/format';
+import { requestedVersion } from '../../../model/build-flow';
 import type { JourneyStep } from '../../../model/steps';
 import { androidReleasePhaseLabel } from '../../../model/phases';
+import { androidOutputLabel, androidOutputOptions } from '../../../model/android-outputs';
+import { useBuildFlowStore } from '../../../stores/build-flow';
+import type { AndroidReleaseOutputs } from '../../../types/backend';
 import { useEnvSetsStore } from '../../../stores/envs';
 import { useMachinesStore, type MachineSession } from '../../../stores/machines';
 import { useUi } from '../../../stores/ui';
+import VersionFields from '../VersionFields.vue';
 import Button from '../../ui/Button.vue';
 import ConfirmDialog from '../../dialogs/ConfirmDialog.vue';
 import CopyButton from '../../ui/CopyButton.vue';
+import DisclosureSummary from '../../ui/DisclosureSummary.vue';
 import FailureBlock from '../../ui/FailureBlock.vue';
+import Field from '../../ui/Field.vue';
 import KeyValue from '../../ui/KeyValue.vue';
 import ProgressRow from '../../ui/ProgressRow.vue';
 import Spinner from '../../ui/Spinner.vue';
@@ -35,6 +42,13 @@ const releasing = computed(() => step.status === 'running');
 const progress = computed(() => session.androidRelease);
 const lastLine = computed(() => session.archiveLog.at(-1)?.text ?? null);
 const clearOpen = ref(false);
+const draft = useBuildFlowStore().draft(session.id);
+const outputs = computed<AndroidReleaseOutputs>({
+    get: () => draft.androidOutputs,
+    set: (value) => {
+        draft.androidOutputs = value;
+    },
+});
 
 const envs = useEnvSetsStore();
 const attachedEnvSet = computed(() => view.value.envSet);
@@ -46,17 +60,25 @@ watch(attachedEnvSet, (set, previous) => {
 });
 onMounted(() => void envs.load());
 const envOptions = computed(() => [
-    { value: '', label: 'No environment' },
+    {
+        value: '',
+        label: 'Use prepared assets',
+        description:
+            'Keep web assets from the most recent build, including their environment values.',
+    },
     ...envs.sets.value.map((set) => ({
         value: set.id,
-        label: set.id === attachedEnvSet.value?.id ? `${set.name} · attached` : `${set.name}`,
+        label: set.name,
+        description:
+            set.id === attachedEnvSet.value?.id
+                ? 'Rebuild web assets · machine default'
+                : 'Rebuild web assets with this environment',
     })),
 ]);
 const chosenEnvName = computed(() => envs.setById(envSetId.value)?.name ?? null);
 
 const recipe = computed(() => [
     { label: 'Build type', value: 'release' },
-    { label: 'Outputs', value: 'App bundle for Google Play · APK for direct install' },
     {
         label: 'Application identifier',
         value: workspace.value?.applicationId ?? 'From the Gradle script',
@@ -65,20 +87,26 @@ const recipe = computed(() => [
     { label: 'Upload key', value: kit.value?.androidKeystoreName ?? null, mono: true },
     { label: 'Key alias', value: kit.value?.androidKeyAlias ?? null, mono: true },
     {
-        label: 'Environment',
+        label: 'Web assets for this build',
         value: chosenEnvName.value
             ? `${chosenEnvName.value} · web assets rebuilt with it before bundling`
-            : 'None · web assets as the debug build left them',
+            : 'Prepared assets · keeps the values from the most recent build',
     },
 ]);
 
-const artifacts = computed(() =>
-    release.value
-        ? [
-              { label: 'App bundle', file: release.value.aab },
-              { label: 'APK', file: release.value.apk },
-          ]
-        : [],
+const artifacts = computed(() => [
+    ...(release.value?.aab
+        ? [{ label: 'App bundle (AAB)', destination: 'Google Play', file: release.value.aab }]
+        : []),
+    ...(release.value?.apk
+        ? [{ label: 'APK', destination: 'Direct installation', file: release.value.apk }]
+        : []),
+]);
+// This command is copied into the user's terminal; quote the host path as one shell argument.
+const installCommand = computed(() =>
+    release.value?.apk
+        ? `adb install -r '${release.value.apk.path.replaceAll("'", "'\\''")}'`
+        : null,
 );
 
 async function clear(): Promise<void> {
@@ -93,27 +121,36 @@ async function clear(): Promise<void> {
             <span
                 v-if="envs.sets.value.length"
                 class="w-56 max-w-full"
-                title="The environment the web assets are rebuilt with for this release; the one attached at the sync step is the default"
+                v-tip="
+                    'The environment the web assets are rebuilt with for this release; the one attached at the sync step is the default'
+                "
             >
                 <Select
                     v-model="envSetId"
                     :options="envOptions"
                     size="sm"
-                    placeholder="No environment"
+                    placeholder="Use prepared assets"
                     :disabled="busy"
                 />
             </span>
             <Button
                 size="sm"
                 :disabled="busy || step.status === 'pending'"
-                @click="machines.signedRelease(session.id, envSetId || null)"
+                @click="
+                    machines.signedRelease(
+                        session.id,
+                        envSetId || null,
+                        outputs,
+                        requestedVersion(view, draft),
+                    )
+                "
             >
                 <Spinner
                     v-if="session.operation === 'release'"
                     tone="text-white dark:text-zinc-950"
                 />
                 <Package v-else class="h-3.5 w-3.5" />
-                {{ release ? 'Build the signed release again' : 'Build the signed bundle and APK' }}
+                Build signed {{ androidOutputLabel[outputs] }}
             </Button>
             <Button
                 v-if="release"
@@ -122,7 +159,7 @@ async function clear(): Promise<void> {
                 @click="machines.revealRelease(session.id)"
             >
                 <FolderOpen class="h-3.5 w-3.5" />
-                Reveal folder
+                Show in folder
             </Button>
             <Button
                 v-if="session.archiveLog.length"
@@ -137,7 +174,7 @@ async function clear(): Promise<void> {
                 v-if="release || releaseError"
                 variant="ghost"
                 size="sm"
-                title="Deletes the bundle and APK on this host"
+                title="Deletes the retained release files on this host"
                 :disabled="busy"
                 @click="clearOpen = true"
             >
@@ -184,6 +221,11 @@ async function clear(): Promise<void> {
                         class="w-32 shrink-0 text-xs font-medium text-zinc-700 dark:text-zinc-200"
                     >
                         {{ artifact.label }}
+                        <span
+                            class="block text-[11px] font-normal text-zinc-500 dark:text-zinc-400"
+                        >
+                            {{ artifact.destination }}
+                        </span>
                     </span>
                     <span
                         class="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400"
@@ -201,24 +243,81 @@ async function clear(): Promise<void> {
             </ul>
             <p class="mt-2 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
                 {{ release.versionName }} ({{ release.versionCode }}) ·
-                {{ release.applicationId }} · key {{ release.keyAlias }} · certificate
-                {{ shortHash(release.certificateSha256, 12) }} · env
-                {{ android?.releaseEnvSet ?? 'none' }}
+                {{ release.applicationId }} · key {{ release.keyAlias }} · environment
+                {{ android?.releaseEnvSet ?? 'prepared assets (environment not recorded)' }}
             </p>
+            <div class="mt-3 flex items-start gap-2">
+                <div class="min-w-0 flex-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+                    <span class="block font-medium">Signing certificate · SHA-256</span>
+                    <code class="mt-1 block break-all">{{ release.certificateSha256 }}</code>
+                </div>
+                <CopyButton :text="release.certificateSha256" label="Copy fingerprint" />
+            </div>
+            <details v-if="installCommand" class="mt-3 text-xs text-zinc-600 dark:text-zinc-300">
+                <DisclosureSummary class="font-medium">Install this APK with ADB</DisclosureSummary>
+                <div class="mt-2 space-y-2">
+                    <div
+                        class="flex items-center gap-2 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950"
+                    >
+                        <code class="min-w-0 flex-1 text-[11px] break-all">{{
+                            installCommand
+                        }}</code>
+                        <CopyButton :text="installCommand" label="Copy command" />
+                    </div>
+                    <p class="text-[11px] leading-5 text-zinc-500 dark:text-zinc-400">
+                        Run this in a terminal on this host with Android SDK Platform-Tools
+                        installed and a phone or emulator connected. Preview has the ADB setup
+                        instructions.
+                    </p>
+                </div>
+            </details>
         </template>
 
         <div class="space-y-3">
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                Runs Gradle's <span class="font-mono">bundleRelease</span> and
-                <span class="font-mono">assembleRelease</span>, signs the bundle with
-                <span class="font-mono">jarsigner</span> and the aligned APK with
-                <span class="font-mono">apksigner</span> using the upload key in the attached
-                credentials, streamed into the container for the run, verifies both signatures, and
-                copies both artifacts to this host with matching SHA-256 checksums. Nothing is
-                uploaded to Google Play; the bundle is what its console takes.
+                Saves the selected signed release files on this host. Nothing is uploaded.
+                Synchronize and run the debug build first to include project changes.
             </p>
+            <Field label="Release files" hint="AAB for Google Play; APK for direct installation.">
+                <Select v-model="outputs" :disabled="busy" :options="androidOutputOptions" />
+            </Field>
             <KeyValue :items="recipe" :columns="3" />
+            <VersionFields :session="session" :disabled="busy" />
+            <details class="text-xs text-zinc-600 dark:text-zinc-300">
+                <DisclosureSummary class="font-medium">
+                    Google Play and direct installation
+                </DisclosureSummary>
+                <div class="mt-2 space-y-2 leading-5">
+                    <p>
+                        Upload an AAB through Play Console, or distribute an APK directly. The
+                        selected files use this build's signing key; a Google Play account is not
+                        needed to create or install the APK.
+                    </p>
+                    <p>
+                        With Play App Signing, Google Play may use a different app signing key for
+                        the APKs it delivers. Compare this build's certificate with the upload key
+                        certificate in Play Console when checking an AAB for upload.
+                    </p>
+                    <p>
+                        For direct APK updates, keep the same application identifier and signing
+                        key. If Google Play uses a different app signing key, a locally signed APK
+                        cannot update the Play-installed app. Keep a secure backup of the key used
+                        for direct distribution.
+                    </p>
+                </div>
+            </details>
         </div>
+
+        <template #details>
+            Runs Gradle's <span class="font-mono">assembleRelease</span>, plus
+            <span class="font-mono">bundleRelease</span> when an AAB is selected. AAB-only builds
+            also use an internal APK to check the application identifier, version and signing
+            certificate. Only selected release files are retained on this host. The signing key is
+            streamed into the container for this run. BuildBridge signs with
+            <span class="font-mono">jarsigner</span> and <span class="font-mono">apksigner</span>,
+            verifies signatures, and checks SHA-256 checksums after copying the artifacts. Use
+            prepared assets keeps the environment values already compiled into the web app.
+        </template>
 
         <ConfirmDialog
             v-model:open="clearOpen"
@@ -227,8 +326,8 @@ async function clear(): Promise<void> {
             @confirm="clear"
         >
             <p>
-                The retained app bundle, the APK, and the last failure diagnostic are deleted from
-                this host. The container and the signing credentials are not affected.
+                The retained release files and the last failure diagnostic are deleted from this
+                host. The container and the signing credentials are not affected.
             </p>
         </ConfirmDialog>
     </StepPanel>

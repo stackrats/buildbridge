@@ -1,31 +1,37 @@
 # BuildBridge Product Goal and Architecture
 
 Status: working product and engineering reference  
-Last updated: 2026-09-06
+Last updated: 2026-09-07
 
 This document defines what BuildBridge is intended to become, the first complete workflow we are building, the boundaries between its components, and the order in which the project should expand. It should be updated when a durable product or architecture decision changes.
 
 ## North star
 
-BuildBridge turns a Linux box into a build server for iOS and Android: install the desktop, create and prepare a managed macOS machine or an Android toolchain once, hold signing material in the host's vault, and build and sign an IPA, or an app bundle and APK, with nothing else installed. Everything else is optional. Pairing the desktop to a control plane adds two things — starting a build from any browser, and a record of every build that outlives the desktop — and it adds them without moving a secret or a path off the host.
+BuildBridge makes repeatable iOS and Android builds available from one desktop. On Linux, prepare a managed macOS machine or an Android toolchain container. On a Mac, use the installed Xcode and existing signing identity directly for iOS, or Docker Desktop for Android. Approve a project, choose a build outcome, and retrieve verified output. Native Mac execution is implemented but still awaits acceptance on physical Apple hardware.
+
+The optional self-hosted build dashboard coordinates accounts, permissions, queues, logs, and private artifact downloads. It is useful today for accessing your own builders remotely and for sharing a trusted Mac with another person. Sharing uses this service; it does not replace it. A person borrowing a builder only needs an account on the same server and an invitation, while the computer accepting jobs pairs as a runner. A hosted SaaS connection is planned and is not required for local builds.
 
 The desktop is the product; the control plane is a remote for it.
 
-The intended experience is:
+The intended local experience is:
 
-1. Install the BuildBridge desktop runner on a Linux, Windows, or macOS machine.
-2. Pair it to the BuildBridge control plane with a short-lived, single-use code.
-3. Register one or more local execution environments, such as the native host, a managed macOS guest, or an Android toolchain container.
-4. Configure a project, toolchain, and signing material without exposing secrets to the web UI or build logs.
-5. Queue a typed build from the web interface.
-6. Watch state and logs update in real time from any browser.
-7. Download or locate the resulting artifacts and retain an auditable build record.
+1. Install the BuildBridge desktop on a supported host (Linux for managed macOS; macOS for native Xcode).
+2. Choose **This Mac** for native iOS builds, or prepare a reusable virtual Mac or Android toolchain using a local template when available.
+3. Approve a local project and choose its build environment.
+4. Build the latest local source for testing, then install a debug APK or prepare an iPhone run when wanted.
+5. Choose signing credentials when a signed release or device run needs them, and review any required provisioning.
+6. Create a release and locate its verified artifacts. The desktop keeps source, status, diagnostics and output details accessible.
+7. Optionally pair with a remote build dashboard using a short-lived, single-use code to queue typed builds, follow live logs and retain remote history.
+
+Machine setup is a first-use guide; the everyday interface is the approved project, build choices and supported preview destinations. Native Mac builds currently use exact Git commits and provide unsigned compile or signed archive/export outcomes; remote screen sharing, dirty-source uploads and native preview are later work. Native Windows execution remains an expansion target.
 
 “Cross-platform” does not mean pretending every toolchain can execute on every operating system. It means BuildBridge presents a consistent workflow while dispatching work to a compatible executor.
 
 ## Definition of success
 
-BuildBridge reaches its initial product goal when a developer can:
+The local desktop succeeds when a developer can prepare a machine once, approve and build a project, preview through an explicitly supported destination, and export signed artifacts without pairing a remote service. Success is specific to the chosen outcome: a test build does not require release signing.
+
+The broader connected platform succeeds when a developer can:
 
 - pair and revoke runners securely;
 - see the online state and capabilities of Linux, Windows, and macOS runners;
@@ -41,7 +47,7 @@ BuildBridge reaches its initial product goal when a developer can:
 
 ## First complete workflow
 
-The first golden path is intentionally narrower than the full platform matrix:
+The first connected golden path is intentionally narrower than the full platform matrix, and extends the complete local workflow:
 
 > From the web control plane, queue an Apple build on a paired Linux x86_64 runner that manages a persistent Docker-OSX guest; securely provision the guest, run a typed Xcode archive/export operation, stream live logs, and return the signed artifact.
 
@@ -69,8 +75,9 @@ We should finish this path before broadening Docker-OSX support to Windows or ad
 ## System shape
 
 The native side is four crates and two clients. `buildbridge-contract` is the wire contract with
-the control plane; `buildbridge-runner` its HTTP transport; `buildbridge-machines` the provider
-that drives Docker, QEMU and the macOS guest; `buildbridge-engine` everything above them —
+the control plane; `buildbridge-runner` its HTTP transport; `buildbridge-machines` the three
+providers that drive Docker, QEMU and the guests — Docker-OSX, dockur/macos and the Android
+toolchain — and the native Mac executor; `buildbridge-engine` everything above them —
 machines, records, vault, Apple, templates — behind one `Engine` value that any client holds.
 The desktop and the `buildbridge` command line are the two clients today, both thin, both on the
 same directories (decision 45).
@@ -86,12 +93,15 @@ flowchart LR
     CLI[buildbridge command line] --> Engine
     Engine --> Vault[Operating-system credential vault]
     Engine --> Native[Native host executor]
-    Engine --> Provider[Docker-OSX provider]
+    Engine --> Provider[Machine providers: Docker-OSX, dockur/macos, Android toolchain]
     Provider --> Docker[Docker + QEMU/KVM]
     Docker --> Guest[Persistent macOS guest]
+    Docker --> Toolchain[Android toolchain container]
     Engine -->|Pinned SSH bridge| Guest
+    Engine -->|docker exec| Toolchain
     Native --> Artifacts
     Guest --> Artifacts
+    Toolchain --> Artifacts
 ```
 
 The web application is the control plane. It coordinates identity, intent, status, logs, and artifacts. It does not execute untrusted build commands itself.
@@ -133,7 +143,7 @@ The engine crate owns, on behalf of whichever client holds it:
 - periodic runner health heartbeats;
 - locally approved workspaces and executor configuration;
 - native and managed-executor capability discovery;
-- Docker-OSX lifecycle management on supported hosts;
+- provider lifecycle management — Docker-OSX, dockur/macos and the Android toolchain — on supported hosts, and native Xcode execution on a Mac;
 - local signing material and secret summaries;
 - guest SSH keys and host-key pins;
 - typed job execution and log forwarding; and
@@ -382,19 +392,21 @@ The file-acquisition guide is part of the desktop UI:
 1. On a trusted Mac, open **Xcode → Settings → Accounts → Manage Certificates**, create an **Apple Distribution** identity if needed, then export that identity as a password-protected `.p12`. The private key remains on the Mac that created the identity; an Apple `.cer` download alone cannot be used as the signing identity and cannot recover a missing private key.
 2. In Apple Developer **Certificates, Identifiers & Profiles → Profiles**, create a Distribution **App Store Connect** profile using the exact project bundle ID, team, and exported distribution certificate, then download its `.mobileprovision` file.
 3. Enter the `.p12` export password and create a separate BuildBridge guest-keychain password. Neither value is an Apple Account password.
-4. For managed profile replacement and later TestFlight/App Store uploads, create a Team API key in App Store Connect **Users and Access → Integrations → App Store Connect API**, record its Key ID and Issuer ID, and download its `.p8` private key once. This key enables BuildBridge's confirmed profile-creation action but does not replace the `.p12` signing identity or its private key.
+4. For managed profile replacement and optional TestFlight/App Store uploads, create a Team API key in App Store Connect **Users and Access → Integrations → App Store Connect API**, record its Key ID and Issuer ID, and download its `.p8` private key once. This key enables BuildBridge's confirmed profile-creation action and Transporter uploads but does not replace the `.p12` signing identity or its private key.
 
 The desktop displays the detected project team and release bundle identifier beside these instructions and provides copyable links to the relevant Apple portals. It must not imply that the certificate archive can be downloaded from App Store Connect or that a `.p8` key is a signing identity.
 
 ### Storage
 
 - The desktop stores App Store Connect keys, certificate passphrases, and guest-keychain credentials in the operating-system credential vault.
-- The desktop accepts an absolute `.p8` host path, validates its extension, bounded size, PEM envelope, filename/key-ID agreement, and owner-only Unix permissions, reads it once, and stores only the key contents in the OS vault. It never sends the source path or private contents to Vue after storage. A conventional `AuthKey_<KEY_ID>.p8` filename supplies the Key ID automatically.
+- The desktop accepts an absolute `.p8` host path, validates its extension, bounded size, PEM envelope, filename/key-ID agreement, and owner-only Unix permissions, reads it once, and stores only the key contents in the OS vault. The source path is not returned to Vue; private contents are returned only by an explicit local credential reveal/copy action. A conventional `AuthKey_<KEY_ID>.p8` filename supplies the Key ID automatically.
 - **Verify developer team** loads the key only from the host OS vault, signs a five-minute ES256 JWT locally, and performs `GET /v1/apps` plus `GET /v1/bundleIds` with the approved project's exact bundle identifier. A successful-but-empty filtered Developer-ID result falls back to a read-only, 200-record account inventory and an exact local comparison. When the opaque Bundle-ID resource is resolved, `GET /v1/bundleIds/{id}/profiles` requests name, type, platform, state, UUID, and dates only; `GET /v1/certificates` similarly requests safe certificate metadata without certificate content. The UI receives the key ID, project team, app/bundle/profile/certificate metadata, resource visibility, and verification time; it never receives the issuer ID, private key, JWT, profile payload, or certificate payload. An empty result never triggers automatic registration or revocation.
 - Apple's read responses do not expose the Team key's assigned role. BuildBridge therefore treats record matching as verification, not permission to mutate. Managed Apple Distribution certificate creation remains disabled until the UI asks the user to confirm an **Admin** Team key; a Developer key may remain connected for read-only/app-delivery work.
 - Saving the Team API route and portable signing-file route is additive. Blank fields preserve the other already-stored route; the separate confirmation-protected **Clear signing kit** action removes the complete vault record.
-- Secret values are never serialized into normal desktop view models, web payloads, logs, Docker environment variables, or command-line arguments. The one exception is an env set's secrets, which the editor fetches through a dedicated command when it opens on a stored set and holds masked behind an eye icon; they never travel inside a summary.
-- The UI exposes only safe summaries such as a key ID, certificate filename, and profile count.
+- Secret values are never serialized into normal desktop view models, control-plane payloads, logs, Docker environment variables, or command-line arguments. Local credential review uses dedicated commands: the signing review fetches one allowlisted secret only after Show or Copy, while an environment editor fetches its set's secrets when opened and keeps them masked. Neither puts secret values in summaries or shared frontend stores.
+- Lists expose safe summaries such as a key ID, certificate filename, and profile count. **Review credentials** on a signing card or edit dialog exposes stored identifiers and masked passwords, with independent Show/Hide and Copy controls, plus Export for saved private keys, certificates, profiles, and keystores. A missing separate Android key password resolves to the keystore password. Files still referenced on disk must exist to be exported; the `.p8` is reconstructed from the vault.
+- Credential review commands are restricted to the main desktop window. Revealed values are discarded on close/unmount, window blur, document hiding, and after 30 seconds; late requests cannot repopulate a closed or changed view. Clipboard success is shown only after a successful write; BuildBridge does not promise to erase clipboard history. The environment editor clears its drafts on close.
+- Exports write a new file in the selected location with owner-only Unix permissions, refuse existing files and destination symlinks, and remove partial output after a failed write. Original files are kept. Passwords can be copied separately into a password manager. Review and export enable a user-managed backup; they are not automatic backups and cannot recover a vault or source file that has already been lost. Internal runner tokens, file-backed SSH identities, and native macOS Keychain identities are not part of signing credential review; one-use macOS passwords remain unsaved.
 - The BuildBridge SSH private key is stored in the desktop application configuration directory with restricted filesystem permissions because OpenSSH requires a file-backed identity.
 
 ### Provisioning
@@ -457,6 +469,10 @@ The web application should provide:
 
 The desktop is an application shell, not a scrolling document. A slim top bar carries the identity and the two facts that are true of the whole application — whether this host can run a machine, and whether the control plane is connected. A resizable sidebar lists **Overview** and every registered **machine** — macOS or Android — with a status dot (or a spinner while an operation runs), with **Signing kit** and **Control plane** grouped beneath; the selected item fills the main pane.
 
+The desktop logo pairs an 18px-high mark with a 16px medium-weight wordmark using the shared monospace font stack. Both are vertically centred in a 24px row with a 10px gap, and the name stays on one line.
+
+The splash screen and README use a stacked logo: a 64px-high mark, a 20px gap, and a 28px monospace wordmark with tight tracking. The splash uses the shared font stack and medium weight. The README uses the light and dark SVG logos in `docs/images`, with the name outlined from Noto Sans Mono Regular so its typography is independent of Markdown heading styles and SVG image font substitution. Mark-only application icons retain their platform-specific sizing.
+
 The visual language is BuildBridge's own, written in **stock Tailwind utilities only** — no custom colour classes and no bespoke utility layer — so any Tailwind developer can read a template and know exactly what it renders. The palette is fixed by convention, documented at the top of `apps/desktop/src/style.css` and matched by the web control plane:
 
 | Role | Light | Dark |
@@ -509,7 +525,9 @@ the phone with its console streaming — is *live*, and shows a steady emerald p
 "live" beside the row, and the last console line ticking as it lands. The button that started it
 names it as running and does not spin, because nothing is waiting on it.
 
-There is deliberately no accent hue. The grey ramp is `zinc`, which is neutral rather than the blue-tinted `slate`, and an action is ink — near-black in light, near-white in dark — so colour is spent only on status: an emerald, amber or red anywhere on screen always means done, needs attention, or failed. Light and dark are the same classes with `dark:` variants, following the system unless overridden. Standing rules: sentence case everywhere, no uppercase styling, no gradients, no decorative colour, one glyph per row, and colour never carrying meaning alone — every status dot names its state on hover.
+The grey ramp is `zinc`, and actions use ink — near-black in light, near-white in dark. Status uses emerald, amber and red, with amber also marking active spinners. Platform icons use white in dark mode and dark ink in light mode for Apple, and emerald for Android, retaining distinct shapes and accessible names. Filled buttons preserve contrasting spinner colours. Light and dark use `dark:` variants, following the system unless overridden. Standing rules: sentence case everywhere, no uppercase styling, no gradients, one glyph per row, and colour never carrying meaning alone — every status dot names its state on hover.
+
+The transparent native taskbar mark uses a taller variant of the logo, filling 98% of the square icon's width and about 73% of its height for legibility at small panel sizes. `apps/desktop/src-tauri/icons/icon-source.svg` is the source for its PNG sizes; the interface logo and the black-backed platform tiles retain their own proportions.
 
 Each machine page has three tabs that keep their own state while other machines are selected:
 
@@ -519,7 +537,7 @@ Each machine page has three tabs that keep their own state while other machines 
 
 Step state is derived from the backend view model by pure, unit-tested functions (`apps/desktop/src/model/steps.ts`); components never infer readiness on their own. Every native command is wrapped once in a typed backend adapter, and a development-only mock backend lets the whole interface run in a plain browser without Docker or a guest.
 
-The **Signing** page is host-level. In the desktop each entry is called *signing credentials* and each env set an *environment* (since 2026-09-06); the code, the CLI commands, and this record keep the model names *signing kit* and *env set*. Each kit is a named set of Apple signing credentials held in the operating-system vault so they are entered once rather than per machine: always a guest keychain password, and then either an App Store Connect Team key (from which BuildBridge creates certificates and profiles at Apple as machines need them) or the files exported from a Mac — a `.p12` identity with its passphrase and one or more provisioning profiles — or both. A host keeps as many kits as it has developer teams or apps (bounded at twelve), and every kit shows exactly what is stored: the identity filename, whether each password is held, the profile filenames, the Team key ID, when it was added, and which machines are attached to it. Secret values are never returned to the interface, so editing a kit treats a blank field as "keep what is stored".
+The **Signing** page is host-level. In the desktop each entry is called *signing credentials* and each env set an *environment* (since 2026-09-06); the code, the CLI commands, and this record keep the model names *signing kit* and *env set*. Each kit is a named set of Apple signing credentials held in the operating-system vault so they are entered once rather than per machine: always a guest keychain password, and then either an App Store Connect Team key (from which BuildBridge creates certificates and profiles at Apple as machines need them) or the files exported from a Mac — a `.p12` identity with its passphrase and one or more provisioning profiles — or both. A host keeps as many kits as it has developer teams or apps (bounded at twelve), and every kit shows exactly what is stored: the identity filename, whether each password is held, the profile filenames, the Team key ID, when it was added, and which machines are attached to it. Editing a kit treats a blank field as "keep what is stored". A separate **Review credentials** dialog retrieves a selected saved secret only when requested, without altering the edit form.
 
 A kit can also **create its own identity at Apple with no Mac anywhere**. The button on the kit
 generates an RSA key and a CSR on this host with fixed-argv OpenSSL, sends the CSR to Apple's
@@ -562,24 +580,27 @@ The web and desktop should expose the same underlying states and identifiers, bu
 
 ## Current implementation
 
-As of 2026-09-02:
+As of 2026-09-07:
 
 | Area | Current state | Next gap |
 | --- | --- | --- |
-| Monorepo | Vite+ JavaScript workspace, engine crate, Tauri/Vue desktop app, `buildbridge` command line, Cargo workspace | CI and release packaging |
+| Monorepo | Vite+ JavaScript workspace, engine crate, Tauri/Vue desktop app, `buildbridge` command line, Cargo workspace; GitHub Actions runs the checks on Linux and compiles the workspace on macOS on every push, and a version tag builds the Linux and macOS bundles and the command line onto a draft release | Signed desktop updates and release channels |
 | Runner pairing | Single-use code and scoped runner token; token stored in OS vault; a runner can be removed from the control plane, which deletes its tokens, keeps its build history, and hides it from the dashboard | Human web authentication, and reusing one runner identity across re-pairings instead of creating a second record |
 | Realtime | Reverb private runner channel wakes the desktop; the heartbeat is separate but its reply reports work still waiting, so a lost queue event is recovered within twenty seconds | Browser log/artifact event coverage and reconnection tests |
 | Job protocol | Versioned DTOs, leases with renewal, ordered logs streamed during long jobs, completion with a kind-specific result, and heartbeats that report each machine's name and readiness | Cancellation, retries, executor assignment |
 | Build kinds | Control-plane diagnostics, `apple_archive` — a signed Release archive and App Store export on a named machine, of the approved folder or of a ref of the same project — and `android_release`, the same shape on an Android machine, plus the local unsigned smoke build, debug build and signing provisioning they build on | Cancellation and retries; native Linux/Windows kinds |
-| Native runner | Fixed-argv platform diagnostics | Native-host workspace and real build providers |
-| Desktop lifecycle | Close-to-tray with per-machine start, stop, refresh, and explicit quit actions; a machine registry with per-machine directories, container names, ports, busy markers, and legacy migration; a sidebar/tab shell with Setup, Build, and Logs per machine; every long-running operation carries a **Stop** that kills its host-side processes and, for builds that outlive their SSH session, the job inside the guest | Notifications and richer background-state recovery |
+| Native Mac executor | **This Mac** on a macOS host: Xcode, iOS SDK, architecture and tool discovery with separate unsigned-compile and signed-export readiness; approval of a local Git project with an existing Apple Distribution identity and App Store profile; exact-commit private checkouts, unsigned compile and signed archive/export under process and OS file locks; shared-builder invitations, grants and local policies; the queue service alive in the tray with optional launch at login | Acceptance on physical Apple hardware; remote screen sharing, dirty-source uploads and native preview; Android on a Mac through Docker Desktop is covered by tests but not yet accepted on hardware |
+| Desktop lifecycle | Close-to-tray with per-machine start, stop, refresh, and explicit quit actions; a machine registry with per-machine directories, container names, ports, busy markers, and legacy migration; a sidebar/tab shell with Machine setup, Build, Preview, Publish and All steps per machine, plus a log drawer; every long-running operation carries a **Stop** that kills its host-side processes and, for builds that outlive their SSH session, the job inside the guest | Notifications and richer background-state recovery |
 | Docker-OSX host | Prerequisite probing, stable identity, create/start/stop/status/logs with launch-phase progress, elapsed-time and guest-readiness monitoring, explicit confirmation-protected container discard and machine deletion; the macOS disk in a host-managed `disk/` directory bound through `IMAGE_PATH`, with in-place migration of older machines; a QMP control socket and, when the host has `plugdev` and `/dev/bus/usb`, iPhone passthrough by `usb-host` hot-plug with a root-installed udev rule that releases the phone from `usbmuxd`; machine templates saved from a prepared machine and cloned as copy-on-write overlays, with the clone bootstrapped through the template's key | Image pinning, storage health, cancellation |
 | macOS guest bridge | SSH reachability, Ed25519 access key, explicit fingerprint pin, one-time password-authenticated key install on the pin, password-optional Xcode activation over the bridge, mismatch rejection, macOS/Xcode probes, the Xcode archive downloaded from Apple in a window of the desktop with the import following by itself, measured Xcode XIP transfer/expansion, bounded project snapshot transfer, fixed tool bootstrap, automatic Simulator installation progress, durable unsigned-build reconnection, a validated simulator build, password-safe signing provisioning, fixed signed archive/export execution, and — accepted live on 2026-09-04 — `devicectl` listing and pairing of a passed-through iPhone, a Debug build signed with the development identity for that phone under its own Debug App ID, install, launch, its console streamed into the log drawer, and Safari opened in the guest for Web Inspector on the app | Per-build isolation, signed-job restart recovery, cancellation, and the debugger/live-reload routes |
 | Env sets | Named sets of build variables in the OS vault, attached per machine as a default and chosen per signed archive (desktop step and dashboard form), written into the guest as `.env.production.local` for the web build and sourced by the build shell, with the web assets rebuilt in place for a per-archive choice; variables read back with their values, secrets by key only in summaries, fetched masked into the editor with an eye to show one; set names travel in the heartbeat | Env for native compile-time configuration |
 | Signing kits | Multiple named kits in the OS vault with per-machine attachment, each able to hold an Android upload key (keystore path, alias, passwords) beside or instead of Apple material, created in one click or pointed at an existing keystore, safe stored-detail display, and named recovery states when the vault is cleared or unreadable; portable file import remains available; Xcode VM sign-in is labeled best-effort; `.p8` keys are accepted by restricted host path and retained in the OS vault; Apple app, Bundle ID, certificate, and profile metadata are verified read-only; an expired App Store profile can be replaced through confirmed native creation and owner-only retention, and an existing Apple profile can be downloaded into the attached kit or re-added from the host's retained copies; a Distribution identity can be created at Apple for a key generated on the Linux host and packaged into the kit, so no Mac is needed at any point; certificate/profile paths are revalidated and the real signing kit is provisioned and code-sign probed through a fixed native helper; archive execution unlocks and relocks the dedicated keychain within that helper's process boundary; a kit may also hold an optional development identity, imported or created at Apple the same way, and the device step registers the attached phone and creates an `IOS_APP_DEVELOPMENT` profile for it on demand, each a confirmed, non-revoking mutation; a kit holding only a Team key and a keychain password is complete, and provisioning creates the distribution certificate and App Store profile at Apple on demand | Rotation/revocation handling |
 | Workspaces | Exact local path approval, project-shape validation, secret-filtered bounded archive, checksum, measured pinned-SSH transfer, atomic active-workspace replacement | Opaque workspace IDs in the control plane, dirty-state fingerprint, per-build snapshots and retention |
-| Artifacts | Local `.ipa` and portable `.xcarchive.zip` transfer with bounded sizes, guest/host SHA-256 agreement, private retention, reveal/copy actions, and confirmation-protected cleanup | Control-plane upload, download authorization, retention policy, and dSYM separation |
-| Android toolchain | A third provider with no virtual machine: a pinned JDK image with the SDK, Node and a second JDK prepared inside its bound home; approve, sync, debug build with its APK retained on this host beside the `adb install` command, signed bundle and APK with a kit's upload key; keystore creation in a throwaway container; the `android_release` build kind and `platform` in machine reports; a live acceptance test against a real Capacitor project | An emulator or a phone handed to the container, if a project needs either |
+| Artifacts | Local `.ipa` and portable `.xcarchive.zip` transfer with bounded sizes, guest/host SHA-256 agreement, private retention, reveal/copy actions, and confirmation-protected cleanup; verified upload to an updated dashboard through bounded, lease-scoped resumable chunks with authenticated downloads, metadata only for legacy servers | Retention automation and dSYM separation |
+| Android toolchain | A third provider with no virtual machine: a pinned JDK image with the SDK, Node and a second JDK prepared inside its bound home; approve, sync, retained debug APK, signed bundle and APK with a kit's upload key; automated host-ADB device discovery, install and launch; optional Google Play draft upload using a service account in the OS vault; keystore creation in a throwaway container; the `android_release` build kind and `platform` in machine reports; a live build acceptance test against a real Capacitor project | Container-hosted emulators, live device screen mirroring, and live acceptance of Play automation |
+| Publishing | **Publish** in the machine workspace and as an optional journey step: a guided handoff for Google Play, direct APK distribution, TestFlight and the App Store gated on the retained file; **Upload with Transporter** from a managed macOS machine with the kit's Team API key sent through framed SSH stdin; **Upload to Google Play** saving an internal-testing draft with a service account in the OS vault, uploaded in bounded resumable chunks with mock-HTTP coverage | Direct App Store Connect API uploads, store account connections, durable publication tracking |
+| Sharing and dashboard | Separate **Use a shared builder** and **Connect this computer** flows; ten-minute single-use invitations scoped to one project, signing configuration, build kind and environment names; owner-approved grants of at most thirty days, pausable and revocable, each with a private local policy; only `native-mac` with the `native_macos` executor is shareable | Sharing the managed macOS and Android providers, retention automation |
+| Credential review and export | Show/Hide and Copy for stored signing passwords and the App Store Connect private key, copyable IDs and aliases, Export for credential files and the Google Play service-account key, none of it passing private file contents through Vue or overwriting a destination | — |
 | Windows Docker-OSX | Not implemented | WSL2 provider after Linux golden path |
 | VirtualBox | Not implemented | Deferred unless a concrete supported use case justifies it |
 
@@ -729,6 +750,26 @@ Accepted live through `crates/buildbridge-engine/tests/android_release.rs` again
 | On the dockur/macos machine an attached iPhone never appeared in macOS: QEMU showed it enumerated, macOS's log showed it enumerated and then torn down 1.4 s later, and the host kernel showed the phone leave and return as a new device at that instant | An iPhone re-enumerates itself once when a host first configures it. Docker-OSX's QEMU sees that through libusb hot-plug and re-attaches by port; the dockur image's libusb is built on libudev, whose events need a udev daemon the container does not run, so QEMU there keeps a dead handle and libusb's device list never learns of the returned phone. Handing the phone over by its device node (`hostdevice`), which QEMU opens directly, made macOS enumerate and keep it | dockur/macos machines attach by device node, and the settling loop hands the phone over again by its new node when the host's device number changes; Docker-OSX keeps the port route and its reset rule unchanged | Resolved in code; proven by hand on the machine |
 | The first Android debug build failed in the container at `compileDebugJavaWithJavac` with "Cannot find a Java installation matching languageVersion=21", and with only that fixed at "invalid source release: 21" | Capacitor 8's plugins ask Gradle for a Java 21 compile toolchain, and its core library compiles for 21 on the JVM Gradle itself runs on; the container carried JDK 17 alone, chosen because the Gradle that Capacitor 5 and 6 pin refuses to run on 21 | Both JDKs are present in the toolchain's home, registered for Gradle's toolchain lookup, and the project's committed Gradle wrapper version decides which one Gradle runs on: 8.5 and newer on 21, older on 17 | Resolved 2026-09-06; the third live run passed |
 | Gradle warned that `sdk.dir` in `local.properties` named a directory that does not exist | The project's `android/local.properties` names the SDK on the developer's machine and travelled in the snapshot | `android/local.properties` is excluded from every snapshot, as build output and `.env` files are | Resolved 2026-09-06 |
+| Android preview showed a blocked mixed-content API request from `https://localhost` to an HTTP LAN endpoint, followed by Axios `Network Error` | The app's WebView blocks HTTPS-to-HTTP requests. The local ThinkSolar project already sets `usesCleartextTraffic=true`, but does not enable Capacitor's separate `android.allowMixedContent` setting. Building a debug APK does not automatically permit mixed content | **Allow HTTP APIs for debug builds** explicitly enables mixed content and Android cleartext access in that debug build's generated inputs, preserving the project's source and HTTPS trust settings. It defaults off, requires rebuilding and reinstalling, and is excluded from releases. Off follows the project's own policy. [Capacitor documents mixed-content access as development-only](https://capacitorjs.com/docs/config) | Implemented 2026-09-07; debug-on, debug-off and release APK contents verified with a Gradle fixture |
+| `buildbridge machine create --provider dockur-macos` installed Tahoe unless `--macos` was given, the configuration this ledger records as hanging on that provider | The command line kept a fixed `tahoe` default while the desktop's profile form had moved to recommending Sequoia per provider (decision 47) | The command line's `--macos` has no fixed default: omitted, it is the resolved provider's recommendation, tahoe on Docker-OSX and sequoia on dockur/macos, the same table the desktop applies; a named release still wins | Resolved 2026-09-07 and unit tested |
+| A remote build failed after one 30-second timeout on lease renewal although its two-minute lease was still valid | The log pump treated every renewal error as a refusal | Only a definite refusal, 401/403/404/409/410 from the dashboard or the local policy check failing, aborts at once; transport and 5xx errors retry until the lease's own expiry, or after three consecutive failures when the expiry cannot be parsed | Resolved 2026-09-07 and unit tested |
+| A finished remote archive failed on one slow 4 MiB artifact chunk | Chunk uploads ran under the client-wide 30-second request timeout and were never retried | Each chunk gets its own timeout, 60 seconds plus its size at 256 KiB/s, and a failed chunk resumes from the offset the dashboard reports, with five attempts per offset | Resolved 2026-09-07; fixture-server tests cover a dropped connection, a 503 and a stuck offset |
+| A torn `google-play-connection.json` made disconnecting, reconfiguring and deleting the machine fail forever | An unparsable marker was a hard error on every path | An invalid marker reads as not connected; removal deletes the file and cleans any recoverable vault entry best-effort; deleting a machine reports a Play cleanup failure as a warning instead of failing | Resolved 2026-09-07 and unit tested |
+| Clearing or rebuilding during a remote build's upload could remove the file mid-stream | The machine or native operation was released before the artifacts were uploaded | The upload holds an `uploading_artifacts` machine operation, or the native Mac operation guard, for its duration | Resolved 2026-09-07 |
+| A release record with no artifacts bricked the machine view with no way out | Loading it returned an error that every reader propagated | Such a record loads as no release, saving one is still refused, and clearing removes it | Resolved 2026-09-07 and unit tested |
+| Private records were world-readable for an instant and could be left torn | `fs::write` followed by a chmod to 0600 | A temporary file created private, synced and renamed over the target; three private-write implementations became one | Resolved 2026-09-07 and unit tested |
+| Refreshing the sharing page beside the runner tick or the command line failed with "Another BuildBridge process is updating sharing permissions", and a busy Mac was told to finish its setup | Every read rewrote `sharing.json` under a non-blocking lock, and the readiness flag folds in busy | The file is written only when pruning changed something, the lock is waited for up to 500 ms, and a busy Mac is reported as busy | Resolved 2026-09-07 and unit tested |
+| Refreshing the Android device list failed during a build, and a slow `adb devices` blocked builds | The listing took the per-machine operation lock | The listing runs without the machine operation; installs still claim it | Resolved 2026-09-07 |
+| A large AAB upload to Google Play aborted after a few transient errors spread across it | The resumable-upload retry budget never reset | The budget resets whenever the acknowledged offset advances | Resolved 2026-09-07 and tested against the mock server |
+| A git failure forwarded the local checkout path, and could forward a remote token, to the dashboard | The error builder took the first non-dash argument, the `-C` directory, and echoed stderr verbatim | The message names the real subcommand and redacts local paths and remotes | Resolved 2026-09-07 and unit tested |
+| A strict older dashboard could reject heartbeats, and a claim or client could print secrets in a log | `sharing_paused` lacked the additive-field skip; `ClaimedBuild` and `ApiClient` derived `Debug` over their tokens | The field is skipped when false; manual `Debug` implementations print `<redacted>` for lease and runner tokens; build sub-resource paths all go through the checked-id helper | Resolved 2026-09-07 and unit tested |
+| A native helper's process group could be killed after its leader was reaped, when the id may already belong to another process | The group id is reserved only while the leader is a zombie or members remain | The group is killed before `wait`; after reaping, only when `kill -0` shows survivors | Resolved 2026-09-07 and unit tested |
+| The desktop launched from Finder reported "find Node.js on this Mac" although the terminal built fine | The cleared environment's PATH held only system and Homebrew directories, not nvm, volta, fnm or corepack under the home directory | PATH appends those managers' existing default directories, with nvm's `default` alias resolved to its install | Resolved 2026-09-07 and unit tested with a fake home |
+| A shared native build failed with "Server does not allow request for unadvertised object" | Fetching one commit by hash needs `uploadpack.allowReachableSHA1InWant`, which some Git servers lack | On that refusal the checkout fetches every branch and checks out the hash; `rev-parse` still pins the result | Resolved 2026-09-07 and unit tested |
+| The Android HTTP-debug recipe test failed with "File exists" from its second run on macOS | `mktemp name.XXXXXX.gradle` is a GNU template; BSD keeps the non-trailing X's literal | `mktemp -d` with trailing X's and an `init.gradle` inside it | Resolved 2026-09-07 and unit tested |
+| Every native status poll, from the window and from the runner every 20 seconds, shelled out to `shasum` over the provisioning profile | No cache beside the toolchain probe's | The hash is cached by path, modification time and length | Resolved 2026-09-07 and unit tested |
+| An activity label lookup by a name such as `constructor` returned a function instead of nothing | The label tables were plain objects indexed by a backend-supplied string | Lookups check own keys only | Resolved 2026-09-07 and unit tested |
+| Android debug output said `BUILD SUCCESSFUL`, then APK transfer failed with `No such file or directory` | The detachable worker can leave a completed log after the desktop exits. Source synchronization replaced the active workspace, but the next debug invocation could replay the completed worker's old success and APK metadata; the new source tree held neither dependencies nor the old APK. The desktop also retained log lines from previous debug attempts | Before synchronization or release, refuse unfinished Android workers and preserve their files. Before any new operation, discard completed worker records so debug builds execute against the current snapshot. An unfinished debug worker can still be reattached on the unchanged workspace. Clear prior debug logs only when a new operation is accepted, and direct failures to their diagnostic instead of assuming the host project is wrong | Fixed in code 2026-09-07; stale-result replay and worker-state regression tests added |
 | Remote builds reported no phase or log lines to the control plane | The log forwarder read a `progress` key, but every progress event flattens its fields beside `machineId` | The forwarder reads the flattened fields, falling back to a nested `progress` for older payloads | Resolved 2026-09-06, found while adding the Android build kind |
 
 ### Automation and UI boundary
@@ -741,13 +782,14 @@ The one place BuildBridge does accept the macOS login password is installing the
 
 ### Verification baseline
 
-The 2026-09-04 repository baseline is:
+The 2026-09-07 repository baseline, the one tagged as 0.1.0, is:
 
-- 338 Rust workspace tests pass across the contract, runner, Docker-OSX, engine, and command-line crates; all Rust documentation tests pass;
+- 609 Rust workspace tests pass across the contract (43), runner (8), machines (276), engine (279), command-line (2) and desktop (1) crates, with 7 ignored on purpose because they boot a machine, pull an image or need a local JDK; Rust documentation tests pass;
 - Rust formatting and workspace Clippy pass with warnings denied;
-- 106 desktop unit tests pass over the pure step, device, signing, env-set, operations, path, bounded-number, listbox, control-plane-chip, and realtime-failure helpers;
-- Vite+ formatting/lint, desktop Vue type checking, and production bundling pass; and
-- the live fixture acceptance result above remains recorded separately from automated tests.
+- 305 desktop unit tests in 31 files pass over the step, device, signing, environment, operations, path, bounded-number, listbox, control-plane-chip, realtime-failure, dialog, tooltip, secret-value, build-flow, native-Mac, machine-order, Android-device, Apple-upload, Google-Play-upload, version, preferences, utilities and store helpers;
+- Vite+ formatting/lint, desktop Vue type checking, production bundling and a check that `apps/desktop/src/types/generated` matches the Rust DTOs pass;
+- GitHub Actions runs the same checks on every push and pull request, with a second job compiling and testing the workspace on macOS because the native Mac paths cannot be compiled from Linux, and a version tag builds the Linux and macOS bundles and the command line onto a draft release; and
+- the live fixture acceptance results above remain recorded separately from automated tests. Native Mac execution, Android on a Mac through Docker Desktop, and a set version travelling through a live archive or release are covered by unit tests and are not yet accepted on hardware.
 
 Any regression discovered in a later milestone must add a focused automated test where deterministic reproduction is possible and a row in this ledger when it changes workflow or recovery behavior.
 
@@ -801,7 +843,7 @@ Acceptance test: from the web UI, a user queues one configured project, observes
 
 ### Phase 2 — production Apple runners
 
-- Run the same typed Apple workflow on a native Mac desktop runner.
+- Run the same typed Apple workflow on a native Mac desktop runner. **Implemented with scoped sharing, compatibility checks and private artifact delivery; physical Mac acceptance remains.**
 - Add a headless remote-Mac runner mode.
 - Make executor selection capability-driven.
 - Test certificate rotation, profile replacement, Xcode upgrades, and revocation.
@@ -853,12 +895,12 @@ The following decisions should be treated as settled until this document is deli
 19. The first real fixture is an Ionic/Vue/Capacitor application with CocoaPods and an Xcode workspace; it proves the executor before signing is added.
 20. Local source sync is an explicit UI action, uses a bounded filtered archive, and travels only over the authenticated pinned guest bridge.
 21. The initial real build is deliberately unsigned. It compiles against the device SDK by default, which ships inside Xcode, and against the iOS Simulator only when chosen, because that alone costs a multi-gigabyte runtime download; signing, archive/export, and artifact delivery are separate later milestones.
-22. Signing passphrases move from the host OS vault to a fixed, unprivileged native macOS helper only through length-framed SSH standard input; they are never interpolated into shell commands, process arguments, logs, or UI result models.
+22. Signing passphrases move from the host OS vault to a fixed, unprivileged native macOS helper only through length-framed SSH standard input; they are never interpolated into shell commands, process arguments, logs, or ordinary UI result models. Explicit local credential review is a separate, narrowly scoped read.
 23. App Store Connect Team-key verification is native, local, short-lived, and GET-only. The private key, issuer ID, and JWT never enter the Vue view model, guest, control plane, or normal logs.
 24. Apple provisioning-profile creation is a separate, explicitly confirmed native action. It rechecks the exact Bundle ID, selected active certificate, and absence of an active App Store profile immediately before mutation; it never revokes existing Apple resources.
 25. The desktop manages a registry of macOS machines. Each machine owns its container, identity, keys, host-key pin, approved project, signing record, and artifacts; the signing kit is host-level and shared. The pre-registry builder is migrated as machine `default` and keeps its container and directory.
 26. The desktop derives every step's state from the backend view model through pure functions with unit tests, and can run against a development-only mock backend.
-27. Every control is a shared component from the desktop's own UI directory. No native select, number spinner, or checkbox reaches the screen — a select is a listbox with full keyboard support, not a bordered `<select>` — and a field's label, action and hint are laid out by `Field` rather than by per-site spacing. The interface is written in stock Tailwind utilities with no custom colour classes, following one documented palette: neutral zinc surfaces and text, ink-coloured actions, and emerald/amber/red reserved for success, warning and failure. There is no accent hue, so colour always carries status. Sentence case, flat fills, hairline rules; no uppercase styling, no gradients, and no ellipsis on a button label.
+27. Every control is a shared component from the desktop's own UI directory. No native select, number spinner, or checkbox reaches the screen — a select is a listbox with full keyboard support, not a bordered `<select>` — and a field's label, action and hint are laid out by `Field` rather than by per-site spacing. The interface uses stock Tailwind utilities: neutral zinc surfaces and text, ink-coloured actions, emerald/amber/red status, amber activity spinners, and neutral Apple/emerald Android platform icons. Colour accompanies a shape or text, and filled buttons preserve spinner contrast. Sentence case, flat fills, hairline rules; no uppercase styling, no gradients, and no ellipsis on a button label.
 28. Losing the host's credential vault is a recoverable, named state rather than an error or a
     silent reset to "unconfigured". A machine reports `signingHealth`, and a runner reports
     `credentialsMissing`, so the interface can distinguish a fresh install from a keyring that was
@@ -998,11 +1040,12 @@ The following decisions should be treated as settled until this document is deli
     `DOCKUR_IMAGE` name a digest (Docker-OSX as pulled on 2026-09-05 from upstream's last
     commit of 2025-11-11; dockur/macos v3.12), an upgrade is a deliberate commit that names
     what changed upstream, and `crates/buildbridge-engine/tests/provider_boot.rs` boots a
-    throwaway machine per provider in directories of its own, waits for QEMU to answer on the
-    control socket and for the guest's screen to light up (a `screendump` through QMP into the
-    one directory each provider binds from the host), then removes everything. The tests are
-    ignored by default because they download Apple's recovery image and need the machine's
-    memory free; they run on purpose before a digest changes and after any change to how a
+    throwaway machine per provider in directories of its own: for the two macOS providers it
+    waits for QEMU to answer on the control socket and for the guest's screen to light up (a
+    `screendump` through QMP into the one directory each provider binds from the host), and
+    for the Android toolchain it pulls the JDK image and waits for the container's JDK to
+    answer; then it removes everything. The tests are ignored by default because the macOS
+    ones download Apple's recovery image and need the machine's memory free; they run on purpose before a digest changes and after any change to how a
     container is created. A BuildBridge image of its own is the fallback if an upstream breaks
     the seam repeatedly or a single supported path is wanted; the `dockur` module is its
     template.
@@ -1076,7 +1119,9 @@ The following decisions should be treated as settled until this document is deli
     the host's process list. A kit can create its upload key in a throwaway container of the
     image with `keytool`, the password on stdin and the keystore on stdout, written owner-only
     under BuildBridge's managed keystores directory; the person chooses that password and is
-    told to keep it, since neither Google Play nor BuildBridge can recover an upload key.
+    told to keep it, since BuildBridge cannot recover the file or password. Google Play can
+    reset a registered upload key; that does not recover the old key or replace a direct APK's
+    app signing key.
     `android/local.properties` joined the snapshot exclusions: it names the SDK on the machine
     that made it. The container writes into its home as root, so deleting a machine empties
     the home through a throwaway container first, the way dockur/macos storage already was;
@@ -1173,6 +1218,54 @@ The following decisions should be treated as settled until this document is deli
     step gives its own failure. Discard and delete still hold their dialogs: they take seconds,
     and nothing else on the page is open to say so.
 
+55. The desktop separates first-use machine setup from the daily project workspace. Tabs follow
+    process order: Machine setup, Build, Preview, then All steps. A prepared machine opens on
+    Build; Preview names the destinations actually supported; Machine setup
+    and All steps retain the complete diagnostics and individual operations. The guided
+    **Build latest source** interaction applies the selected environment, synchronizes the
+    approved folder, tests it and, when requested, exports a release using the existing engine
+    commands. Project approval, signing provisioning and lockfile adoption remain explicit
+    decisions: the guide pauses and offers the relevant panel instead of silently making
+    them. Continuing a paused release reuses the tested snapshot and refuses a changed one.
+    Cancellation stops the current operation and prevents subsequent stages. The guide lives
+    in the desktop session so navigating between pages does not interrupt it; it is not a new
+    persisted engine job or a restart-recovery promise. The CLI's individual commands are
+    unchanged. Initial machine probing retains the known machine name and provider above a
+    centered loading panel, with an accessible status announcement and reduced-motion support.
+    The check reports no staged progress because it resolves as one result; refreshes retain
+    the existing workspace, and a pending first probe stays visible until a result or error.
+
+56. Details remain available without dominating the first action. Machine creation leads with
+    platform and name, summarizes its selected provider and hardware, and keeps comparisons
+    and overrides in disclosures. Provider changes and local templates supply compatible
+    defaults, including reserving dockur's SSH and screen ports. Shared dialogs keep actions
+    in a fixed footer and contain keyboard focus, including nested dialogs and their listboxes.
+    The scrollable body keeps its intrinsic flex basis: a zero basis collapses the auto-sized
+    dialog in WebKit. Dialog layout checks cover the desktop's WebKit engine as well as Chromium,
+    including expanded forms at the minimum window size.
+    Technical reference uses the shared step detail disclosure; security choices, blockers,
+    download consequences and required inputs stay visible. Remote builds are labelled as an
+    optional addition to the local desktop.
+
+57. A machine's attached environment is a default for its next sync, not evidence of what
+    existing web assets contain. The desktop labels a null archive/release environment as
+    **Use prepared assets** and explains that existing environment values are retained. The
+    guided latest-source build names the environment it applies; saved snapshots explicitly
+    exclude newer local edits. Durable environment versions and provenance for pre-existing
+    snapshots are not recorded by the current engine contract, so the UI must not infer them
+    from the current attachment. Artifact provenance and retention/history beyond the current
+    records remain an open extension. Preview remains the existing iPhone run/console and
+    Android APK routes; Simulator compilation does not imply simulator launch or a hosted
+    browser preview. Managed Android installation and interactive Simulator launch require
+    separate executor capabilities before the UI may promise them.
+
+58. Sidebar machine order is a desktop preference: drag anywhere on a machine row or press
+    Alt+Up/Down on a focused machine, and the chosen order survives app restarts in local storage
+    alongside the other view preferences. Newly registered machines append to the sidebar. The
+    Overview sorts running machines first, then most recently opened or operated on in this desktop,
+    falling back to creation time. Sidebar order breaks equal-time ties. Background status
+    probes do not count as use, and dashboard activity does not rewrite the sidebar order.
+
 ### Credential loss and recovery
 
 The host's operating-system keyring holds two things: the runner token and every signing kit. A
@@ -1200,8 +1293,8 @@ The control plane can queue an `apple_archive` build on any machine a runner rep
 Readiness is computed by the desktop — container running, guest identity pinned, a project
 approved, signing provisioned — and sent with every heartbeat along with the machine's name, the
 approved project's name and bundle identifier, and the project's git remote if it has one. The
-dashboard offers **Signed archive** on each ready machine with one optional field: a branch, tag
-or commit.
+dashboard offers a signed build on each ready destination. Owner-controlled managed machines
+accept an optional branch, tag or commit; native Mac and shared jobs require the full commit SHA.
 
 The payload is deliberately small: `{ machine_id, ref }`. The control plane never names a
 repository or a path. A ref is a revision *of the project already approved on that machine*, and
@@ -1215,9 +1308,10 @@ Execution is the Build tab's own steps in order — synchronize, unsigned test b
 archive — run by the same commands the tab uses, so the desktop shows the same progress live.
 Every progress event those commands emit is also forwarded as an ordered control-plane log line
 by a pump thread that sends batches every two seconds and renews the two-minute lease every
-minute; a lapsed lease is offered back to the runner by its next claim rather than lost.
+thirty seconds; a lapsed lease is offered back to the runner by its next claim rather than lost.
 Completion carries a result with the artifact names, sizes and SHA-256 checksums, the marketing
-version and build number. The files stay on the host; the desktop reveals them.
+version and build number. Updated servers also receive verified artifacts through bounded,
+lease-scoped uploads and provide authenticated downloads. Legacy servers receive metadata only.
 
 ### Stopping an operation
 
@@ -1264,7 +1358,7 @@ configuration that is not sensitive — an API base URL, a feature flag — and 
 value, so editing shows it as stored. A **secret** — a token, a key, a DSN — is masked as it is
 typed and left out of every summary. When the editor opens on a stored set it fetches that set's
 secrets through a dedicated command and holds them masked, with an eye icon on each row to show
-one, so a secret can be checked without being retyped. If that fetch fails the row stays blank,
+one, so a secret can be checked without being retyped. Copy works while masked, reports clipboard failure, and leaves the on-screen value hidden. Closing the editor clears its drafts and invalidates pending reads. If that fetch fails the row stays blank,
 where blank keeps what is stored, and the runner still refuses to carry a stored secret over into
 a variable unless its value is entered. Both kinds are rendered into the guest the same way. Sets
 stored before the distinction existed read back as secrets, since that is what they were promised.
@@ -1389,11 +1483,70 @@ older one lingers until it is removed. Reusing one identity across re-pairings w
 desktop to present a stable host identity at pairing time, which is a protocol change rather than
 a UI one.
 
+## Native Mac sharing and the dashboard (2026-09-06)
+
+The desktop distinguishes **Use a shared builder** from **Connect this computer to accept builds**. Local work requires neither connection. The connected service currently lives in the separate `buildbridge-web` repository and must be self-hosted. Its human sessions own runner pairing and build access; runner tokens authenticate only runner APIs. Existing unowned server records are preserved and are not assigned to the first person who registers. Existing installations must create an account and pair again; historical unowned data needs an administrator-managed ownership migration.
+
+Remote-build UI copy focuses on the actions people take: open an invitation, request access, or connect a computer. It does not explain the dashboard architecture or advertise a future hosted service. Browser links say **Open in browser**, and server-address guidance sits with the field that needs it.
+
+Machine navigation and overview rows use the same neutral Apple or emerald Android icon, selected from the machine's provider. Native **This Mac** uses the Apple icon too. Icons have accessible platform names; status dots retain their own meaning and position. Activity spinners use amber except where a filled button needs a contrasting foreground. Collapsible sections use the standard Lucide outline chevron, pointing right when closed and down when open; native disclosure triangles are hidden while native keyboard behavior is preserved.
+
+Overview machine cards give the name, status and configuration facts the full card width above the journey and actions. Names and next-step titles wrap when necessary; the journey and button widths must not squeeze the machine name into an unnecessarily truncated column.
+
+Android credentials distinguish **configured** from **key verified**. The signing page and machine signing step offer the same check of the keystore password, private-key password, alias, certificate validity and signing capability. A successful check exposes public certificate fingerprints and expiry; edits invalidate the result, including an older check still in flight. An optional pasted SHA-256 comparison is temporary and does not configure a permanent release policy. Every signed release independently rechecks the key before project build scripts run. Google Play publishing uses a separate service-account connection, whose access is checked by Google during upload; importing the account key or verifying the local signing certificate alone cannot prove app permissions. See [Google Play API access](https://developers.google.com/android-publisher/getting_started) and [Android signing](https://developer.android.com/studio/publish/app-signing).
+
+Android releases let users choose **AAB for Google Play**, **APK for direct installation**, or **both**, with the full signing certificate fingerprint available to copy. Android has the same optional **On a real device** journey section as iOS, before Publishing, reused in Preview. It discovers phones and emulators through ADB on the host, requires an explicitly selected authorized device, and offers **Install and open** for a retained debug or release APK. **Build and run** synchronizes and builds a fresh debug APK through the guided build flow before installing it; a failed, stopped or paused build never falls back to an older APK. The app's launcher is resolved after installation and launch success is reported separately from having an artifact. A stopped build container or missing release credentials does not block installing a retained APK. An AAB cannot be installed directly; bundletool conversion is not implemented.
+
+ADB must be installed on the host; platform-tools inside the build container do not provide host ADB. Device authorization, offline connections, signature mismatch and launch errors remain actionable, with manually copied commands available as a fallback. The engine checks managed artifact paths, byte lengths and the reviewed checksum, and holds the machine operation lock across installation or upload. Android build, sync and artifact cleanup operations share that lock. Commands use fixed argument vectors and validated device/package identifiers. BuildBridge never automatically uninstalls an app to bypass an incompatible signing certificate, preserving its local data. An APK signed with a Play upload key generally cannot update a Play-installed app signed with a different app signing key. Device discovery/install/launch automation is covered by fake-ADB tests and was accepted on a physical Android phone on 2026-09-07 through the same device runner; live log streaming and screen mirroring remain outstanding. Debug compilation remains the project/toolchain compatibility check; a separate AGP/Gradle/SDK preflight matrix and custom build flavors are not implemented. Native Mac shared invitations remain limited to iOS; Android builds on a Mac use the managed Docker provider, with physical Mac acceptance still outstanding. See [ADB device, package and activity commands](https://developer.android.com/tools/adb).
+
+Android debug signing follows the project’s Gradle configuration. The default debug keystore lives in the builder’s persistent bound home at `.android/debug.keystore`, outside the synchronized project, so ordinary syncs, builds and container restarts keep the same identity. A host Android Studio installation can have a different debug key; an existing `.debug` application ID still requires the original signing certificate for updates. The 2026-09-07 device acceptance first reproduced `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, then confirmed that the host debug certificate matched the installed APK, backed up the builder’s original key, reused the matching key, and rebuilt. The device runner installed the verified APK as a normal update and launched it without uninstalling or clearing app data. This was a local repair, not automatic host-key discovery or replacement. Guided build failures now retain their own message, review step, APK checksum and device, so refreshing machine state cannot replace the installation diagnosis with a generic build error. Recovery messages separate a ready APK from a failed install and preserve Android’s error code without showing the discarded temporary staging path.
+
+Android Preview also offers **Open inspector**, launching the fixed device-inspection page in an installed host Chrome, Chromium or Edge browser, with a copyable URL as fallback. It does not depend on a running build container or a retained APK: the user keeps the app open, enables USB discovery in the browser, and selects **Inspect** beside its WebView. WebView debugging must be enabled by the app; opening the browser does not prove that an inspectable target exists. The dedicated engine action accepts no URL or browser command from the webview, leaves the general HTTPS/loopback URL opener’s scheme restrictions intact, and does not start a remote debugging server. Chromium filters internal inspector URLs from command-line arguments, so each click opens a separate browser window with a fresh private temporary profile whose startup preferences name only the fixed inspector page. Reusing a running profile would open New Tab instead. BuildBridge keeps each profile available for its browser process and removes it when that tracked process exits; the person’s normal browser profile is untouched. The displayed inspector URL uses the standard small copy icon. See [Chrome’s WebView inspection workflow](https://developer.chrome.com/docs/devtools/remote-debugging/webviews), [Edge’s Android WebView inspector](https://learn.microsoft.com/en-us/microsoft-edge/devtools/remote-debugging/webviews), and [Chromium’s startup URL validation](https://chromium.googlesource.com/chromium/src/+/lkgr/chrome/browser/ui/startup/url_util.cc).
+
+Signing uses the same segmented **All / iOS / Android** tabs as the machine workspace. Credential cards and pickers show icons for their actual stored platform material; mixed kits appear in both filtered views, and empty kits remain discoverable. New credentials inherit the selected platform tab. Environment sets remain reusable across both platforms and show that shared scope; they are not misleadingly filtered by current machine attachments. Templates remain explicitly macOS-only.
+
+Android testing and Preview share an explicit **Allow HTTP APIs for debug builds** option. It defaults off for a newly selected project and applies when rebuilding the debug APK; the retained artifact records whether BuildBridge applied the override. Changing the checkbox does not change an installed app: **Build and run** rebuilds and installs it. The override permits Capacitor mixed content and Android cleartext traffic without changing HTTPS certificate validation, API URLs, or the host project's files. The build recipe supplies temporary inputs only to the debug Gradle invocation, so failed or canceled builds cannot change the source policy used by later builds. Off retains the project's own settings. Release workflows, including their preparatory debug build and remote release jobs, do not opt in. The CLI exposes the same choice as `buildbridge build test <machine> --allow-http`; release commands do not accept that flag.
+
+The debug override preserves the existing debug manifest, assets and resources, and overlays local network-security XML variants while keeping certificate authorities and pins. An explicit network-security resource supplied only by a dependency must first be copied into the app; BuildBridge reports that unsupported input instead of replacing its TLS policy. Tests cover legacy result defaults, mismatched detached jobs, worker completion on success/failure, project selection and release exclusion. A separate Gradle 8.13 / Android Gradle Plugin 8.13 fixture produced an enabled debug APK followed by normal debug and release APKs: inspection of their packaged Capacitor config, manifest and network-security resources confirmed the override only in the first APK, retained trust anchors and pins, and unchanged original source inputs. This validates packaging; the ThinkSolar app still needs rebuilding and installing on the device.
+
+Android output selection is passed through the guided flow and detailed release step to the engine; CLI exposes `--outputs both|aab|apk`. Existing clients and owner-controlled remote jobs default to both. Only selected artifacts are transferred and retained, and result consumers tolerate either file being absent while rejecting an empty result. APK-only skips bundle creation. AAB-only still uses an internal APK for existing metadata and signature inspection; this choice does not promise to eliminate every APK build task. iOS continues to produce its App Store IPA and supporting Xcode archive. Signing checks bound Docker startup, image download, input/output and cleanup waits. Stopping Android jobs removes their temporary signing files. An unfinished detached release is rejected before new credentials are staged; Stop/start recovers it, while a completed job can be replaced by the next release. Release deletion accepts only selected files inside a managed `release-*` directory, preventing a single-APK record from targeting a debug output directory.
+
+**Publish** follows Build and Preview in the machine workspace, and appears as an optional journey step. It offers a guided handoff for Google Play, direct APK distribution, TestFlight and App Store, gated on the actual retained file for that destination. Native Mac archive results use the same guide. It shows release identity, environment when known, file size/checksum, folder/path actions and official upload instructions. Managed macOS machines also offer **Upload with Transporter**, using the attached signing credentials' App Store Connect Team API key and an installed Transporter in the running, trusted guest. The button uploads the reviewed retained IPA, checks its recorded size and SHA-256 on the host and its SHA-256 after transfer, and holds the machine operation lock to exclude rebuilding or deleting the archive during delivery. A fixed guest helper receives the private key through framed SSH stdin, uses an owner-only temporary key directory, and removes the credentials after completion or cancellation. Transporter output is suppressed; only safe progress and error messages return to the desktop. Transporter installation is a prerequisite, not an automatic download. Upload results are kept for the current desktop session and matched to the artifact checksum; they are not durable publication tracking. A failed or interrupted delivery can have reached Apple, so check App Store Connect before retrying. Successful delivery still requires Apple's processing, TestFlight setup or App Store review; opening the portal never marks a build published. Native Mac uploads remain manual. Google Play has the separate draft-upload action below. Publishing remains optional and does not make a successful build look incomplete. Direct App Store Connect API uploads, store account connections and durable publication tracking remain future work. See [Apple upload methods](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/), [Transporter command-line delivery and API-key authentication](https://help.apple.com/itc/transporteruserguide/en.lproj/static.html) and [Google Play releases](https://support.google.com/googleplay/android-developer/answer/9859348).
+
+
+**Upload to Google Play** takes the retained AAB shown in Publish and saves an internal-testing draft. A service-account JSON key is imported from a selected host file into the OS vault; the webview receives only the email/project summary, and configuration alone is not a Google permission check. A nonsecret per-machine connection record identifies the vault entry, which is scoped to the data directory and machine lifetime so recreating a machine cannot inherit another connection. Deleting the machine removes its publishing credential before its local connection record. The app and internal testing track must already be set up in Play Console, the Android Publisher API enabled, and the service account granted access to that app.
+
+The engine verifies the reviewed AAB's managed path, size and SHA-256, authenticates against fixed Google endpoints, uploads in bounded resumable chunks, validates Google's artifact metadata, and creates only a draft release on the existing internal track. It preserves completed releases and refuses conflicting drafts or rollouts. Commit requests explicitly avoid cancelling a review already in progress. Uncommitted edits are cleaned up after failure; an interrupted final commit can have reached Google, so the UI directs users to check Play Console before retrying. Successful upload is recorded for the artifact in the current desktop session; it is not a public rollout or durable publication tracker. Review, tester configuration and rollout remain in Play Console. Mock HTTP tests exercise the upload transaction without sending a real app to Google. See [Google's draft-release workflow](https://developers.google.com/android-publisher/tracks), [service-account setup](https://developers.google.com/android-publisher/getting_started) and [edit commit behavior](https://developers.google.com/android-publisher/api-ref/rest/v3/edits/commit).
+
+The first sharing release exposes only `native-mac` with the `native_macos` executor. Owner-controlled remote virtual Mac and Android builds continue to work. Sharing those managed providers requires coordinating project, signing, environment and machine configuration across their entire multi-stage build before it can be enabled.
+
+The owner approves a local Git project and chooses an existing Apple Distribution identity and App Store provisioning profile. **This Mac** shows the selected Xcode, iOS SDK, architecture and prerequisite tools, with separate unsigned-compile and signed-export readiness. Owner-declared minimum Xcode/SDK versions are enforced; `.xcode-version`, supported Node constraints and package-manager requirements are checked again against the fetched commit before project scripts execute. Missing or ambiguous requirements remain visible warnings. Preflight does not guarantee a successful compile. Test compilation requires no signing and creates no release artifacts.
+
+A sharing invitation expires after ten minutes, is single-use, and is scoped to one approved project, repository, signing configuration, build kind and selected environment names. Redemption creates a pending request: the owner reviews the signed-in person's identity and explicitly trusts them to execute this project's scripts on the Mac. Access starts at approval, lasts at most thirty days, and can be paused or revoked. Each grant has a matching private local policy bound to the server, runner and requester; a server-side approval alone cannot authorize a build. Configuration changes invalidate the local permission. Environment values and signing private keys are never carried in invitation or queue payloads. Trusted project scripts execute as the Mac user and can use that user's build resources; this is not a sandbox for untrusted code.
+
+Shared builds require a full 40- or 64-character Git commit from the approved remote and use a fresh private checkout. Native build and configuration operations use process and OS file locks. The engine runs the queue service independently of the webview while the desktop is running; closing the window keeps the tray application alive. Optional launch at login registers the installed app for the current user. Sleep, logout and a locked signing keychain can still prevent builds, and a standalone headless daemon is not included.
+
+Each claimed build has a fresh lease token. Shared authorization is checked before execution and while renewing the lease; permission loss cancels the operation and stops upload. The server enforces the current grant, scope, pause state, expiry and lease on reads and writes. Artifacts use private storage, four-MiB resumable chunks, declared size and SHA-256 verification, with a two-GiB per-file and eight-GiB/sixteen-file per-build cap. New claim attempts cannot reuse prior-attempt artifacts. Successful native archives return `App-AppStore.ipa` and `App.xcarchive.zip`; unsigned compilation returns no downloadable archive. Retention automation remains future work.
+
+Android on macOS uses Docker Desktop and explicitly selects `linux/amd64` because the pinned Android tools are x86 binaries. Existing containers with a mismatched architecture are rejected with recovery guidance. Docker CLI discovery supports app launches outside a shell; source snapshot hashing and tar options work on macOS. Apple Silicon needs working amd64 emulation. These code paths have automated coverage, but native Xcode/signing, Mac login behavior and Android container builds still require physical Mac acceptance before being described as hardware-verified.
+
+## Credential retrieval and export (2026-09-07)
+
+Saved credentials are reviewable from Signing, with individually requested Show/Hide and Copy actions for all stored signing passwords and the App Store Connect private key, copyable key/issuer IDs and Android aliases, and Export for credential files. Environment secrets use the same reveal/copy controls on their cards and offer Copy in the editor. Retrieval does not change saved values or machine attachments.
+
+Google Play connections offer **Export service account key** before disconnecting or deleting a machine. Export reconstructs the retained account fields and exact private key with fixed Google authentication addresses; it does not claim to restore the original JSON byte for byte. Including the fixed `token_uri` makes the exported record usable by clients that require it, while imported URLs still cannot choose the upload destination. See the [Google Auth service-account loader](https://google-auth.readthedocs.io/en/latest/_modules/google/oauth2/service_account.html). Credential exports never pass private file contents through Vue and never overwrite an existing destination. Keep exported files and copied passwords in a secure backup outside the host to protect against loss of the host or its vault.
+
+## Version and build number at build time (2026-09-07)
+
+The archive and release steps, and the guided build page, show the version and build number the approved project declares right now: `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` from `ios/App/App.xcodeproj/project.pbxproj`, or `versionName` and `versionCode` from `android/app/build.gradle` (or its Kotlin twin). The engine reads them from the project's own files each time it builds the machine view, so the desktop and `buildbridge machine show` follow edits made in Xcode or Android Studio. A project whose configurations or flavours disagree, or that computes either value, shows none and cannot be set from BuildBridge until it declares both once.
+
+The fields are editable, and **Next** steps the build number, because every store upload needs a new one. A signed archive or release then carries the version shown. The engine writes the change into the project files on the host first, the same edit the person would make by hand or with their own bump script, so the project is never behind an artifact and the change is there to commit. The same values are applied where the build runs: as `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` in the temporary xcconfig the archive already uses, or by rewriting the synced app module's Gradle script inside the container, so a new sync is not needed. The archived app's Info.plist and the signed APK's badging are then checked against the request, and the build fails closed on a mismatch, which is what a project whose Info.plist carries literal versions, or whose flavour overrides `versionCode`, produces. `ExportOptions.plist` still disables Xcode's own version management: BuildBridge never bumps a number on its own. The CLI takes `--version` and `--build` on `build archive` and `build release`; either alone keeps the other half as the project declares it. Remote builds claimed from the control plane do not set versions; the payload has no field for it.
+
 ## Open decisions
 
 These require a concrete implementation decision before their phase begins:
 
-- the artifact storage backend for local development and hosted deployment;
+- the hosted artifact storage backend beyond the current private local disk;
 - the long-term configurable ignore format and retention policy beyond the initial fixed safe exclusions;
 - whether the long-term guest executor remains SSH-mediated or installs a signed headless agent;
 - the console transport after first-boot X11, such as VNC or a separately secured browser viewer;

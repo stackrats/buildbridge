@@ -6,6 +6,7 @@ import {
     deriveAndroidSteps,
     deriveBuildSteps,
     deriveJourney,
+    derivePublishStep,
     deriveSetupSteps,
     focusStep,
     groupByPhase,
@@ -73,6 +74,7 @@ function baseView(overrides: Partial<MachineView> = {}): MachineView {
             devices: [],
         },
         appleWorkspace: null,
+        projectVersion: null,
         signing: null,
         archive: null,
         archiveEnvSet: null,
@@ -513,8 +515,8 @@ describe('development-only kit', () => {
         view.signingKit = {
             id: 'dev-kit',
             name: 'Dev kit',
-            appStoreConnectConfigured: true,
-            appStoreConnectKeyId: 'KEYID12345',
+            appStoreConnectConfigured: false,
+            appStoreConnectKeyId: null,
             signingCertificateConfigured: false,
             signingCertificateName: null,
             signingCertificatePasswordStored: false,
@@ -556,6 +558,26 @@ describe('development-only kit', () => {
             'Locked: the credentials hold only a development identity',
         );
         expect(byId('run-device').status).toBe('active');
+        expect(journeyHeadline(steps)).toBe('device builds ready · release signing needed');
+    });
+
+    it('describes the Team key route as creating distribution signing when provisioned', () => {
+        const view = developmentOnlyView();
+        view.signingKit!.appStoreConnectConfigured = true;
+        view.signingKit!.appStoreConnectKeyId = 'KEYID12345';
+        view.signing = null;
+        const steps = deriveBuildSteps(view, { runningStep: null });
+        const credentials = steps.find((step) => step.id === 'signing-kit')!;
+        expect(credentials.status).toBe('done');
+        expect(credentials.summary).toContain('distribution signing created when provisioned');
+        expect(steps.find((step) => step.id === 'provision')?.status).toBe('active');
+    });
+
+    it('does not report completion when a required step is pending without an active step', () => {
+        const steps = deriveBuildSteps(developmentOnlyView(), { runningStep: null });
+        const device = steps.find((step) => step.id === 'run-device')!;
+        device.status = 'pending';
+        expect(journeyHeadline(steps)).toBe('signed archive is not ready');
     });
 
     it('names what an unfinished kit still lacks', () => {
@@ -603,13 +625,25 @@ describe('unsigned build target', () => {
 });
 
 describe('deriveJourney', () => {
-    it('is fourteen steps: setup, build, then the optional device run in its own phase', () => {
+    it('offers publishing only for a retained release and never treats a local build as published', () => {
+        const missing = derivePublishStep(false);
+        const retained = derivePublishStep(true);
+        expect(missing.status).toBe('pending');
+        expect(retained.status).toBe('active');
+        expect(retained.optional).toBe(true);
+        expect(requiredSteps([retained])).toEqual([]);
+        expect(focusStep([retained])).toBeNull();
+        expect(completedCount([retained])).toBe(0);
+        expect(retained.summary).toContain('publication is not checked');
+    });
+    it('keeps device preview and publishing optional after setup and build', () => {
         const steps = deriveJourney(baseView(), { runningStep: null });
 
-        expect(steps).toHaveLength(14);
+        expect(steps).toHaveLength(15);
         expect(steps.slice(0, 7).every((step) => step.phase === 'setup')).toBe(true);
         expect(steps.slice(7, 13).every((step) => step.phase === 'build')).toBe(true);
         expect(steps[13]?.phase).toBe('device');
+        expect(steps[14]?.phase).toBe('publish');
         // The count a machine is measured by leaves the optional step out.
         expect(requiredSteps(steps)).toHaveLength(13);
     });
@@ -631,6 +665,7 @@ describe('deriveJourney', () => {
             ['setup', 7, true],
             ['build', 0, false],
             ['device', 0, false],
+            ['publish', 0, false],
         ]);
         expect(groups[0]?.focus).toBeNull();
         expect(groups[1]?.focus?.id).toBe('approve');
@@ -672,7 +707,7 @@ describe('summarizeJourney', () => {
     it('reads a fresh machine as ready to start', () => {
         const steps = summarizeJourney(summary(), readyHost);
 
-        expect(steps).toHaveLength(14);
+        expect(steps).toHaveLength(15);
         expect(focusStep(steps)?.id).toBe('launch');
         expect(steps.filter((step) => step.status === 'done').map((step) => step.id)).toEqual([
             'host',
@@ -699,7 +734,8 @@ describe('summarizeJourney', () => {
             readyHost,
         );
 
-        expect(steps.every((step) => step.status === 'done')).toBe(true);
+        expect(requiredSteps(steps).every((step) => step.status === 'done')).toBe(true);
+        expect(steps.find((step) => step.id === 'publish')?.status).toBe('active');
         expect(steps.find((step) => step.id === 'approve')?.summary).toBe('example-app');
         expect(journeyHeadline(steps)).toBe('signed IPA retained');
     });
@@ -708,12 +744,38 @@ describe('summarizeJourney', () => {
         const steps = summarizeJourney(summary(), {
             ...readyHost,
             ready: false,
+            kvmAccess: false,
             issues: ['No KVM'],
         });
 
         expect(steps[0]?.status).toBe('failed');
         expect(steps.slice(1).every((step) => step.status === 'pending')).toBe(true);
         expect(journeyHeadline(steps)).toBe('check the host needs attention');
+    });
+
+    it('checks only the requirements of each provider before the machine probe arrives', () => {
+        const host = {
+            ...readyHost,
+            ready: false,
+            kvmAccess: false,
+            displayAccess: false,
+            issues: ['No KVM or display'],
+        };
+        const android = summary();
+        android.config.provider = 'android_toolchain';
+        expect(summarizeJourney(android, host)[0]?.status).toBe('done');
+        const dockur = summary();
+        dockur.config.provider = 'dockur_macos';
+        const steps = summarizeJourney(dockur, { ...host, kvmAccess: true });
+        expect(steps[0]?.status).toBe('done');
+        expect(steps[0]?.summary).toBe('Docker, KVM and tun ready');
+    });
+
+    it('shows an unprobed host as pending, with a reason', () => {
+        const steps = summarizeJourney(summary(), null);
+        expect(steps[0]?.status).toBe('pending');
+        expect(steps[0]?.summary).toBe('Checking host requirements');
+        expect(steps.some((step) => step.status === 'failed')).toBe(false);
     });
 
     it('shows the running step when the list reports a busy machine', () => {
@@ -906,14 +968,18 @@ describe('run on the device', () => {
         expect(at(view).summary).toContain('Blocked');
     });
 
-    it('is the last coarse row, pending until a run was retained', () => {
-        const fresh = summarizeJourney(summary(), readyHost).at(-1)!;
+    it('has its own coarse row, pending until a run was retained', () => {
+        const fresh = summarizeJourney(summary(), readyHost).find(
+            (step) => step.id === 'run-device',
+        )!;
         expect(fresh.id).toBe('run-device');
         expect(fresh.optional).toBe(true);
         expect(fresh.status).toBe('pending');
         expect(fresh.summary).toBe('after signing is provisioned');
 
-        const retained = summarizeJourney(summary({ deviceRunRetained: true }), readyHost).at(-1)!;
+        const retained = summarizeJourney(summary({ deviceRunRetained: true }), readyHost).find(
+            (step) => step.id === 'run-device',
+        )!;
         expect(retained.status).toBe('done');
         expect(retained.summary).toBe('Ran on the iPhone');
     });
@@ -1003,7 +1069,7 @@ function androidKit(complete = true): NonNullable<MachineView['signingKit']> {
 }
 
 describe('an Android machine', () => {
-    it('has seven steps and no device phase', () => {
+    it('has seven required steps followed by optional device preview and publishing', () => {
         const steps = deriveJourney(androidView(), { runningStep: null });
 
         expect(steps.map((step) => step.id)).toEqual([
@@ -1014,11 +1080,51 @@ describe('an Android machine', () => {
             'test-build',
             'signing-kit',
             'release',
+            'run-device',
+            'publish',
         ]);
         expect(steps.slice(0, 2).every((step) => step.phase === 'setup')).toBe(true);
-        expect(steps.slice(2).every((step) => step.phase === 'build')).toBe(true);
+        expect(steps.slice(2, 7).every((step) => step.phase === 'build')).toBe(true);
         expect(requiredSteps(steps)).toHaveLength(7);
-        expect(groupByPhase(steps).map((group) => group.phase)).toEqual(['setup', 'build']);
+        expect(groupByPhase(steps).map((group) => group.phase)).toEqual([
+            'setup',
+            'build',
+            'device',
+            'publish',
+        ]);
+    });
+
+    it('requires an APK for the device guide, but not running Docker or release credentials', () => {
+        const view = androidView();
+        view.runtime.state = 'exited';
+        view.signingKit = null;
+        view.android!.release = {
+            applicationId: 'com.example.retained',
+            versionName: '2.0',
+            versionCode: '20',
+            keyAlias: 'upload',
+            certificateSha256: 'a'.repeat(64),
+            outputTail: [],
+            aab: { path: '/tmp/app.aab', bytes: 120, sha256: 'b'.repeat(64) },
+            apk: null,
+        };
+        const device = () =>
+            deriveJourney(view, { runningStep: null }).find((step) => step.id === 'run-device')!;
+        expect(device().status).toBe('pending');
+        view.android!.release.apk = { path: '/tmp/app.apk', bytes: 200, sha256: 'c'.repeat(64) };
+        expect(device().status).toBe('active');
+        expect(device().optional).toBe(true);
+        expect(requiredSteps([device()])).toHaveLength(0);
+        expect(completedCount([device()])).toBe(0);
+    });
+
+    it('does not infer a device APK from the coarse retained-release flag', () => {
+        const row = summary({ archiveRetained: true });
+        row.config.provider = 'android_toolchain';
+        const device = summarizeJourney(row, readyHost).find((step) => step.id === 'run-device')!;
+        expect(device.status).toBe('pending');
+        expect(device.summary).toContain('check for a retained APK');
+        expect(device.optional).toBe(true);
     });
 
     it('passes the host check without KVM or a display', () => {
@@ -1041,6 +1147,7 @@ describe('an Android machine', () => {
             lastSyncBytes: 1000,
             lastBuildSucceeded: true,
             lastBuild: {
+                allowHttp: false,
                 applicationId: 'com.example.app.debug',
                 versionName: '1.0',
                 versionCode: '3',
@@ -1149,7 +1256,7 @@ describe('an Android machine', () => {
             readyHost,
         );
 
-        expect(steps).toHaveLength(7);
+        expect(steps).toHaveLength(9);
         expect(steps.map((step) => step.status)).toEqual([
             'done',
             'done',
@@ -1158,6 +1265,8 @@ describe('an Android machine', () => {
             'done',
             'done',
             'active',
+            'pending',
+            'pending',
         ]);
     });
 });

@@ -9,10 +9,20 @@ import { describeError, pushBounded } from '../lib/utils';
 import { formatTime } from '../lib/format';
 import type { LogLine } from '../components/ui/LogView.vue';
 import { deriveJourney, summarizeJourney, type JourneyStep } from '../model/steps';
+import { androidOutputLabel } from '../model/android-outputs';
+import { appleUploadBlocker, type AppleArchiveUpload } from '../model/apple-upload';
+import { androidDeviceApks, type AndroidDeviceRun } from '../model/android-device';
+import { googlePlayUploadBlocker, type GooglePlayUpload } from '../model/google-play-upload';
+import { useMachineOrder } from './machine-order';
 import type {
     AdoptPodfileLockResult,
     AndroidBuildProgress,
+    AndroidDevices,
+    AndroidDeviceRunInput,
+    AndroidDeviceRunResult,
     AndroidReleaseProgress,
+    AndroidReleaseOutputs,
+    ProjectVersionInput,
     AppleArchiveProgress,
     AppleDeviceRunProgress,
     AppleProjectProgress,
@@ -20,6 +30,8 @@ import type {
     DeviceSigningProgress,
     DiskMigrationProgress,
     GuestOptimizationsView,
+    GooglePlayConnection,
+    GooglePlayUploadResult,
     ImportMacXcodeResult,
     LaunchProgress,
     MachineConfig,
@@ -72,10 +84,21 @@ export interface MachineSession {
     signing: SigningProvisioningProgress | null;
     project: AppleProjectProgress | null;
     archive: AppleArchiveProgress | null;
+    archiveUpload: AppleArchiveUpload | null;
     /** An Android machine's sync and debug build; they share the build log. */
     androidBuild: AndroidBuildProgress | null;
     /** An Android machine's signed release; it shares the archive log. */
     androidRelease: AndroidReleaseProgress | null;
+    androidDevices: AndroidDevices | null;
+    androidDevicesLoading: boolean;
+    androidDevicesError: string | null;
+    androidDeviceSerial: string;
+    androidDeviceApk: 'debug' | 'release';
+    androidDeviceRun: AndroidDeviceRun | null;
+    googlePlayConnection: GooglePlayConnection | null;
+    googlePlayConnectionLoading: boolean;
+    googlePlayConnectionError: string | null;
+    googlePlayUpload: GooglePlayUpload | null;
     usbMigration: DiskMigrationProgress | null;
     /** Rebuilding the container from its profile. */
     rebuild: ContainerRebuildProgress | null;
@@ -137,8 +160,19 @@ function createSession(id: string): MachineSession {
         signing: null,
         project: null,
         archive: null,
+        archiveUpload: null,
         androidBuild: null,
         androidRelease: null,
+        androidDevices: null,
+        androidDevicesLoading: false,
+        androidDevicesError: null,
+        androidDeviceSerial: '',
+        androidDeviceApk: 'debug',
+        androidDeviceRun: null,
+        googlePlayConnection: null,
+        googlePlayConnectionLoading: false,
+        googlePlayConnectionError: null,
+        googlePlayUpload: null,
         usbMigration: null,
         rebuild: null,
         usbAttach: null,
@@ -167,6 +201,22 @@ function note(target: MachineSession, text: string, tone: LogLine['tone'] = 'sys
 
 function applyView(target: MachineSession, view: MachineView): void {
     target.view = view;
+    if (target.archiveUpload?.sha256 !== view.archive?.ipa.sha256) {
+        target.archiveUpload = null;
+    }
+    if (target.googlePlayUpload?.sha256 !== view.android?.release?.aab?.sha256) {
+        target.googlePlayUpload = null;
+    }
+    if (
+        target.androidDeviceRun &&
+        !androidDeviceApks(view.android).some(
+            (apk) =>
+                apk.value === target.androidDeviceRun!.kind &&
+                apk.artifact.sha256 === target.androidDeviceRun!.sha256,
+        )
+    ) {
+        target.androidDeviceRun = null;
+    }
     maybeAdoptTemplate(target);
 }
 
@@ -292,7 +342,11 @@ function scheduleRefresh(id: string): void {
 type OperationResult = MachineView | { view: MachineView };
 
 /** Operations return the machine's new view, or nothing when they changed nothing about it. */
-type OperationOutcome = OperationResult | undefined;
+type OperationOutcome =
+    | OperationResult
+    | AndroidDeviceRunResult
+    | GooglePlayUploadResult
+    | undefined;
 
 async function runOperation<R extends OperationOutcome>(
     id: string,
@@ -312,6 +366,10 @@ async function runOperation<R extends OperationOutcome>(
     }
     target.operation = operation;
     target.operationStartedAt = Date.now();
+    // Template adoption can start during a background probe; it is not a new visit.
+    if (operation !== 'template-adopt') {
+        useMachineOrder().markUsed(id);
+    }
     target.error = null;
     target.notice = null;
     if (options.started) {
@@ -320,9 +378,8 @@ async function runOperation<R extends OperationOutcome>(
     try {
         const result = await work();
         const outcome = result as OperationOutcome;
-        if (outcome) {
-            applyView(target, 'machineId' in outcome ? outcome : outcome.view);
-        }
+        if (outcome && 'machineId' in outcome) applyView(target, outcome);
+        else if (outcome && 'view' in outcome) applyView(target, outcome.view);
         const finished =
             typeof options.finished === 'function' ? options.finished(result) : options.finished;
         if (finished) {
@@ -647,6 +704,10 @@ export function useMachinesStore() {
     return {
         state,
         machines: computed(() => state.list?.machines ?? []),
+        sidebarMachines: computed(() => useMachineOrder().sortSidebar(state.list?.machines ?? [])),
+        dashboardMachines: computed(() =>
+            useMachineOrder().sortDashboard(state.list?.machines ?? []),
+        ),
         host: computed(() => state.list?.host ?? null),
         session,
         loadList,
@@ -686,6 +747,7 @@ export function useMachinesStore() {
                     runningStep: runningStepFor(id),
                     runningOperation: runningOperationFor(id),
                     runningLive: runningLiveFor(id),
+                    androidDeviceRun: state.sessions[id]?.androidDeviceRun,
                 });
             }
             const summary = state.list?.machines.find((machine) => machine.id === id);
@@ -925,14 +987,22 @@ export function useMachinesStore() {
             );
         },
         /** An Android machine's debug build: the counterpart of the unsigned test build. */
-        debugBuild: async (id: string) => {
+        debugBuild: async (id: string, allowHttp = false) => {
             const target = session(id);
-            target.androidBuild = null;
-            return runOperation(id, 'test-build', () => useBackend().runAndroidDebugBuild(id), {
-                started: 'Running the debug build',
-                finished: (result) =>
-                    `Debug build succeeded: ${result.build.applicationId} ${result.build.versionName} (${result.build.versionCode}).`,
-            }).then((result) => {
+            return runOperation(
+                id,
+                'test-build',
+                () => {
+                    target.androidBuild = null;
+                    target.buildLog = [];
+                    return useBackend().runAndroidDebugBuild(id, allowHttp);
+                },
+                {
+                    started: 'Running the debug build',
+                    finished: (result) =>
+                        `Debug build succeeded: ${result.build.applicationId} ${result.build.versionName} (${result.build.versionCode}).`,
+                },
+            ).then((result) => {
                 if (result) {
                     for (const line of result.build.outputTail) {
                         pushBounded(target.buildLog, { text: line }, LOG_LIMIT);
@@ -941,15 +1011,25 @@ export function useMachinesStore() {
                 return result;
             });
         },
-        signedRelease: async (id: string, envSetId: string | null) => {
+        signedRelease: async (
+            id: string,
+            envSetId: string | null,
+            outputs: AndroidReleaseOutputs = 'both',
+            version: ProjectVersionInput | null = null,
+        ) => {
             const target = session(id);
             target.androidRelease = null;
             target.archiveLog = [];
-            return runOperation(id, 'release', () => useBackend().runAndroidRelease(id, envSetId), {
-                started: 'Building the signed app bundle and APK',
-                finished: (result) =>
-                    `Signed ${result.release.versionName} (${result.release.versionCode}) verified and retained.`,
-            }).then((result) => {
+            return runOperation(
+                id,
+                'release',
+                () => useBackend().runAndroidRelease(id, envSetId, outputs, version),
+                {
+                    started: `Building the signed ${androidOutputLabel[outputs]}`,
+                    finished: (result) =>
+                        `Signed ${result.release.versionName} (${result.release.versionCode}) verified and retained.`,
+                },
+            ).then((result) => {
                 if (result) {
                     for (const line of result.release.outputTail) {
                         pushBounded(target.archiveLog, { text: line }, LOG_LIMIT);
@@ -965,6 +1045,200 @@ export function useMachinesStore() {
             } catch (error) {
                 target.error = describeError(error);
             }
+        },
+        refreshAndroidDevices: async (id: string) => {
+            const target = session(id);
+            if (target.androidDevicesLoading || target.operation || target.view?.busyOperation)
+                return;
+            target.androidDevicesLoading = true;
+            target.androidDevicesError = null;
+            try {
+                target.androidDevices = await useBackend().listAndroidDevices(id);
+                const ready = target.androidDevices.devices.filter(
+                    (device) => device.state === 'device',
+                );
+                if (!ready.some((device) => device.serial === target.androidDeviceSerial)) {
+                    target.androidDeviceSerial = ready.length === 1 ? ready[0]!.serial : '';
+                }
+            } catch (error) {
+                target.androidDevices = null;
+                target.androidDevicesError = describeError(error);
+            } finally {
+                target.androidDevicesLoading = false;
+            }
+        },
+        runAndroidDevice: async (id: string, input: AndroidDeviceRunInput): Promise<boolean> => {
+            const target = session(id);
+            const apk = androidDeviceApks(target.view?.android).find(
+                (apk) => apk.value === input.kind,
+            );
+            let blocker: string | null = null;
+            if (target.operation || target.view?.busyOperation || target.androidDevicesLoading)
+                blocker = 'Wait for the current operation to finish.';
+            else if (!apk || apk.artifact.sha256 !== input.expectedSha256)
+                blocker = 'The retained APK changed. Review it before installing.';
+            else if (
+                !target.androidDevices?.available ||
+                !target.androidDevices.devices.some(
+                    (device) => device.serial === input.serial && device.state === 'device',
+                )
+            )
+                blocker = 'Refresh devices and select an authorized phone or emulator first.';
+            if (blocker) {
+                target.error = blocker;
+                return false;
+            }
+            const run: AndroidDeviceRun = {
+                kind: input.kind,
+                serial: input.serial,
+                sha256: input.expectedSha256,
+                status: 'installing',
+                result: null,
+                error: null,
+            };
+            target.androidDeviceRun = run;
+            const result = await runOperation(
+                id,
+                'android-run-device',
+                async () => {
+                    const result = await useBackend().runAndroidDevice(id, input);
+                    if (
+                        result.sha256.toLowerCase() !== input.expectedSha256.toLowerCase() ||
+                        result.serial !== input.serial ||
+                        result.applicationId !== apk!.applicationId ||
+                        !result.installed ||
+                        !result.launched
+                    )
+                        throw new Error(
+                            'The device did not confirm installation and launch. Check the phone before retrying.',
+                        );
+                    return result;
+                },
+                {
+                    started: `Installing the retained ${input.kind} APK on ${input.serial}`,
+                    finished: 'APK installed and opened on the Android device.',
+                    stopped:
+                        'Device installation stopped. Check the device before retrying; the app may already be installed.',
+                },
+            );
+            if (
+                target.androidDeviceRun?.sha256 === input.expectedSha256 &&
+                target.androidDeviceRun.serial === input.serial &&
+                androidDeviceApks(target.view?.android).some(
+                    (apk) =>
+                        apk.value === input.kind && apk.artifact.sha256 === input.expectedSha256,
+                )
+            ) {
+                target.androidDeviceRun.status = result ? 'complete' : 'failed';
+                target.androidDeviceRun.result = result;
+                target.androidDeviceRun.error = result
+                    ? null
+                    : (target.error ?? target.notice ?? 'Installation did not finish.');
+            }
+            return result !== null;
+        },
+        loadGooglePlayConnection: async (id: string) => {
+            const target = session(id);
+            if (target.googlePlayConnectionLoading) return;
+            target.googlePlayConnectionLoading = true;
+            target.googlePlayConnectionError = null;
+            try {
+                target.googlePlayConnection = await useBackend().googlePlayConnection(id);
+            } catch (error) {
+                target.googlePlayConnection = null;
+                target.googlePlayConnectionError = describeError(error);
+            } finally {
+                target.googlePlayConnectionLoading = false;
+            }
+        },
+        configureGooglePlay: async (id: string, path: string) => {
+            const target = session(id);
+            if (
+                target.googlePlayConnectionLoading ||
+                target.operation ||
+                target.view?.busyOperation
+            )
+                return;
+            target.googlePlayConnectionLoading = true;
+            target.googlePlayConnectionError = null;
+            try {
+                target.googlePlayConnection = await useBackend().configureGooglePlay(id, path);
+            } catch (error) {
+                target.googlePlayConnectionError = describeError(error);
+            } finally {
+                target.googlePlayConnectionLoading = false;
+            }
+        },
+        disconnectGooglePlay: async (id: string) => {
+            const target = session(id);
+            if (
+                target.googlePlayConnectionLoading ||
+                target.operation ||
+                target.view?.busyOperation
+            )
+                return;
+            target.googlePlayConnectionLoading = true;
+            target.googlePlayConnectionError = null;
+            try {
+                await useBackend().disconnectGooglePlay(id);
+                target.googlePlayConnection = {
+                    configured: false,
+                    clientEmail: null,
+                    projectId: null,
+                };
+            } catch (error) {
+                target.googlePlayConnectionError = describeError(error);
+            } finally {
+                target.googlePlayConnectionLoading = false;
+            }
+        },
+        uploadGooglePlay: async (id: string): Promise<boolean> => {
+            const target = session(id);
+            const blocker = googlePlayUploadBlocker(
+                target.view,
+                !!target.googlePlayConnection?.configured,
+                !!target.operation || target.googlePlayConnectionLoading,
+            );
+            if (blocker) {
+                target.error = blocker;
+                return false;
+            }
+            const sha256 = target.view!.android!.release!.aab!.sha256;
+            target.googlePlayUpload = { sha256, status: 'uploading', result: null, error: null };
+            const result = await runOperation(
+                id,
+                'upload-google-play',
+                async () => {
+                    const result = await useBackend().uploadGooglePlay(id, sha256);
+                    if (
+                        result.sha256.toLowerCase() !== sha256.toLowerCase() ||
+                        result.status !== 'draft'
+                    )
+                        throw new Error(
+                            'Google Play did not confirm this AAB as a draft. Check Play Console before retrying.',
+                        );
+                    return result;
+                },
+                {
+                    started:
+                        'Uploading the retained AAB to Google Play internal testing as a draft',
+                    finished:
+                        'Uploaded a draft to internal testing. Complete rollout in Play Console.',
+                    stopped:
+                        'Upload stopped. Check Play Console before retrying; Google may already have received the build.',
+                },
+            );
+            if (
+                target.googlePlayUpload?.sha256 === sha256 &&
+                target.view?.android?.release?.aab?.sha256 === sha256
+            ) {
+                target.googlePlayUpload.status = result ? 'uploaded' : 'failed';
+                target.googlePlayUpload.result = result;
+                target.googlePlayUpload.error = result
+                    ? null
+                    : (target.error ?? target.notice ?? 'Upload did not finish.');
+            }
+            return result !== null;
         },
         revealRelease: async (id: string) => {
             const target = session(id);
@@ -1069,15 +1343,24 @@ export function useMachinesStore() {
             runOperation(id, 'clear-signing', () => useBackend().clearGuestSigning(id), {
                 finished: 'Guest keychain and installed profiles removed.',
             }),
-        signedArchive: async (id: string, envSetId: string | null) => {
+        signedArchive: async (
+            id: string,
+            envSetId: string | null,
+            version: ProjectVersionInput | null = null,
+        ) => {
             const target = session(id);
             target.archive = null;
             target.archiveLog = [];
-            return runOperation(id, 'archive', () => useBackend().runSignedArchive(id, envSetId), {
-                started: 'Building the signed Release archive and IPA',
-                finished: (result) =>
-                    `Signed ${result.archive.marketingVersion} (${result.archive.buildNumber}) exported and verified.`,
-            }).then((result) => {
+            return runOperation(
+                id,
+                'archive',
+                () => useBackend().runSignedArchive(id, envSetId, version),
+                {
+                    started: 'Building the signed Release archive and IPA',
+                    finished: (result) =>
+                        `Signed ${result.archive.marketingVersion} (${result.archive.buildNumber}) exported and verified.`,
+                },
+            ).then((result) => {
                 if (result) {
                     for (const line of result.archive.outputTail) {
                         pushBounded(target.archiveLog, { text: line }, LOG_LIMIT);
@@ -1085,6 +1368,48 @@ export function useMachinesStore() {
                 }
                 return result;
             });
+        },
+        uploadAppleArchive: async (id: string): Promise<boolean> => {
+            const target = session(id);
+            const blocker = appleUploadBlocker(target.view, target.operation !== null);
+            if (blocker) {
+                target.error = blocker.message;
+                return false;
+            }
+            const sha256 = target.view!.archive!.ipa.sha256;
+            target.archiveUpload = { sha256, status: 'uploading', error: null };
+            const result = await runOperation(
+                id,
+                'upload-archive',
+                async () => {
+                    await useBackend().uploadAppleArchive(id, sha256);
+                    return undefined;
+                },
+                {
+                    started: 'Uploading the retained App Store IPA with Transporter',
+                    stopped:
+                        'Upload stopped. Check App Store Connect before retrying; Apple may already have received the build.',
+                },
+            );
+            // A refresh or rebuild may have replaced the artifact while this request ran.
+            if (
+                target.view?.archive?.ipa.sha256 === sha256 &&
+                target.archiveUpload?.sha256 === sha256
+            ) {
+                target.archiveUpload.status = result === null ? 'failed' : 'uploaded';
+                target.archiveUpload.error =
+                    result === null
+                        ? (target.error ?? target.notice ?? 'Upload did not finish.')
+                        : null;
+            }
+            if (result !== null) {
+                note(
+                    target,
+                    'Uploaded the retained IPA to App Store Connect. Apple still needs to process the build.',
+                    'success',
+                );
+            }
+            return result !== null;
         },
         revealArchive: async (id: string) => {
             const target = session(id);

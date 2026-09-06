@@ -115,7 +115,7 @@ async fn release_a_real_project() -> Result<(), String> {
         );
 
         let built = as_json(
-            buildbridge_engine::run_android_debug_build(&engine, machine_id.clone()).await?,
+            buildbridge_engine::run_android_debug_build(&engine, machine_id.clone(), false).await?,
         );
         eprintln!(
             "== debug build: {} {} ({}) with {} / build tools {} after {:?}",
@@ -164,13 +164,21 @@ async fn release_a_real_project() -> Result<(), String> {
             key_password: "test-secret-1".to_string(),
         };
         let release = tokio::task::spawn_blocking(move || {
-            run_signed_android_release(&container, &material, None, &output, |progress| {
-                if let Some(line) = &progress.log_line {
-                    eprintln!("    {line}");
-                } else {
-                    eprintln!("[release] {:?} · {}", progress.phase, progress.detail);
-                }
-            })
+            run_signed_android_release(
+                &container,
+                &material,
+                None,
+                buildbridge_machines::AndroidReleaseOutputs::Both,
+                None,
+                &output,
+                |progress| {
+                    if let Some(line) = &progress.log_line {
+                        eprintln!("    {line}");
+                    } else {
+                        eprintln!("[release] {:?} · {}", progress.phase, progress.detail);
+                    }
+                },
+            )
             .map_err(|error| error.to_string())
         })
         .await
@@ -184,13 +192,18 @@ async fn release_a_real_project() -> Result<(), String> {
             release.certificate_sha256,
             started.elapsed()
         );
+        let aab = release
+            .aab
+            .as_ref()
+            .expect("both outputs includes the app bundle");
+        let apk = release.apk.as_ref().expect("both outputs includes the APK");
         eprintln!(
             "   bundle {} ({} bytes, {})",
-            release.aab.path, release.aab.bytes, release.aab.sha256
+            aab.path, aab.bytes, aab.sha256
         );
         eprintln!(
             "   apk    {} ({} bytes, {})",
-            release.apk.path, release.apk.bytes, release.apk.sha256
+            apk.path, apk.bytes, apk.sha256
         );
         if release.certificate_sha256 != keystore.certificate_sha256 {
             return Err(
@@ -198,7 +211,7 @@ async fn release_a_real_project() -> Result<(), String> {
                     .to_string(),
             );
         }
-        for artifact in [&release.aab, &release.apk] {
+        for artifact in release.artifacts() {
             let bytes = fs::metadata(&artifact.path)
                 .map_err(|error| error.to_string())?
                 .len();

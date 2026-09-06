@@ -4,10 +4,10 @@
 import { ArrowRight, KeyRound, Link2, Plus } from '@lucide/vue';
 import { computed, ref, watch } from 'vue';
 
-import { isAndroid } from '../../../model/providers';
+import { isAndroid, platformLabel } from '../../../model/providers';
 import type { JourneyStep } from '../../../model/steps';
 import { useMachinesStore, type MachineSession } from '../../../stores/machines';
-import { androidKitShortfall, kitReadiness } from '../../../model/signing';
+import { androidKitShortfall, kitReadiness, signingKitPlatforms } from '../../../model/signing';
 import { useSigningStore } from '../../../stores/signing';
 import { useUi } from '../../../stores/ui';
 import Button from '../../ui/Button.vue';
@@ -19,6 +19,7 @@ import KeyValue from '../../ui/KeyValue.vue';
 import Select from '../../ui/Select.vue';
 import Spinner from '../../ui/Spinner.vue';
 import StepPanel from '../../ui/StepPanel.vue';
+import AndroidVerificationCard from '../../signing/AndroidVerificationCard.vue';
 
 const { session, step } = defineProps<{ session: MachineSession; step: JourneyStep }>();
 const machines = useMachinesStore();
@@ -42,7 +43,32 @@ watch(
 // "None" is a real choice: it detaches the machine, and the attach button says so.
 const options = computed(() => [
     { value: '', label: 'None' },
-    ...kits.value.map((entry) => ({ value: entry.id, label: entry.name })),
+    ...kits.value.map((entry) => {
+        const platforms = signingKitPlatforms(entry);
+        const ready = kitReadiness(entry);
+        const material = platforms.length
+            ? platforms.map((platform) => platformLabel[platform]).join(' and ')
+            : 'No platform credentials yet';
+        const status = android.value
+            ? ready.android
+                ? 'Android key configured'
+                : entry.androidKeystoreConfigured
+                  ? `Android needs ${androidKitShortfall(entry).join(' and ')}`
+                  : 'No Android upload key'
+            : ready.provisionable
+              ? ready.archive
+                  ? 'iOS release ready'
+                  : 'iPhone builds only'
+              : platforms.includes('ios')
+                ? 'iOS credentials incomplete'
+                : 'No iOS signing material';
+        return {
+            value: entry.id,
+            label: entry.name,
+            platforms,
+            description: `${material} · ${status}`,
+        };
+    }),
 ]);
 const detaching = computed(() => selected.value === '' && kit.value !== null);
 const readiness = computed(() => kitReadiness(kit.value));
@@ -155,7 +181,7 @@ async function attach(): Promise<void> {
         <template #action>
             <Button variant="outline" size="sm" @click="ui.navigate({ kind: 'signing' })">
                 <KeyRound class="h-3.5 w-3.5" />
-                Manage signing credentials
+                {{ kit ? 'Review signing credentials' : 'Choose signing credentials' }}
                 <ArrowRight class="h-3 w-3" />
             </Button>
         </template>
@@ -205,8 +231,9 @@ async function attach(): Promise<void> {
                 </div>
             </Callout>
             <Callout v-else tone="warn" title="No signing credentials stored yet">
-                Store a Team key (an App Store Connect API key) and a keychain password once, or the
-                identity and profiles exported from a Mac, then attach the credentials here.
+                Store a Team key (an App Store Connect API key), or the identity and profiles
+                exported from a Mac, then attach the credentials here. BuildBridge generates the
+                guest keychain password for you unless you choose your own.
                 <div class="mt-2">
                     <Button variant="outline" size="sm" @click="ui.navigate({ kind: 'signing' })">
                         <Plus class="h-3.5 w-3.5" />
@@ -307,7 +334,7 @@ async function attach(): Promise<void> {
                             {{
                                 complete
                                     ? android
-                                        ? 'Ready to sign'
+                                        ? 'Credentials configured'
                                         : developmentOnly
                                           ? 'Ready to provision · phone only'
                                           : 'Ready to provision'
@@ -327,6 +354,7 @@ async function attach(): Promise<void> {
                             }}
                         </Chip>
                     </div>
+                    <AndroidVerificationCard v-if="android && complete" :kit="kit" />
                 </template>
             </template>
         </div>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { LoaderCircle } from '@lucide/vue';
 
-const { size = 'h-3.5 w-3.5', tone = 'text-zinc-700 dark:text-zinc-300' } = defineProps<{
+const { size = 'h-3.5 w-3.5', tone = 'text-amber-700 dark:text-amber-400' } = defineProps<{
     size?: string;
     tone?: string;
 }>();

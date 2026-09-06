@@ -9,9 +9,12 @@ import { useBackend } from '../lib/backend';
 import { applyTheme, loadTheme, saveTheme, type Theme } from '../lib/prefs';
 import { useMachinesStore } from '../stores/machines';
 import { controlPlaneChip } from '../model/runner';
+import { providerHostIssues, providerLabel } from '../model/providers';
+import type { MachineProvider } from '../types/backend';
 import { useRunnerStore } from '../stores/runner';
 import { useUi } from '../stores/ui';
 import BrandLogo from './ui/BrandLogo.vue';
+import Chip from './ui/Chip.vue';
 
 const machines = useMachinesStore();
 const runner = useRunnerStore();
@@ -43,27 +46,66 @@ function setTheme(next: Theme): void {
 }
 
 const host = computed(() => machines.host.value);
+const checkedProviders = computed<MachineProvider[]>(() => {
+    const route = ui.route.value;
+    if (route.kind === 'native_mac') return [];
+    const selected =
+        route.kind === 'machine'
+            ? machines.machines.value.find((machine) => machine.id === route.id)
+            : null;
+    if (selected) {
+        return [selected.config.provider];
+    }
+    const providers = [
+        ...new Set(machines.machines.value.map((machine) => machine.config.provider)),
+    ];
+    return providers.length
+        ? providers
+        : runner.state.status?.platform === 'macos'
+          ? []
+          : ['android_toolchain'];
+});
+const hostIssues = computed(() => [
+    ...new Set(
+        checkedProviders.value.flatMap((provider) =>
+            providerHostIssues(host.value, provider, runner.state.status?.platform),
+        ),
+    ),
+]);
+const hostDetail = computed(() =>
+    hostIssues.value.length
+        ? hostIssues.value.join(' ')
+        : machines.machines.value.length
+          ? `Host checks passed for ${checkedProviders.value.map((provider) => providerLabel[provider]).join(', ')}`
+          : 'Docker is available. Other requirements are checked for the platform you choose.',
+);
+// Shaped like the control-plane chip: the dot carries the state, and only a state that needs
+// attention colours the label as well.
 const hostChip = computed(() => {
     if (!host.value) {
         return {
             dot: 'bg-zinc-300 dark:bg-zinc-600',
             text: 'checking host',
             tone: 'text-zinc-500 dark:text-zinc-400',
+            attention: false,
         };
     }
-    return host.value.ready
-        ? { dot: 'bg-emerald-500', text: 'host ready', tone: 'text-zinc-500 dark:text-zinc-400' }
+    return hostIssues.value.length === 0
+        ? {
+              dot: 'bg-emerald-500',
+              text: machines.machines.value.length ? 'host ready' : 'Docker ready',
+              tone: 'text-zinc-500 dark:text-zinc-400',
+              attention: false,
+          }
         : {
               dot: 'bg-red-500',
-              text: `host: ${host.value.issues.length} to fix`,
+              text: `host: ${hostIssues.value.length} to fix`,
               tone: 'text-red-700 dark:text-red-400',
+              attention: true,
           };
 });
 
 const runnerChip = computed(() => controlPlaneChip(runner.state.status, runner.state.realtime));
-
-const chipClass =
-    'inline-flex h-7 items-center gap-1.5 rounded-full border border-zinc-200 dark:border-zinc-800 px-2.5 text-[11px] hover:border-zinc-300 dark:hover:border-zinc-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300';
 </script>
 
 <template>
@@ -74,45 +116,40 @@ const chipClass =
             type="button"
             class="flex items-center rounded-md px-1 py-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300"
             v-tip="'Overview'"
+            aria-label="Overview"
             @click="ui.navigate({ kind: 'home' })"
         >
             <BrandLogo class="text-zinc-900 dark:text-zinc-50" />
         </button>
 
         <div class="flex items-center gap-1.5">
-            <button
-                type="button"
-                :class="[chipClass, hostChip.tone]"
-                v-tip="
-                    host && !host.ready ? host.issues.join(' ') : 'Docker, KVM and display checks'
-                "
+            <Chip
+                :dot="hostChip.dot"
+                :tip="host ? hostDetail : 'Checking the host'"
                 @click="ui.navigate({ kind: 'home' })"
             >
-                <span class="h-1.5 w-1.5 rounded-full" :class="hostChip.dot" />
-                {{ hostChip.text }}
-            </button>
-            <button
-                type="button"
-                :class="[chipClass, runnerChip.tone]"
-                v-tip="'Control plane'"
+                <span :class="hostChip.attention ? hostChip.tone : undefined">
+                    {{ hostChip.text }}
+                </span>
+            </Chip>
+            <Chip
+                :dot="runnerChip.dot"
+                tip="Remote builds"
                 @click="ui.navigate({ kind: 'runner' })"
             >
-                <span class="h-1.5 w-1.5 rounded-full" :class="runnerChip.dot" />
-                {{ runnerChip.text }}
-            </button>
+                <span :class="runnerChip.attention ? runnerChip.tone : undefined">
+                    {{ runnerChip.text }}
+                </span>
+            </Chip>
 
-            <button
+            <Chip
                 v-if="inspectorAvailable"
-                type="button"
-                :class="chipClass"
-                v-tip="
-                    'Open the web inspector for this desktop: its console, network requests and layout'
-                "
+                tip="Open the web inspector for this desktop: its console, network requests and layout"
                 @click="openInspector"
             >
                 <Bug class="h-3.5 w-3.5" />
                 Inspector
-            </button>
+            </Chip>
             <div
                 class="ml-1 flex items-center gap-0.5 rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800"
             >
@@ -127,6 +164,8 @@ const chipClass =
                             : 'text-zinc-500 hover:text-zinc-600 dark:text-zinc-400 dark:hover:text-zinc-300'
                     "
                     v-tip="option.label"
+                    :aria-label="option.label"
+                    :aria-pressed="theme === option.value"
                     @click="setTheme(option.value)"
                 >
                     <component :is="option.icon" class="h-3.5 w-3.5" />

@@ -110,13 +110,22 @@ pub(crate) fn save_android_workspace(
     write_restricted_file(&paths.android_workspace(), &encoded)
 }
 
+/// The retained release, if there is one. A record that names no artifact is not a release —
+/// nothing this engine writes has that shape — so it reads as none, the way a missing file
+/// does: the machine view still opens and clearing the release removes the file.
 pub(crate) fn load_android_release(
     paths: &MachinePaths,
 ) -> Result<Option<StoredAndroidRelease>, String> {
     match fs::read(paths.android_release_record()) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| format!("The retained Android release record is invalid: {error}")),
+        Ok(bytes) => {
+            let release: StoredAndroidRelease =
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    format!("The retained Android release record is invalid: {error}")
+                })?;
+            Ok(require_android_release_artifact(&release.result)
+                .is_ok()
+                .then_some(release))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.to_string()),
     }
@@ -126,6 +135,7 @@ pub(crate) fn save_android_release(
     paths: &MachinePaths,
     release: &StoredAndroidRelease,
 ) -> Result<(), String> {
+    require_android_release_artifact(&release.result)?;
     let encoded = serde_json::to_vec_pretty(release).map_err(|error| error.to_string())?;
 
     write_restricted_file(&paths.android_release_record(), &encoded)
@@ -148,31 +158,209 @@ pub(crate) fn remove_android_release_error(paths: &MachinePaths) -> Result<(), S
     remove_file_if_present(&paths.android_release_error())
 }
 
-/// The directory a retained release's two files share, once both are proven to be regular
-/// files directly under this machine's managed artifact directory.
+fn require_android_release_artifact(result: &AndroidReleaseResult) -> Result<(), String> {
+    if result.aab.is_none() && result.apk.is_none() {
+        return Err("The retained Android release has no artifacts.".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod android_release_record_tests {
+    use super::*;
+
+    struct Fixture {
+        root: PathBuf,
+        paths: MachinePaths,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "buildbridge-release-record-{}-{nonce}",
+                std::process::id()
+            ));
+            let app = Engine::new(EngineDeps {
+                config_dir: root.join("config"),
+                data_dir: root.join("data"),
+                events: Arc::new(NoEvents),
+            });
+            let paths = MachinePaths::resolve(&app, "android-test").unwrap();
+            Self { root, paths }
+        }
+        fn result(&self) -> AndroidReleaseResult {
+            let directory = self.paths.artifacts_dir().join("release-test");
+            fs::create_dir_all(&directory).unwrap();
+            let artifact = |name| {
+                let path = directory.join(name);
+                fs::write(&path, b"fixture").unwrap();
+                AndroidArtifact {
+                    path: path.to_string_lossy().into_owned(),
+                    bytes: 7,
+                    sha256: "a".repeat(64),
+                }
+            };
+            AndroidReleaseResult {
+                application_id: "com.example.app".into(),
+                version_name: "1.0".into(),
+                version_code: "1".into(),
+                key_alias: "upload".into(),
+                certificate_sha256: "b".repeat(64),
+                aab: Some(artifact("app.aab")),
+                apk: Some(artifact("app.apk")),
+                output_tail: vec![],
+            }
+        }
+        fn record(&self, result: AndroidReleaseResult) -> StoredAndroidRelease {
+            StoredAndroidRelease {
+                container_id: "container".into(),
+                snapshot_sha256: "c".repeat(64),
+                result,
+                env_set_name: None,
+            }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn selected_artifacts_round_trip_and_legacy_both_records_remain_readable() {
+        let fixture = Fixture::new();
+        for selection in [
+            AndroidReleaseOutputs::Both,
+            AndroidReleaseOutputs::Aab,
+            AndroidReleaseOutputs::Apk,
+        ] {
+            let mut result = fixture.result();
+            if !selection.includes_aab() {
+                result.aab = None;
+            }
+            if !selection.includes_apk() {
+                result.apk = None;
+            }
+            save_android_release(&fixture.paths, &fixture.record(result.clone())).unwrap();
+            let read = load_android_release(&fixture.paths).unwrap().unwrap();
+            assert_eq!(read.result, result);
+            assert!(validated_android_release_directory(&fixture.paths, &read.result).is_ok());
+            let report = android_result_json(&read.result, None);
+            assert_eq!(
+                report["artifacts"].as_array().unwrap().len(),
+                if selection == AndroidReleaseOutputs::Both {
+                    2
+                } else {
+                    1
+                }
+            );
+            assert!(
+                !report
+                    .to_string()
+                    .contains(&fixture.root.to_string_lossy().to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_release_cannot_be_saved_or_revealed_and_loads_as_no_release() {
+        let fixture = Fixture::new();
+        let mut result = fixture.result();
+        result.aab = None;
+        result.apk = None;
+        assert!(validated_android_release_directory(&fixture.paths, &result).is_err());
+        let record = fixture.record(result);
+        assert!(save_android_release(&fixture.paths, &record).is_err());
+        let path = fixture.paths.android_release_record();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(
+            load_android_release(&fixture.paths).unwrap().is_none(),
+            "a torn record must not brick the machine view"
+        );
+        remove_android_release_record(&fixture.paths).unwrap();
+        assert!(
+            !path.exists(),
+            "clearing the release removes the torn record"
+        );
+        assert!(load_android_release(&fixture.paths).unwrap().is_none());
+        fs::write(&path, b"{not json").unwrap();
+        assert!(
+            load_android_release(&fixture.paths).is_err(),
+            "unreadable JSON is still reported"
+        );
+    }
+
+    #[test]
+    fn selected_files_must_exist_in_one_managed_release_directory() {
+        let fixture = Fixture::new();
+        let mut result = fixture.result();
+        let outside = fixture.root.join("outside.apk");
+        fs::write(&outside, b"outside").unwrap();
+        result.apk.as_mut().unwrap().path = outside.to_string_lossy().into_owned();
+        assert!(validated_android_release_directory(&fixture.paths, &result).is_err());
+        result.aab = None;
+        assert!(validated_android_release_directory(&fixture.paths, &result).is_err());
+        let other = fixture.paths.artifacts_dir().join("release-other");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join("app.apk"), b"other").unwrap();
+        result = fixture.result();
+        result.apk.as_mut().unwrap().path = other.join("app.apk").to_string_lossy().into_owned();
+        assert!(validated_android_release_directory(&fixture.paths, &result).is_err());
+        result.aab = None;
+        assert_eq!(
+            validated_android_release_directory(&fixture.paths, &result).unwrap(),
+            fs::canonicalize(&other).unwrap()
+        );
+        fs::remove_file(other.join("app.apk")).unwrap();
+        assert!(validated_android_release_directory(&fixture.paths, &result).is_err());
+        let debug = fixture.paths.artifacts_dir().join("debug-test");
+        fs::create_dir_all(&debug).unwrap();
+        fs::write(debug.join("app.apk"), b"debug").unwrap();
+        result.apk.as_mut().unwrap().path = debug.join("app.apk").to_string_lossy().into_owned();
+        assert!(validated_android_release_directory(&fixture.paths, &result).is_err());
+        assert!(debug.join("app.apk").is_file());
+    }
+}
+
+/// The directory shared by the selected regular files directly under the managed artifact root.
 pub(crate) fn validated_android_release_directory(
     paths: &MachinePaths,
     result: &AndroidReleaseResult,
 ) -> Result<PathBuf, String> {
+    require_android_release_artifact(result)?;
     let root = fs::canonicalize(paths.artifacts_dir())
         .map_err(|error| format!("The managed artifact directory is unavailable: {error}"))?;
-    let aab = fs::canonicalize(&result.aab.path)
-        .map_err(|error| format!("The retained app bundle is unavailable: {error}"))?;
-    let apk = fs::canonicalize(&result.apk.path)
-        .map_err(|error| format!("The retained APK is unavailable: {error}"))?;
-    if !aab.is_file() || !apk.is_file() {
-        return Err("The retained signed artifacts are no longer regular files.".to_string());
+    let mut directory: Option<PathBuf> = None;
+    for artifact in result.aab.iter().chain(result.apk.iter()) {
+        let path = fs::canonicalize(&artifact.path)
+            .map_err(|error| format!("A retained signed artifact is unavailable: {error}"))?;
+        if !path.is_file() {
+            return Err("The retained signed artifacts are no longer regular files.".to_string());
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| "The retained signed artifact has no parent directory.".to_string())?;
+        if parent.parent() != Some(root.as_path())
+            || !parent
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("release-"))
+            || directory
+                .as_deref()
+                .is_some_and(|directory| directory != parent)
+        {
+            return Err(
+                "The signed artifact record is outside BuildBridge's managed directory."
+                    .to_string(),
+            );
+        }
+        directory = Some(parent.to_path_buf());
     }
-    let directory = aab
-        .parent()
-        .ok_or_else(|| "The retained app bundle has no parent directory.".to_string())?;
-    if apk.parent() != Some(directory) || directory.parent() != Some(root.as_path()) {
-        return Err(
-            "The signed artifact record is outside BuildBridge's managed directory.".to_string(),
-        );
-    }
-
-    Ok(directory.to_path_buf())
+    directory.ok_or_else(|| "The retained Android release has no artifacts.".to_string())
 }
 
 /// Approves a Capacitor project for an Android machine: the same package and lock the iOS
@@ -649,13 +837,47 @@ pub(crate) fn read_optional_text(path: &std::path::Path) -> Result<Option<String
     }
 }
 
+/// Writes an owner-only file in one step: the bytes go to a sibling temporary file that is
+/// created private (mode 0600 from its first byte, under any umask), synced, and renamed over
+/// the target. A reader never sees a half-written record, and a crash leaves the previous
+/// file whole. The temporary file is removed on any failure.
 pub(crate) fn write_restricted_file(path: &std::path::Path, contents: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| "The macOS guest configuration directory is unavailable.".to_string())?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    fs::write(path, contents).map_err(|error| error.to_string())?;
-    set_restricted_permissions(path)
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "The record's file name is invalid.".to_string())?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let temporary = parent.join(format!(".{name}.{}-{nonce}.tmp", std::process::id()));
+    let written = (|| {
+        use std::io::Write;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| error.to_string())?;
+        set_restricted_permissions(&temporary)?;
+        file.write_all(contents)
+            .map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        drop(file);
+        fs::rename(&temporary, path).map_err(|error| error.to_string())
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
 }
 
 pub(crate) fn set_restricted_permissions(path: &std::path::Path) -> Result<(), String> {
@@ -680,4 +902,160 @@ pub(crate) fn set_restricted_directory_permissions(path: &std::path::Path) -> Re
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod restricted_file_tests {
+    use super::*;
+
+    fn scratch(label: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "buildbridge-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    fn leftovers(directory: &std::path::Path) -> Vec<String> {
+        fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn restricted_files_are_private_whole_and_leave_no_temporary_behind() {
+        let directory = scratch("restricted-file");
+        let path = directory.join("nested").join("record.json");
+        write_restricted_file(&path, b"first").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        write_restricted_file(&path, b"second, longer than the first").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"second, longer than the first");
+        assert!(leftovers(path.parent().unwrap()).is_empty());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            // A file that was already readable by others becomes private once rewritten.
+            let open = directory.join("open.json");
+            fs::write(&open, b"public").unwrap();
+            fs::set_permissions(&open, fs::Permissions::from_mode(0o644)).unwrap();
+            write_restricted_file(&open, b"private").unwrap();
+            assert_eq!(
+                fs::metadata(&open).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(fs::read(&open).unwrap(), b"private");
+        }
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_failed_write_keeps_the_previous_file_and_removes_its_temporary() {
+        let directory = scratch("restricted-file-failure");
+        let path = directory.join("record.json");
+        write_restricted_file(&path, b"kept").unwrap();
+        // The target is now a directory, so the rename over it fails after the bytes went out.
+        let blocked = directory.join("blocked");
+        fs::create_dir_all(blocked.join("child")).unwrap();
+        fs::write(blocked.join("child").join("keep"), b"x").unwrap();
+        assert!(write_restricted_file(&blocked, b"replacement").is_err());
+        assert!(blocked.join("child").join("keep").is_file());
+        assert!(leftovers(&directory).is_empty());
+        assert_eq!(fs::read(&path).unwrap(), b"kept");
+        fs::remove_dir_all(&directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod source_record_tests {
+    use super::*;
+
+    #[test]
+    fn gradle_application_id_reads_literals_in_either_dialect_and_leaves_computed_values_unknown() {
+        assert_eq!(
+            gradle_application_id(
+                "android {\n  defaultConfig {\n    applicationId \"com.example.app\"\n"
+            ),
+            Some("com.example.app".to_string())
+        );
+        assert_eq!(
+            gradle_application_id("    applicationId = 'nz.co.think_solar.app'"),
+            Some("nz.co.think_solar.app".to_string())
+        );
+        assert_eq!(
+            gradle_application_id("applicationId=\"com.example.app\" // release"),
+            Some("com.example.app".to_string())
+        );
+        assert_eq!(
+            gradle_application_id("applicationId \"com.first\"\napplicationId \"com.second\""),
+            Some("com.first".to_string())
+        );
+        for script in [
+            "applicationId project.ext.appId",
+            "applicationId \"com.example.app;rm -rf\"",
+            "applicationId \"com.example.app/../x\"",
+            "applicationId \"\"",
+            "applicationIdSuffix \".debug\"",
+            "namespace \"com.example.app\"",
+            "// applicationId \"com.example.app\"",
+            &format!("applicationId \"{}\"", "a".repeat(256)),
+        ] {
+            assert_eq!(gradle_application_id(script), None, "{script}");
+        }
+    }
+
+    #[test]
+    fn guest_public_keys_must_be_a_single_ed25519_line() {
+        let directory = std::env::temp_dir().join(format!(
+            "buildbridge-guest-key-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("id_ed25519.pub");
+        fs::write(
+            &path,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample builder@host\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_mac_guest_public_key(&path).unwrap(),
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample builder@host"
+        );
+        fs::write(&path, "  ssh-ed25519 AAAA\n").unwrap();
+        assert_eq!(
+            read_mac_guest_public_key(&path).unwrap(),
+            "ssh-ed25519 AAAA"
+        );
+        for bad in [
+            "ssh-rsa AAAA builder@host",
+            "ssh-ed25519",
+            "ssh-ed25519 AAAA builder@host extra",
+            "",
+            "ssh-ed25519 AAAA\nssh-ed25519 BBBB",
+            &format!("ssh-ed25519 {}", "A".repeat(2_040)),
+        ] {
+            fs::write(&path, bad).unwrap();
+            assert_eq!(
+                read_mac_guest_public_key(&path).unwrap_err(),
+                "The BuildBridge guest SSH public key is invalid.",
+                "{bad:?}"
+            );
+        }
+        assert!(read_mac_guest_public_key(&directory.join("missing.pub")).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

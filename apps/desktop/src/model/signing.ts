@@ -4,7 +4,41 @@
 // the vault" — so readiness is the union of what is typed now and what is already stored. Keeping
 // that rule here means the dialog, the attach step and their tests agree on it.
 
-import type { ProfileKind, SigningKitSummary } from '../types/backend';
+import type { MachinePlatform, ProfileKind, SigningKitSummary } from '../types/backend';
+
+/** Stored signing material decides the platform; names and the automatic keychain password do not. */
+export function signingKitPlatforms(kit: SigningKitSummary): MachinePlatform[] {
+    const platforms: MachinePlatform[] = [];
+    if (
+        kit.appStoreConnectConfigured ||
+        kit.signingCertificateConfigured ||
+        kit.developmentCertificateConfigured ||
+        kit.provisioningProfileNames.length > 0
+    ) {
+        platforms.push('ios');
+    }
+    if (
+        kit.androidKeystoreConfigured ||
+        kit.androidKeystorePasswordStored ||
+        kit.androidKeyPasswordStored ||
+        Boolean(kit.androidKeyAlias)
+    ) {
+        platforms.push('android');
+    }
+    return platforms;
+}
+
+/** A user-supplied certificate identity; never strip arbitrary non-hex input into a match. */
+export function compareAndroidCertificate(
+    expected: string,
+    actual: string | undefined,
+): 'empty' | 'invalid' | 'unchecked' | 'match' | 'mismatch' {
+    if (!expected.trim()) return 'empty';
+    const normalized = expected.replace(/[:\s]/g, '').toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(normalized)) return 'invalid';
+    if (!actual || !/^[a-f0-9]{64}$/i.test(actual)) return 'unchecked';
+    return normalized === actual.toLowerCase() ? 'match' : 'mismatch';
+}
 
 /** What a profile is for, in the words the interface uses. */
 export const profileKindLabel: Record<ProfileKind, string> = {

@@ -10,6 +10,7 @@ import { useEnvSetsStore } from '../../../stores/envs';
 import { useMachinesStore, type MachineSession } from '../../../stores/machines';
 import { useUi } from '../../../stores/ui';
 import Button from '../../ui/Button.vue';
+import Callout from '../../ui/Callout.vue';
 import FailureBlock from '../../ui/FailureBlock.vue';
 import Field from '../../ui/Field.vue';
 import KeyValue from '../../ui/KeyValue.vue';
@@ -38,10 +39,11 @@ const selectedEnvSet = ref(attachedEnvSet.value?.id ?? '');
 watch(attachedEnvSet, (set) => (selectedEnvSet.value = set?.id ?? ''));
 const envChanged = computed(() => selectedEnvSet.value !== (attachedEnvSet.value?.id ?? ''));
 const envOptions = computed(() => [
-    { value: '', label: 'None' },
+    { value: '', label: 'Project configuration only' },
     ...envs.sets.value.map((set) => ({
         value: set.id,
-        label: `${set.name} · ${describeEnvSetSize(set)}`,
+        label: set.name,
+        description: describeEnvSetSize(set),
     })),
 ]);
 const attaching = computed(() => session.operation === 'attach-env');
@@ -59,7 +61,7 @@ async function attachEnv(): Promise<void> {
         <template #action>
             <Button
                 size="sm"
-                :disabled="busy || step.status === 'pending'"
+                :disabled="busy || envChanged || step.status === 'pending'"
                 @click="machines.sync(session.id)"
             >
                 <Spinner v-if="session.operation === 'sync'" tone="text-white dark:text-zinc-950" />
@@ -128,8 +130,16 @@ async function attachEnv(): Promise<void> {
                 :columns="3"
             />
 
+            <Callout
+                v-if="envChanged"
+                tone="warn"
+                title="Save the environment choice before synchronizing"
+            >
+                The selected environment has not been saved as this machine's default yet.
+            </Callout>
+
             <Field
-                label="Environment for this machine"
+                label="Default environment for the next sync"
                 :hint="
                     attachedEnvSet
                         ? `${attachedEnvSet.name} is written into the guest as .env.production.local at every sync and exported to the build shell. Synchronize again after changing it.`
@@ -139,7 +149,7 @@ async function attachEnv(): Promise<void> {
                 <Select
                     v-model="selectedEnvSet"
                     :options="envOptions"
-                    placeholder="None"
+                    placeholder="Project configuration only"
                     :disabled="busy"
                 />
                 <template #action>
@@ -151,10 +161,18 @@ async function attachEnv(): Promise<void> {
                     >
                         <Spinner v-if="attaching" />
                         <Link2 v-else class="h-3.5 w-3.5" />
-                        {{ detaching ? 'Detach' : 'Attach' }}
+                        {{ detaching ? 'Clear default' : 'Save default' }}
                     </Button>
                 </template>
             </Field>
+            <p
+                v-if="workspace?.lastSnapshotSha256"
+                class="text-xs leading-5 text-zinc-500 dark:text-zinc-400"
+            >
+                This default applies to the next sync. Prepared source and web assets keep their
+                existing values until you synchronize and build again, or rebuild a release with a
+                selected environment.
+            </p>
             <Button variant="ghost" size="sm" @click="ui.navigate({ kind: 'envs' })">
                 Manage environments
                 <ArrowRight class="h-3 w-3" />

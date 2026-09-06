@@ -51,7 +51,7 @@ function place(): void {
 </script>
 
 <template>
-    <Teleport to="body">
+    <Teleport :to="tooltip.anchor?.closest('dialog') ?? 'body'">
         <div
             v-if="tooltip.open"
             :id="TOOLTIP_ID"

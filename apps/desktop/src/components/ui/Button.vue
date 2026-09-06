@@ -3,7 +3,7 @@
 // button has `pointer-events: none`, so it never sees a hover, and its reason for being
 // disabled is the one you most want to read. `title` here is our own prop and is stripped
 // before it reaches the DOM, so no native tooltip is ever produced.
-import { computed, onBeforeUnmount, ref, useAttrs } from 'vue';
+import { computed, onBeforeUnmount, ref, useAttrs, useId } from 'vue';
 
 import { hideTip, showTip } from '../../lib/tooltip';
 
@@ -24,10 +24,22 @@ const {
 }>();
 
 const attrs = useAttrs();
+const id = useId();
+const buttonId = computed(() => (typeof attrs.id === 'string' ? attrs.id : `${id}-button`));
+const descriptionId = `${id}-description`;
 const tip = computed(() => {
     const value = attrs.title;
     return typeof value === 'string' && value.trim() !== '' ? value : null;
 });
+const describedBy = computed(
+    () =>
+        [
+            typeof attrs['aria-describedby'] === 'string' ? attrs['aria-describedby'] : '',
+            tip.value ? descriptionId : '',
+        ]
+            .filter(Boolean)
+            .join(' ') || undefined,
+);
 /** Everything except the title, which this component draws itself. */
 const passed = computed(() => {
     const { title: _title, ...rest } = attrs;
@@ -60,7 +72,15 @@ onBeforeUnmount(hide);
 <template>
     <span
         ref="anchor"
-        :class="tip ? 'inline-flex' : 'contents'"
+        :class="
+            tip
+                ? 'inline-flex max-w-full rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300'
+                : 'contents'
+        "
+        :tabindex="disabled && tip ? 0 : undefined"
+        :role="disabled && tip ? 'group' : undefined"
+        :aria-labelledby="disabled && tip ? buttonId : undefined"
+        :aria-describedby="disabled && tip ? descriptionId : undefined"
         @mouseenter="show"
         @mouseleave="hide"
         @focusin="show"
@@ -69,6 +89,8 @@ onBeforeUnmount(hide);
     >
         <button
             v-bind="passed"
+            :id="buttonId"
+            :aria-describedby="describedBy"
             :type="type"
             :class="
                 cn(
@@ -96,5 +118,6 @@ onBeforeUnmount(hide);
         >
             <slot />
         </button>
+        <span v-if="tip" :id="descriptionId" class="sr-only">{{ tip }}</span>
     </span>
 </template>

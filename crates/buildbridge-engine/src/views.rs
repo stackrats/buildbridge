@@ -246,10 +246,7 @@ pub(crate) async fn build_machine_view(
         None
     } else {
         let (release, release_env_set) = load_android_release(paths)?
-            .filter(|stored| {
-                std::path::Path::new(&stored.result.aab.path).is_file()
-                    && std::path::Path::new(&stored.result.apk.path).is_file()
-            })
+            .filter(|stored| validated_android_release_directory(paths, &stored.result).is_ok())
             .map(|stored| (Some(stored.result), stored.env_set_name))
             .unwrap_or((None, None));
         Some(AndroidMachineView {
@@ -265,6 +262,16 @@ pub(crate) async fn build_machine_view(
         resolved,
         signing.is_some(),
     );
+    let project_version = if profile.provider.is_macos() {
+        apple_workspace
+            .as_ref()
+            .and_then(|workspace| read_apple_project_version(&workspace.local_path))
+    } else {
+        android
+            .as_ref()
+            .and_then(|android| android.workspace.as_ref())
+            .and_then(|workspace| read_android_project_version(&workspace.local_path))
+    };
 
     Ok(MachineView {
         machine_id: paths.id.clone(),
@@ -279,6 +286,7 @@ pub(crate) async fn build_machine_view(
         vault_issue,
         guest,
         apple_workspace,
+        project_version,
         signing,
         archive,
         archive_env_set,

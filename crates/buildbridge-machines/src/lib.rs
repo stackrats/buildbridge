@@ -19,12 +19,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 mod android;
+mod android_device;
 mod archive;
 mod build_log;
 mod device_run;
 mod disk;
 mod docker;
 mod dockur;
+pub mod native_mac;
 mod optimizations;
 mod podfile;
 mod process;
@@ -34,20 +36,26 @@ mod signing;
 mod smoke_build;
 mod ssh;
 mod templates;
+mod transporter;
 mod usb;
+mod versions;
 mod workspace;
 mod xcode;
 pub use android::{
     ANDROID_IMAGE, ANDROID_RELEASE_MAX_BYTES, AndroidArtifact, AndroidBuildPhase,
-    AndroidBuildProgress, AndroidBuildResult, AndroidKeystoreSummary, AndroidReleasePhase,
-    AndroidReleaseProgress, AndroidReleaseResult, AndroidSigningMaterial, AndroidToolchainSummary,
+    AndroidBuildProgress, AndroidBuildResult, AndroidKeystoreSummary, AndroidReleaseOutputs,
+    AndroidReleasePhase, AndroidReleaseProgress, AndroidReleaseResult, AndroidSigningAlgorithm,
+    AndroidSigningCertificate, AndroidSigningMaterial, AndroidToolchainSummary,
     create_android_keystore, remove_android_home, run_android_debug_build,
     run_signed_android_release, stop_android_jobs, sync_android_workspace,
+    verify_android_signing_material,
 };
+pub use android_device::*;
 pub use archive::*;
 use build_log::*;
 pub use docker::*;
 pub use dockur::DOCKUR_IMAGE;
+pub use native_mac::native_sha256;
 pub use optimizations::*;
 pub use podfile::*;
 pub use process::*;
@@ -56,6 +64,8 @@ pub use signing::*;
 pub use smoke_build::*;
 pub use ssh::*;
 pub use templates::*;
+pub use transporter::upload_apple_ipa;
+pub use versions::*;
 pub use workspace::*;
 pub use xcode::*;
 

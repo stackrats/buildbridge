@@ -68,13 +68,15 @@ pub async fn create_apple_replacement_profile(
         .app_store_connect_issuer_id
         .as_deref()
         .ok_or_else(|| {
-            "The stored signing credentials do not include an App Store Connect Issuer ID.".to_string()
+            "The stored signing credentials do not include an App Store Connect Issuer ID."
+                .to_string()
         })?;
     let private_key = secrets
         .app_store_connect_private_key
         .as_deref()
         .ok_or_else(|| {
-            "The stored signing credentials do not include an App Store Connect .p8 key.".to_string()
+            "The stored signing credentials do not include an App Store Connect .p8 key."
+                .to_string()
         })?;
 
     let created = apple_api::create_replacement_profile(

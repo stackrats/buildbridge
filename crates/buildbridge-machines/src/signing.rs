@@ -221,7 +221,8 @@ where
             .unwrap_or(0);
     if total_bytes > SIGNING_MATERIAL_MAX_BYTES {
         return Err(ProviderError::GuestBridge(
-            "the signing credentials are larger than the material a provisioning run accepts".to_string(),
+            "the signing credentials are larger than the material a provisioning run accepts"
+                .to_string(),
         ));
     }
     let started_at = Instant::now();

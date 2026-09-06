@@ -9,8 +9,10 @@
 // The panel is teleported and positioned against the viewport because a select is often inside a
 // dialog or a scrolling pane that would otherwise clip it.
 import { Check, ChevronDown } from '@lucide/vue';
-import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue';
+import { computed, inject, nextTick, onBeforeUnmount, ref, useAttrs, useId, watch } from 'vue';
 
+import { dialogKey } from '../../lib/dialog';
+import { fieldKey } from '../../lib/field';
 import {
     firstEnabledIndex,
     lastEnabledIndex,
@@ -19,6 +21,17 @@ import {
     type ListboxOption,
 } from '../../lib/listbox';
 import { cn } from '../../lib/utils';
+import PlatformIcon from './PlatformIcon.vue';
+
+defineOptions({ inheritAttrs: false });
+
+const field = inject(fieldKey, null);
+const dialog = inject(dialogKey, null);
+const attrs = useAttrs();
+const controlAttrs = computed(() => {
+    const { class: _class, style: _style, ...rest } = attrs;
+    return rest;
+});
 
 const model = defineModel<string>({ default: '' });
 const {
@@ -34,6 +47,18 @@ const {
 }>();
 
 const id = useId();
+const triggerId = computed(() =>
+    typeof attrs.id === 'string' ? attrs.id : (field?.controlId ?? `${id}-trigger`),
+);
+const listLabel = computed(() => {
+    if (typeof attrs['aria-labelledby'] === 'string') {
+        return { 'aria-labelledby': attrs['aria-labelledby'] };
+    }
+    if (typeof attrs['aria-label'] === 'string') {
+        return { 'aria-label': attrs['aria-label'] };
+    }
+    return { 'aria-labelledby': field?.labelId ?? triggerId.value };
+});
 const trigger = ref<HTMLButtonElement | null>(null);
 const list = ref<HTMLElement | null>(null);
 const open = ref(false);
@@ -63,11 +88,12 @@ function place(): void {
     const above = rect.top - PANEL_MARGIN;
     // Open downwards unless the list would be cramped and there is more room the other way.
     const flip = below < Math.min(MAX_PANEL_HEIGHT, above) && above > below;
+    const width = Math.min(Math.max(rect.width, 240), window.innerWidth - PANEL_MARGIN * 2);
 
     anchor.value = {
-        left: `${rect.left}px`,
-        width: `${rect.width}px`,
-        maxHeight: `${Math.max(120, Math.min(MAX_PANEL_HEIGHT, flip ? above : below))}px`,
+        left: `${Math.max(PANEL_MARGIN, Math.min(rect.left, window.innerWidth - width - PANEL_MARGIN))}px`,
+        width: `${width}px`,
+        maxHeight: `${Math.max(0, Math.min(MAX_PANEL_HEIGHT, (flip ? above : below) - 4))}px`,
         ...(flip
             ? { bottom: `${window.innerHeight - rect.top + 4}px` }
             : { top: `${rect.bottom + 4}px` }),
@@ -159,13 +185,15 @@ function onListKeydown(event: KeyboardEvent): void {
             choose(active.value);
             return;
         case 'Escape':
-            // A select inside a dialog closes itself first; the dialog listens on the window.
+            // Close this popup before Escape can dismiss its containing dialog.
             event.preventDefault();
             event.stopPropagation();
             hide();
             return;
         case 'Tab':
-            hide(false);
+            // Restore the trigger before the browser advances so Tab continues at the next
+            // field, rather than at the popup's position at the end of the document or dialog.
+            hide();
             return;
         default:
             break;
@@ -206,19 +234,31 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-    <span class="relative block w-full">
+    <span
+        class="relative block w-full"
+        :class="attrs.class"
+        :style="attrs.style as string | undefined"
+    >
         <button
-            :id="`${id}-trigger`"
+            :id="triggerId"
             ref="trigger"
             type="button"
             role="combobox"
             aria-haspopup="listbox"
             :aria-expanded="open"
             :aria-controls="open ? `${id}-list` : undefined"
+            :aria-labelledby="attrs['aria-label'] ? undefined : field?.labelId"
+            :aria-describedby="field?.descriptionId.value"
+            :aria-required="field?.required.value || undefined"
+            :aria-invalid="field?.invalid.value || undefined"
+            v-bind="controlAttrs"
             :disabled="disabled"
             :class="
                 cn(
-                    'flex w-full items-center rounded-md border border-zinc-200 bg-white text-left whitespace-nowrap transition-colors outline-none focus-visible:border-zinc-700 disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-900 dark:focus-visible:border-zinc-300',
+                    'flex w-full items-center rounded-md border bg-white text-left whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 disabled:opacity-50 dark:bg-zinc-900 dark:focus-visible:outline-zinc-300',
+                    field?.invalid.value
+                        ? 'border-red-500'
+                        : 'border-zinc-200 dark:border-zinc-800',
                     sizes[size],
                     open && 'border-zinc-700 dark:border-zinc-300',
                     selectedLabel === ''
@@ -233,6 +273,17 @@ onBeforeUnmount(() => {
             "
             @keydown="onTriggerKeydown"
         >
+            <span
+                v-if="options[selectedIndex]?.platforms?.length"
+                class="mr-2 flex shrink-0 items-center gap-1"
+            >
+                <PlatformIcon
+                    v-for="platform in options[selectedIndex]?.platforms"
+                    :key="platform"
+                    :platform="platform"
+                    class="h-3.5 w-3.5"
+                />
+            </span>
             <span class="min-w-0 flex-1 truncate">
                 {{ selectedLabel || placeholder || 'Choose one' }}
             </span>
@@ -242,15 +293,16 @@ onBeforeUnmount(() => {
             :class="[size === 'sm' ? 'right-2' : 'right-2.5', open && 'rotate-180']"
         />
 
-        <Teleport to="body">
+        <Teleport :to="dialog ?? 'body'">
             <div
                 v-if="open"
                 :id="`${id}-list`"
                 ref="list"
                 role="listbox"
                 tabindex="-1"
+                v-bind="listLabel"
                 :aria-activedescendant="active >= 0 ? `${id}-option-${active}` : undefined"
-                class="fixed z-[60] overflow-y-auto rounded-md border border-zinc-200 bg-white p-1 shadow-[0_16px_40px_-16px_rgb(0_0_0/0.35)] outline-none dark:border-zinc-800 dark:bg-zinc-900"
+                class="fixed z-[60] overflow-y-auto overscroll-contain rounded-md border border-zinc-200 bg-white p-1 shadow-[0_16px_40px_-16px_rgb(0_0_0/0.35)] outline-none dark:border-zinc-800 dark:bg-zinc-900"
                 :style="anchor"
                 @keydown="onListKeydown"
             >
@@ -268,7 +320,7 @@ onBeforeUnmount(() => {
                     :data-index="index"
                     :aria-selected="option.value === model"
                     :aria-disabled="option.disabled || undefined"
-                    class="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-[13px]"
+                    class="flex cursor-pointer items-start gap-2 rounded-sm px-2 py-2 text-[13px] leading-5"
                     :class="[
                         option.disabled
                             ? 'cursor-not-allowed text-zinc-400 dark:text-zinc-600'
@@ -279,10 +331,27 @@ onBeforeUnmount(() => {
                     @click="choose(index)"
                 >
                     <Check
-                        class="h-3.5 w-3.5 shrink-0 transition-opacity"
+                        class="mt-0.5 h-3.5 w-3.5 shrink-0 transition-opacity"
                         :class="option.value === model ? 'opacity-100' : 'opacity-0'"
+                        aria-hidden="true"
                     />
-                    <span class="min-w-0 flex-1 truncate">{{ option.label }}</span>
+                    <span class="min-w-0 flex-1 break-words">
+                        <span class="flex items-center gap-1.5">
+                            <PlatformIcon
+                                v-for="platform in option.platforms"
+                                :key="platform"
+                                :platform="platform"
+                                class="h-3.5 w-3.5"
+                            />
+                            <span>{{ option.label }}</span>
+                        </span>
+                        <span
+                            v-if="option.description"
+                            class="mt-0.5 block text-xs leading-5 text-zinc-500 dark:text-zinc-400"
+                        >
+                            {{ option.description }}
+                        </span>
+                    </span>
                 </div>
             </div>
         </Teleport>

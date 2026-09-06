@@ -47,24 +47,27 @@
             html.dark #splash {
                 color: #fafafa;
             }
-            /* The README header's arrangement rather than the top bar's: the mark over the name,
-               both inheriting the ink above. */
+            /* The stacked logo matches docs/images/buildbridge-logo-{light,dark}.svg.
+               Keep the wordmark font stack in sync with src/style.css. */
             #splash .lockup {
                 display: flex;
                 flex-direction: column;
                 align-items: center;
-                gap: 18px;
+                gap: 20px;
             }
             #splash .lockup svg {
-                height: 80px;
+                height: 64px;
                 width: auto;
                 flex: none;
             }
             #splash .lockup span {
-                font-size: 30px;
-                font-weight: 600;
+                font-family:
+                    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 28px;
+                font-weight: 500;
                 line-height: 1;
                 letter-spacing: -0.025em;
+                white-space: nowrap;
             }
             #splash p {
                 margin: 0;

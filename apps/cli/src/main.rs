@@ -70,8 +70,10 @@ enum MachineCommand {
     List,
     Create {
         name: String,
-        #[arg(long, default_value = "tahoe")]
-        macos: String,
+        /// The macOS release to install: tahoe, sequoia, sonoma or ventura. Omitted, it is the
+        /// provider's recommendation, tahoe on docker-osx and sequoia on dockur-macos.
+        #[arg(long)]
+        macos: Option<String>,
         #[arg(long, default_value_t = 8)]
         memory: u32,
         #[arg(long, default_value_t = 4)]
@@ -199,18 +201,35 @@ enum BuildCommand {
         /// macOS machines only: device_sdk or simulator.
         #[arg(long, default_value = "device_sdk")]
         target: String,
+        /// Allow HTTP API requests in this Android debug APK only.
+        #[arg(long)]
+        allow_http: bool,
     },
     /// The signed archive and IPA, on a macOS machine.
     Archive {
         machine: String,
         #[arg(long)]
         env: Option<String>,
+        /// Set the marketing version, in the project and in this archive.
+        #[arg(long)]
+        version: Option<String>,
+        /// Set the build number, in the project and in this archive.
+        #[arg(long)]
+        build: Option<String>,
     },
-    /// The signed app bundle and APK, on an Android machine.
+    /// The selected signed Android release artifacts (both by default).
     Release {
         machine: String,
         #[arg(long)]
         env: Option<String>,
+        #[arg(long, default_value = "both", value_parser = ["both", "aab", "apk"])]
+        outputs: String,
+        /// Set the version name, in the project and in this release.
+        #[arg(long)]
+        version: Option<String>,
+        /// Set the version code, in the project and in this release.
+        #[arg(long)]
+        build: Option<String>,
     },
 }
 
@@ -387,6 +406,26 @@ fn engine(json: bool) -> Result<Engine, String> {
 /// The inputs the engine takes are the desktop's JSON shapes; built here the same way.
 fn input<T: DeserializeOwned>(value: Value) -> Result<T, String> {
     serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+/// The version a build was asked to carry: either flag alone keeps the other half as the
+/// project declares it; neither leaves the project's version alone.
+fn version_input(
+    version: Option<String>,
+    build: Option<String>,
+) -> Result<Option<buildbridge_engine::ProjectVersionInput>, String> {
+    if version.is_none() && build.is_none() {
+        return Ok(None);
+    }
+    input(json!({ "version": version, "build": build })).map(Some)
+}
+
+/// `3.2.0 (15)` from a view's project version, or nothing when the project declares none.
+fn version_text(value: &Value) -> String {
+    match value["version"].as_str() {
+        Some(version) => format!("{version} ({})", text(&value["build"])),
+        None => String::new(),
+    }
 }
 
 /// Runs one machine operation; Ctrl-C asks the engine to stop it and waits for the answer,
@@ -590,6 +629,17 @@ impl ProviderArg {
         }
     }
 
+    /// The release a machine installs when none is named, the same one the desktop's profile
+    /// form moves to when this provider is chosen: dockur/macos's own authors do not recommend
+    /// Tahoe on it yet, and the first Tahoe install there hung in its second stage. The
+    /// toolchain container has no macOS in it; the value is carried but never read.
+    fn recommended_release(self) -> &'static str {
+        match self {
+            Self::DockerOsx => "tahoe",
+            Self::DockurMacos | Self::AndroidToolchain => "sequoia",
+        }
+    }
+
     /// The provider a machine gets from the two flags: the named one, else the platform's
     /// recommended one, else the original. The two must agree when both are given.
     fn resolve(
@@ -639,7 +689,15 @@ fn print_machine_list(list: &Value) {
         println!("No machines yet. `buildbridge machine create <name>` makes one.");
     } else {
         table(
-            &["id", "name", "state", "busy", "project", "credentials", "template"],
+            &[
+                "id",
+                "name",
+                "state",
+                "busy",
+                "project",
+                "credentials",
+                "template",
+            ],
             rows,
         );
     }
@@ -657,6 +715,7 @@ fn print_machine(view: &Value) {
             ("provider", "android toolchain".to_string()),
             ("project", text(&android["workspace"]["name"])),
             ("app id", text(&android["workspace"]["applicationId"])),
+            ("version", version_text(&view["projectVersion"])),
             (
                 "last build",
                 match last_build["versionName"].as_str() {
@@ -698,6 +757,7 @@ fn print_machine(view: &Value) {
         ("Xcode", text(&diagnostics["xcodeVersion"])),
         ("project", text(&view["appleWorkspace"]["name"])),
         ("bundle", text(&view["appleWorkspace"]["bundleIdentifier"])),
+        ("version", version_text(&view["projectVersion"])),
         ("credentials", text(&view["signingKit"]["name"])),
         ("signing", text(&view["signingHealth"])),
         ("archive", text(&view["archive"]["ipa"]["path"])),
@@ -735,6 +795,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             provider,
         }) => {
             let provider = ProviderArg::resolve(platform, provider)?;
+            let macos = macos.unwrap_or_else(|| provider.recommended_release().to_string());
             let used = serde_json::to_value(e::list_machines(engine).await?)
                 .map_err(|error| error.to_string())?;
             let port = port.unwrap_or_else(|| {
@@ -1087,14 +1148,18 @@ async fn run(cli: Cli) -> Result<(), String> {
                 }
             },
         ),
-        Command::Build(BuildCommand::Test { machine, target }) => {
+        Command::Build(BuildCommand::Test {
+            machine,
+            target,
+            allow_http,
+        }) => {
             if machine_is_android(engine, &machine).await? {
                 report(
                     json,
                     &on_machine(
                         engine,
                         &machine,
-                        e::run_android_debug_build(engine, machine.clone()),
+                        e::run_android_debug_build(engine, machine.clone(), allow_http),
                     )
                     .await?,
                     |result| {
@@ -1105,10 +1170,16 @@ async fn run(cli: Cli) -> Result<(), String> {
                             text(&build["versionName"]),
                             text(&build["versionCode"]),
                             text(&build["toolchain"]["jdkVersion"])
-                        )
+                        );
+                        if build["allowHttp"].as_bool() == Some(true) {
+                            println!("HTTP API access enabled for this debug APK.");
+                        }
                     },
                 )
             } else {
+                if allow_http {
+                    return Err("--allow-http is only available for Android debug builds.".into());
+                }
                 report(
                     json,
                     &on_machine(
@@ -1130,36 +1201,63 @@ async fn run(cli: Cli) -> Result<(), String> {
                 )
             }
         }
-        Command::Build(BuildCommand::Release { machine, env }) => report(
+        Command::Build(BuildCommand::Release {
+            machine,
+            env,
+            outputs,
+            version,
+            build,
+        }) => report(
             json,
             &on_machine(
                 engine,
                 &machine,
-                e::run_android_signed_release(engine, machine.clone(), env),
+                e::run_android_signed_release(
+                    engine,
+                    machine.clone(),
+                    env,
+                    Some(input(json!(outputs))?),
+                    version_input(version, build)?,
+                ),
             )
             .await?,
             |result| {
                 let release = &result["release"];
                 println!(
-                    "{} {} ({}) · bundle {:.2} MB · APK {:.2} MB · key {} · certificate {}",
+                    "{} {} ({}) · key {} · certificate {}",
                     text(&release["applicationId"]),
                     text(&release["versionName"]),
                     text(&release["versionCode"]),
-                    release["aab"]["bytes"].as_f64().unwrap_or(0.0) / 1_000_000.0,
-                    release["apk"]["bytes"].as_f64().unwrap_or(0.0) / 1_000_000.0,
                     text(&release["keyAlias"]),
                     text(&release["certificateSha256"])
                 );
-                println!("Bundle: {}", text(&release["aab"]["path"]));
-                println!("APK: {}", text(&release["apk"]["path"]));
+                for (field, label) in [("aab", "AAB"), ("apk", "APK")] {
+                    if !release[field].is_null() {
+                        println!(
+                            "{label}: {} ({:.2} MB)",
+                            text(&release[field]["path"]),
+                            release[field]["bytes"].as_f64().unwrap_or(0.0) / 1_000_000.0
+                        );
+                    }
+                }
             },
         ),
-        Command::Build(BuildCommand::Archive { machine, env }) => report(
+        Command::Build(BuildCommand::Archive {
+            machine,
+            env,
+            version,
+            build,
+        }) => report(
             json,
             &on_machine(
                 engine,
                 &machine,
-                e::run_apple_signed_archive(engine, machine.clone(), env),
+                e::run_apple_signed_archive(
+                    engine,
+                    machine.clone(),
+                    env,
+                    version_input(version, build)?,
+                ),
             )
             .await?,
             |result| {
@@ -1459,5 +1557,88 @@ async fn main() {
             eprintln!("error: {error}");
         }
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_macos_release_follows_the_provider_unless_named() {
+        let release = |arguments: &[&str]| {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            let Command::Machine(MachineCommand::Create {
+                macos,
+                platform,
+                provider,
+                ..
+            }) = cli.command
+            else {
+                panic!("not a create command");
+            };
+            let provider = ProviderArg::resolve(platform, provider).unwrap();
+            macos.unwrap_or_else(|| provider.recommended_release().to_string())
+        };
+        assert_eq!(
+            release(&["buildbridge", "machine", "create", "Mac"]),
+            "tahoe"
+        );
+        assert_eq!(
+            release(&[
+                "buildbridge",
+                "machine",
+                "create",
+                "Mac",
+                "--provider",
+                "dockur-macos"
+            ]),
+            "sequoia"
+        );
+        assert_eq!(
+            release(&[
+                "buildbridge",
+                "machine",
+                "create",
+                "Mac",
+                "--provider",
+                "dockur-macos",
+                "--macos",
+                "tahoe"
+            ]),
+            "tahoe"
+        );
+        assert_eq!(
+            release(&[
+                "buildbridge",
+                "machine",
+                "create",
+                "Droid",
+                "--platform",
+                "android"
+            ]),
+            "sequoia"
+        );
+    }
+
+    #[test]
+    fn http_override_requires_an_explicit_test_build_flag() {
+        for (arguments, expected) in [
+            (vec!["buildbridge", "build", "test", "android"], false),
+            (
+                vec!["buildbridge", "build", "test", "android", "--allow-http"],
+                true,
+            ),
+        ] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Build(BuildCommand::Test { allow_http, .. }) if allow_http == expected
+            ));
+        }
+        assert!(
+            Cli::try_parse_from(["buildbridge", "build", "release", "android", "--allow-http"])
+                .is_err()
+        );
     }
 }

@@ -234,10 +234,8 @@ const menuItemClass =
                 :disabled="session.operation !== null || session.refreshing"
                 @click="machines.refreshMachine(session.id)"
             >
-                <RefreshCw
-                    class="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400"
-                    :class="{ 'animate-spin': session.loading || session.refreshing }"
-                />
+                <Spinner v-if="session.loading || session.refreshing" />
+                <RefreshCw v-else class="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
             </Button>
             <div class="relative">
                 <Button variant="ghost" size="icon" title="More" @click="toggleMenu">
@@ -263,8 +261,8 @@ const menuItemClass =
                         type="button"
                         :class="menuItemClass"
                         :disabled="busy || templateBlocker !== null"
-                        class="disabled:opacity-40"
-                        :title="
+                        class="disabled:opacity-45"
+                        v-tip="
                             savingTemplate
                                 ? 'The save is running; its progress is on the Launch step and the Templates page'
                                 : (templateBlocker ??
@@ -275,11 +273,7 @@ const menuItemClass =
                             openTemplateDialog();
                         "
                     >
-                        <Spinner
-                            v-if="savingTemplate"
-                            size="h-3.5 w-3.5"
-                            tone="text-zinc-500 dark:text-zinc-400"
-                        />
+                        <Spinner v-if="savingTemplate" size="h-3.5 w-3.5" />
                         <Layers v-else class="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
                         <template v-if="savingTemplate">
                             Saving template{{
@@ -293,8 +287,8 @@ const menuItemClass =
                         type="button"
                         :class="menuItemClass"
                         :disabled="live || view.runtime.state === 'missing'"
-                        class="disabled:opacity-40"
-                        :title="
+                        class="disabled:opacity-45"
+                        v-tip="
                             live
                                 ? 'Stop the machine first'
                                 : view.runtime.state === 'missing'
@@ -319,8 +313,8 @@ const menuItemClass =
                         type="button"
                         :class="menuItemClass"
                         :disabled="live"
-                        class="disabled:opacity-40"
-                        :title="
+                        class="disabled:opacity-45"
+                        v-tip="
                             live
                                 ? 'Stop the machine first'
                                 : 'Removes the machine and everything it owns on this host'

@@ -26,4 +26,4 @@ env_sets: Array<string>,
  * What the machine builds for: `ios` or `android`. Additive in protocol v1; a control
  * plane that predates it reads every machine as an iOS one, which every machine was.
  */
-platform?: string | null, };
+platform?: string | null, executor?: string | null, toolchain_version?: string | null, readiness_issues?: Array<string>, architecture?: string | null, };

@@ -11,6 +11,7 @@ import AccessStep from './steps/AccessStep.vue';
 import AndroidApproveStep from './steps/AndroidApproveStep.vue';
 import AndroidBuildStep from './steps/AndroidBuildStep.vue';
 import AndroidReleaseStep from './steps/AndroidReleaseStep.vue';
+import AndroidRunDeviceStep from './steps/AndroidRunDeviceStep.vue';
 import AndroidSyncStep from './steps/AndroidSyncStep.vue';
 import ApproveStep from './steps/ApproveStep.vue';
 import ArchiveStep from './steps/ArchiveStep.vue';
@@ -18,6 +19,7 @@ import HostStep from './steps/HostStep.vue';
 import InstallStep from './steps/InstallStep.vue';
 import LaunchStep from './steps/LaunchStep.vue';
 import ProvisionStep from './steps/ProvisionStep.vue';
+import PublishStep from './steps/PublishStep.vue';
 import RunDeviceStep from './steps/RunDeviceStep.vue';
 import SigningKitStep from './steps/SigningKitStep.vue';
 import SyncStep from './steps/SyncStep.vue';
@@ -58,5 +60,11 @@ const android = computed(() => isAndroid(session.view!.profile.provider));
     <SigningKitStep v-else-if="step.id === 'signing-kit'" :session="session" :step="step" />
     <ProvisionStep v-else-if="step.id === 'provision'" :session="session" :step="step" />
     <ArchiveStep v-else-if="step.id === 'archive'" :session="session" :step="step" />
+    <AndroidRunDeviceStep
+        v-else-if="android && step.id === 'run-device'"
+        :session="session"
+        :step="step"
+    />
     <RunDeviceStep v-else-if="step.id === 'run-device'" :session="session" :step="step" />
+    <PublishStep v-else-if="step.id === 'publish'" :session="session" :step="step" embedded />
 </template>

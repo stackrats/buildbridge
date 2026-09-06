@@ -6,11 +6,14 @@ import { ArrowRight, KeyRound, Plus, Radio } from '@lucide/vue';
 import { computed, onMounted, watch } from 'vue';
 
 import { useMachinesStore } from '../../stores/machines';
+import { providerHostIssues, providerLabel } from '../../model/providers';
+import { kitSignsAndroid } from '../../model/signing';
 import { useRunnerStore } from '../../stores/runner';
 import { kitIsProvisionable, useSigningStore } from '../../stores/signing';
 import { useUi } from '../../stores/ui';
 import Button from '../ui/Button.vue';
 import Callout from '../ui/Callout.vue';
+import DisclosureSummary from '../ui/DisclosureSummary.vue';
 import MachineRow from './MachineRow.vue';
 
 const ui = useUi();
@@ -20,16 +23,37 @@ const signing = useSigningStore();
 
 const host = computed(() => machines.host.value);
 const paired = computed(() => runner.state.status?.paired === true);
+const remoteDetail = computed(() => {
+    if (runner.state.status?.credentialsMissing) {
+        return 'The stored connection token is missing. Open Remote builds to reconnect.';
+    }
+    if (!paired.value) {
+        return 'Use a shared builder, or connect this computer to accept builds.';
+    }
+    return runner.state.realtime === 'connected'
+        ? 'Connected and accepting builds.'
+        : runner.state.realtime === 'connecting'
+          ? 'Connecting to accept builds.'
+          : 'Not connected. Local builds are still available.';
+});
+const hostWarnings = computed(() =>
+    [...new Set(machines.machines.value.map((machine) => machine.config.provider))]
+        .map((provider) => ({
+            provider,
+            issues: providerHostIssues(host.value, provider, runner.state.status?.platform),
+        }))
+        .filter((entry) => entry.issues.length > 0),
+);
 
 const kitSummary = computed(() => {
     const kits = signing.kits.value;
     if (!kits.length) {
         return {
-            title: 'No signing credentials',
-            detail: 'Store a certificate and profile once to sign builds',
+            title: 'Signing credentials',
+            detail: 'Add these when you are ready to sign and export a release.',
         };
     }
-    const ready = kits.filter(kitIsProvisionable).length;
+    const ready = kits.filter((kit) => kitIsProvisionable(kit) || kitSignsAndroid(kit)).length;
     return {
         title:
             kits.length === 1
@@ -37,27 +61,23 @@ const kitSummary = computed(() => {
                 : `${kits.length} signing credentials stored`,
         detail:
             ready === kits.length
-                ? 'All ready to provision into a machine'
-                : `${ready} of ${kits.length} ready to provision`,
+                ? 'Ready to use for their supported platforms'
+                : `${ready} of ${kits.length} ready to use`,
     };
 });
 
 const phases = [
     {
         title: 'Prepare a machine once',
-        body: 'For iOS, a persistent macOS guest under Docker-OSX or dockur/macos: install macOS and Xcode in it, and BuildBridge pins its SSH identity and keeps the disk between starts. For Android, a toolchain container that prepares itself.',
+        body: 'Choose iOS or Android. BuildBridge guides you through setup and keeps the machine ready for your next project.',
     },
     {
-        title: 'Approve a project and test build',
-        body: 'Approve one local Capacitor folder, synchronize a filtered snapshot, and run an unsigned test build or a debug build on the prepared machine.',
+        title: 'Build and preview',
+        body: 'Choose your local Capacitor project and make a test build. Preview the app before preparing a release.',
     },
     {
         title: 'Sign and export',
-        body: 'Store a Team key, or your certificate and profiles, and an Android upload key once in the OS vault. Export a verified App Store Connect IPA, or a signed app bundle and APK.',
-    },
-    {
-        title: 'Optional: run it on your iPhone',
-        body: 'Hand a plugged-in iPhone to a macOS machine over USB, and BuildBridge installs a Debug build on it and streams its console. Off the required path.',
+        body: 'When you are ready to distribute, add signing credentials and export an iOS IPA or an Android app bundle and APK.',
     },
 ];
 
@@ -94,8 +114,8 @@ const glossary = [
         meaning: 'variables and secrets written into the project at every sync, for the web build.',
     },
     {
-        word: 'Control plane',
-        meaning: 'the optional web dashboard that can queue builds on this machine from anywhere.',
+        word: 'Remote builds',
+        meaning: 'optional; use a shared builder, or connect this computer to accept builds.',
     },
     {
         word: 'Template',
@@ -116,7 +136,7 @@ onMounted(probeAll);
 watch(() => machines.machines.value.map((machine) => machine.id).join(','), probeAll);
 
 const wellClass =
-    'flex items-center gap-3 rounded-lg bg-zinc-100 p-3 text-left hover:bg-zinc-200/70 dark:bg-zinc-900 dark:hover:bg-zinc-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300';
+    'flex items-center gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-left hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/50 dark:hover:bg-zinc-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300';
 </script>
 
 <template>
@@ -125,8 +145,7 @@ const wellClass =
             <div>
                 <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">Overview</h1>
                 <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-                    Build and sign iOS and Android apps from this Linux host. Set a machine up once
-                    per platform, then point it at any project.
+                    Your machines, projects and builds. Set up once, then build and preview locally.
                 </p>
             </div>
             <Button
@@ -140,12 +159,27 @@ const wellClass =
         </header>
 
         <Callout
-            v-if="host && !host.ready"
+            v-if="runner.state.status?.platform === 'macos'"
+            tone="neutral"
+            title="Build directly on this Mac"
+        >
+            Use your installed Xcode and signing identity for iOS builds. Set it up once, then
+            optionally share access through your BuildBridge server.
+            <div class="mt-3">
+                <Button size="sm" @click="ui.navigate({ kind: 'native_mac' })"
+                    >Use this Mac<ArrowRight class="h-3.5 w-3.5"
+                /></Button>
+            </div>
+        </Callout>
+
+        <Callout
+            v-for="warning in hostWarnings"
+            :key="warning.provider"
             tone="warn"
-            title="This host cannot run a macOS machine yet"
+            :title="`${providerLabel[warning.provider]} needs attention`"
         >
             <ul class="mt-1 list-disc space-y-0.5 pl-4">
-                <li v-for="issue in host.issues" :key="issue">{{ issue }}</li>
+                <li v-for="issue in warning.issues" :key="issue">{{ issue }}</li>
             </ul>
         </Callout>
 
@@ -153,7 +187,7 @@ const wellClass =
             <h2 class="text-xs font-semibold text-zinc-500 dark:text-zinc-400">Machines</h2>
             <div class="space-y-2">
                 <MachineRow
-                    v-for="machine in machines.machines.value"
+                    v-for="machine in machines.dashboardMachines.value"
                     :key="machine.id"
                     :machine="machine"
                 />
@@ -165,14 +199,19 @@ const wellClass =
             class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
         >
             <h2 class="text-[15px] font-semibold text-zinc-900 dark:text-zinc-50">
-                One machine per platform, prepared once
+                Your first app starts here
             </h2>
             <p class="mt-1 max-w-xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                Thirteen steps for a macOS machine, seven for an Android toolchain; each is prepared
-                once and then builds any number of projects. Every step says who does it, and the
-                ones that are yours come with instructions.
+                Prepare a machine for iOS or Android, then reuse it for every project. You can make
+                your first test build without release signing credentials or a remote account.
             </p>
-            <ol class="mt-4 space-y-3">
+            <div class="mt-4">
+                <Button size="sm" @click="ui.state.newMachineOpen = true">
+                    <Plus class="h-3.5 w-3.5" />
+                    Create your first machine
+                </Button>
+            </div>
+            <ol class="mt-6 grid gap-4 sm:grid-cols-3">
                 <li v-for="(phase, index) in phases" :key="phase.title" class="flex gap-3">
                     <span
                         class="mt-px flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-zinc-300 text-[11px] font-semibold text-zinc-600 tabular-nums dark:border-zinc-700 dark:text-zinc-300"
@@ -189,21 +228,23 @@ const wellClass =
                     </span>
                 </li>
             </ol>
-            <!-- The words the steps use, defined once, before the steps use them. -->
-            <dl class="mt-4 grid gap-x-6 gap-y-1.5 text-xs leading-5 sm:grid-cols-2">
-                <div v-for="term in glossary" :key="term.word" class="flex gap-2">
-                    <dt class="shrink-0 font-medium text-zinc-900 dark:text-zinc-50">
-                        {{ term.word }}
-                    </dt>
-                    <dd class="text-zinc-500 dark:text-zinc-400">{{ term.meaning }}</dd>
-                </div>
-            </dl>
-            <div class="mt-5">
-                <Button size="sm" @click="ui.state.newMachineOpen = true">
-                    <Plus class="h-3.5 w-3.5" />
-                    Create the first machine
-                </Button>
-            </div>
+            <p class="mt-4 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                Device previews are optional. Your guided steps explain when a phone, signing
+                credentials or an action inside macOS is needed.
+            </p>
+            <details class="mt-5 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+                <DisclosureSummary class="text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                    How it works: machines, signing and other terms
+                </DisclosureSummary>
+                <dl class="mt-3 grid gap-x-6 gap-y-2 text-xs leading-5 sm:grid-cols-2">
+                    <div v-for="term in glossary" :key="term.word" class="flex gap-2">
+                        <dt class="shrink-0 font-medium text-zinc-900 dark:text-zinc-50">
+                            {{ term.word }}
+                        </dt>
+                        <dd class="text-zinc-500 dark:text-zinc-400">{{ term.meaning }}</dd>
+                    </div>
+                </dl>
+            </details>
         </section>
 
         <section class="grid gap-3 md:grid-cols-2">
@@ -213,7 +254,7 @@ const wellClass =
                     <span class="block text-xs font-medium text-zinc-900 dark:text-zinc-50">{{
                         kitSummary.title
                     }}</span>
-                    <span class="block truncate text-[11px] text-zinc-500 dark:text-zinc-400">{{
+                    <span class="mt-0.5 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">{{
                         kitSummary.detail
                     }}</span>
                 </span>
@@ -225,16 +266,12 @@ const wellClass =
                     <span class="block text-xs font-medium text-zinc-900 dark:text-zinc-50">
                         {{
                             paired
-                                ? (runner.state.status?.runnerName ?? 'Control plane paired')
-                                : 'Control plane not paired'
+                                ? (runner.state.status?.runnerName ?? 'Remote builds')
+                                : 'Remote builds · Optional'
                         }}
                     </span>
-                    <span class="block truncate text-[11px] text-zinc-500 dark:text-zinc-400">
-                        {{
-                            paired
-                                ? `Realtime ${runner.state.realtime}`
-                                : 'Optional. Pair to start builds from anywhere and keep their history.'
-                        }}
+                    <span class="mt-0.5 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                        {{ remoteDetail }}
                     </span>
                 </span>
                 <ArrowRight class="h-3.5 w-3.5 shrink-0 text-zinc-500 dark:text-zinc-400" />

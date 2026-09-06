@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronRight, KeyRound, Terminal } from '@lucide/vue';
+import { KeyRound, Terminal } from '@lucide/vue';
 import { computed, ref } from 'vue';
 
 import type { JourneyStep } from '../../../model/steps';
@@ -8,6 +8,7 @@ import { useMachinesStore, type MachineSession } from '../../../stores/machines'
 import Button from '../../ui/Button.vue';
 import Callout from '../../ui/Callout.vue';
 import CopyButton from '../../ui/CopyButton.vue';
+import DisclosureSummary from '../../ui/DisclosureSummary.vue';
 import FailureBlock from '../../ui/FailureBlock.vue';
 import Field from '../../ui/Field.vue';
 import Input from '../../ui/Input.vue';
@@ -21,7 +22,6 @@ const machines = useMachinesStore();
 const view = computed(() => session.view!);
 const busy = computed(() => session.operation !== null);
 const activating = computed(() => step.status === 'running');
-const showManual = ref(false);
 // Held only until activation starts; cleared before the call goes out either way.
 const password = ref('');
 // Which of the two routes is running, for the spinner on the button that started it.
@@ -147,19 +147,11 @@ const commands = computed(() => {
                 runtime only if you choose the Simulator target there.
             </Callout>
 
-            <div>
-                <button
-                    type="button"
-                    class="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-600 dark:text-zinc-400 dark:hover:text-zinc-300"
-                    @click="showManual = !showManual"
-                >
-                    <ChevronRight
-                        class="h-3 w-3 transition-transform motion-reduce:transition-none"
-                        :class="showManual ? 'rotate-90' : ''"
-                    />
+            <details>
+                <DisclosureSummary class="text-xs font-medium text-zinc-600 dark:text-zinc-300">
                     Manual recovery commands
-                </button>
-                <div v-if="showManual" class="mt-2 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950">
+                </DisclosureSummary>
+                <div class="mt-2 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950">
                     <div class="flex items-center justify-between gap-2">
                         <p class="text-xs text-zinc-500 dark:text-zinc-400">
                             Run these in the guest Terminal if both automatic routes fail
@@ -170,7 +162,7 @@ const commands = computed(() => {
                         class="mt-1 overflow-x-auto font-mono text-[11px] leading-4 whitespace-pre text-zinc-600 dark:text-zinc-300"
                         >{{ commands.join('\n') }}</pre>
                 </div>
-            </div>
+            </details>
         </div>
     </StepPanel>
 </template>

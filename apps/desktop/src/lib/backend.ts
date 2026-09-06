@@ -23,6 +23,12 @@ export interface DragDropEvent {
     paths: string[];
 }
 
+export interface SavePathRequest {
+    title: string;
+    defaultPath: string;
+    filter?: { name: string; extensions: string[] };
+}
+
 export interface Backend {
     getRunnerStatus(): Promise<T.DesktopStatus>;
     pairRunner(input: T.PairInput): Promise<T.DesktopStatus>;
@@ -34,6 +40,21 @@ export interface Backend {
     }): Promise<T.RealtimeAuthorization>;
     heartbeatRunner(): Promise<T.HeartbeatSummary>;
     runOnce(): Promise<T.RunOnceResult>;
+    getSharing(): Promise<T.SharingOverview>;
+    createSharingInvitation(input: T.ShareMachineInput): Promise<T.SharingInvitation>;
+    approveSharingGrant(grantId: string): Promise<void>;
+    revokeSharingGrant(grantId: string): Promise<void>;
+    setSharingPaused(paused: boolean): Promise<void>;
+    /** Explicit Recheck bypasses the short toolchain cache used by background status. */
+    nativeMacStatus(forceRefresh?: boolean): Promise<T.NativeMacStatus>;
+    approveNativeMacProject(input: T.NativeMacProjectInput): Promise<T.NativeMacConfig>;
+    configureNativeMacSigning(input: T.NativeMacSigningInput): Promise<T.NativeMacConfig>;
+    runNativeMacBuild(input: T.NativeMacBuildInput): Promise<T.NativeMacBuildResult>;
+    cancelNativeMacBuild(): Promise<void>;
+    setNativeMacLogin(enabled: boolean): Promise<void>;
+    revealNativeMacArtifacts(path: string): Promise<void>;
+    onNativeMacProgress(handler: (progress: T.NativeMacProgress) => void): Promise<Unlisten>;
+    onRunnerActivity(handler: (result: T.RunOnceResult) => void): Promise<Unlisten>;
 
     listMachines(): Promise<T.MachineListView>;
     /** `templateId` clones the machine's disk from a saved template instead of a fresh install. */
@@ -86,14 +107,26 @@ export interface Backend {
     openMachineScreen(machineId: string, url: string, title: string): Promise<void>;
     /** Opens an https address in this host's browser, outside the app. */
     openUrl(url: string): Promise<void>;
+    /** Opens the host browser's Android device inspector and returns its internal URL. */
+    openAndroidInspector(): Promise<string>;
     /**
      * Opens Apple's downloads page, searched for `query`, in a window of this app. A `.xip`
      * downloaded there lands in BuildBridge's folder and is reported as it grows; the desktop
      * only (the browser preview simulates it).
      */
     downloadXcode(machineId: string, query: string): Promise<void>;
-    /** `envSetId` null builds without an env set; the step defaults it to the attached one. */
-    runSignedArchive(machineId: string, envSetId: string | null): Promise<T.RunAppleArchiveResult>;
+    /**
+     * `envSetId` null builds without an env set; the step defaults it to the attached one.
+     * `version` sets the marketing version and build number in the project and in this
+     * archive; null archives the project as synced.
+     */
+    runSignedArchive(
+        machineId: string,
+        envSetId: string | null,
+        version?: T.ProjectVersionInput | null,
+    ): Promise<T.RunAppleArchiveResult>;
+    /** Delivers exactly the retained IPA the person reviewed to App Store Connect. */
+    uploadAppleArchive(machineId: string, expectedSha256: string): Promise<void>;
     revealArchive(machineId: string): Promise<void>;
     clearArchive(machineId: string): Promise<T.MachineView>;
 
@@ -102,16 +135,33 @@ export interface Backend {
     clearAndroidWorkspace(machineId: string): Promise<T.MachineView>;
     syncAndroidWorkspace(machineId: string): Promise<T.SyncAndroidWorkspaceResult>;
     /** The debug APK; the first run also prepares the toolchain inside the container. */
-    runAndroidDebugBuild(machineId: string): Promise<T.RunAndroidBuildResult>;
-    /** The signed app bundle and APK, with the attached kit's upload key. */
+    runAndroidDebugBuild(machineId: string, allowHttp?: boolean): Promise<T.RunAndroidBuildResult>;
+    /**
+     * Selected signed release files, both by default, with the attached kit's key. `version`
+     * sets the version name and code in the project and in this release.
+     */
     runAndroidRelease(
         machineId: string,
         envSetId: string | null,
+        outputs?: T.AndroidReleaseOutputs,
+        version?: T.ProjectVersionInput | null,
     ): Promise<T.RunAndroidReleaseResult>;
     revealAndroidRelease(machineId: string): Promise<void>;
     clearAndroidRelease(machineId: string): Promise<T.MachineView>;
     /** Opens the folder holding the last debug APK, the one a phone takes over adb. */
     revealAndroidDebugApk(machineId: string): Promise<void>;
+    /** Host ADB devices; the Android build container can be stopped. */
+    listAndroidDevices(machineId: string): Promise<T.AndroidDevices>;
+    runAndroidDevice(
+        machineId: string,
+        input: T.AndroidDeviceRunInput,
+    ): Promise<T.AndroidDeviceRunResult>;
+    googlePlayConnection(machineId: string): Promise<T.GooglePlayConnection>;
+    /** The native layer reads the JSON file and stores the credentials in the OS vault. */
+    configureGooglePlay(machineId: string, path: string): Promise<T.GooglePlayConnection>;
+    exportGooglePlayCredential(machineId: string, path: string): Promise<void>;
+    disconnectGooglePlay(machineId: string): Promise<void>;
+    uploadGooglePlay(machineId: string, expectedSha256: string): Promise<T.GooglePlayUploadResult>;
 
     /** Installs the host udev rule that keeps usbmuxd off iPhones; one authorization prompt. */
     installUsbReleaseRule(): Promise<T.HostUsbStatus>;
@@ -138,6 +188,9 @@ export interface Backend {
     clearAppleDeviceRun(machineId: string): Promise<T.MachineView>;
 
     listSigningKits(): Promise<T.SigningKitSummary[]>;
+    listSigningCredentials(kitId: string): Promise<T.SigningCredential[]>;
+    revealSigningCredential(kitId: string, credentialId: string): Promise<string>;
+    exportSigningCredential(kitId: string, credentialId: string, path: string): Promise<void>;
     saveSigningKit(input: T.SigningKitInput): Promise<T.SigningKitSummary[]>;
     deleteSigningKit(kitId: string): Promise<T.SigningKitSummary[]>;
     attachSigningKit(machineId: string, kitId: string | null): Promise<T.MachineView>;
@@ -148,6 +201,7 @@ export interface Backend {
     /** Every secret in one set with its value, for the editor. Plain values are in the summary. */
     revealEnvSecrets(setId: string): Promise<T.EnvVariableSummary[]>;
     verifyAppleTeam(machineId: string): Promise<T.AppleTeamVerification>;
+    verifyAndroidSigningKit(kitId: string): Promise<T.AndroidSigningVerification>;
     createAppleProfile(
         machineId: string,
         certificateId: string,
@@ -219,6 +273,7 @@ export interface Backend {
 
     /** Opens the operating system's file picker. Resolves to [] when cancelled. */
     pickPaths(request: PathPickRequest): Promise<string[]>;
+    pickSavePath(request: SavePathRequest): Promise<string | null>;
 }
 
 export function isTauriRuntime(): boolean {
@@ -226,7 +281,7 @@ export function isTauriRuntime(): boolean {
 }
 
 async function createTauriBackend(): Promise<Backend> {
-    const [{ invoke }, { listen }, { getCurrentWebview }, { open }] = await Promise.all([
+    const [{ invoke }, { listen }, { getCurrentWebview }, { open, save }] = await Promise.all([
         import('@tauri-apps/api/core'),
         import('@tauri-apps/api/event'),
         import('@tauri-apps/api/webview'),
@@ -246,6 +301,20 @@ async function createTauriBackend(): Promise<Backend> {
         authorizeRealtime: (input) => invoke('authorize_realtime', { input }),
         heartbeatRunner: () => invoke('heartbeat_runner'),
         runOnce: () => invoke('run_once'),
+        getSharing: () => invoke('get_sharing'),
+        createSharingInvitation: (input) => invoke('create_sharing_invitation', { input }),
+        approveSharingGrant: (grantId) => invoke('approve_sharing_grant', { grantId }),
+        revokeSharingGrant: (grantId) => invoke('revoke_sharing_grant', { grantId }),
+        setSharingPaused: (paused) => invoke('set_sharing_paused', { paused }),
+        nativeMacStatus: (forceRefresh = false) => invoke('native_mac_status', { forceRefresh }),
+        approveNativeMacProject: (input) => invoke('approve_native_mac_project', { input }),
+        configureNativeMacSigning: (input) => invoke('configure_native_mac_signing', { input }),
+        runNativeMacBuild: (input) => invoke('run_native_mac_build', { input }),
+        cancelNativeMacBuild: () => invoke('cancel_native_mac_build'),
+        revealNativeMacArtifacts: (path) => invoke('reveal_native_mac_artifacts', { path }),
+        setNativeMacLogin: (enabled) => invoke('set_native_mac_login', { enabled }),
+        onNativeMacProgress: subscribe<T.NativeMacProgress>('native-mac-progress'),
+        onRunnerActivity: subscribe<T.RunOnceResult>('runner-activity'),
 
         listMachines: () => invoke('list_machines'),
         createMachine: (profile, templateId) => invoke('create_machine', { profile, templateId }),
@@ -289,20 +358,34 @@ async function createTauriBackend(): Promise<Backend> {
         openMachineScreen: (machineId, url, title) =>
             invoke('open_machine_screen', { machineId, url, title }),
         openUrl: (url) => invoke('open_url', { url }),
+        openAndroidInspector: () => invoke('open_android_web_inspector'),
         downloadXcode: (machineId, query) => invoke('download_xcode', { machineId, query }),
-        runSignedArchive: (machineId, envSetId) =>
-            invoke('run_apple_signed_archive', { machineId, envSetId }),
+        runSignedArchive: (machineId, envSetId, version = null) =>
+            invoke('run_apple_signed_archive', { machineId, envSetId, version }),
+        uploadAppleArchive: (machineId, expectedSha256) =>
+            invoke('upload_apple_archive', { machineId, expectedSha256 }),
         revealArchive: (machineId) => invoke('reveal_apple_archive', { machineId }),
         clearArchive: (machineId) => invoke('clear_apple_archive', { machineId }),
         approveAndroidWorkspace: (machineId, path) =>
             invoke('approve_android_workspace', { machineId, input: { path } }),
         clearAndroidWorkspace: (machineId) => invoke('clear_android_workspace', { machineId }),
         syncAndroidWorkspace: (machineId) => invoke('sync_android_workspace', { machineId }),
-        runAndroidDebugBuild: (machineId) => invoke('run_android_debug_build', { machineId }),
-        runAndroidRelease: (machineId, envSetId) =>
-            invoke('run_android_signed_release', { machineId, envSetId }),
+        runAndroidDebugBuild: (machineId, allowHttp = false) =>
+            invoke('run_android_debug_build', { machineId, allowHttp }),
+        runAndroidRelease: (machineId, envSetId, outputs = 'both', version = null) =>
+            invoke('run_android_signed_release', { machineId, envSetId, outputs, version }),
         revealAndroidRelease: (machineId) => invoke('reveal_android_release', { machineId }),
         revealAndroidDebugApk: (machineId) => invoke('reveal_android_debug_apk', { machineId }),
+        listAndroidDevices: (machineId) => invoke('list_android_devices', { machineId }),
+        runAndroidDevice: (machineId, input) => invoke('run_android_device', { machineId, input }),
+        googlePlayConnection: (machineId) => invoke('google_play_connection', { machineId }),
+        exportGooglePlayCredential: (machineId, path) =>
+            invoke('export_google_play_credential', { machineId, path }),
+        configureGooglePlay: (machineId, path) =>
+            invoke('configure_google_play', { machineId, path }),
+        disconnectGooglePlay: (machineId) => invoke('disconnect_google_play', { machineId }),
+        uploadGooglePlay: (machineId, expectedSha256) =>
+            invoke('upload_google_play', { machineId, expectedSha256 }),
         clearAndroidRelease: (machineId) => invoke('clear_android_release', { machineId }),
 
         installUsbReleaseRule: () => invoke('install_usb_release_rule'),
@@ -328,6 +411,11 @@ async function createTauriBackend(): Promise<Backend> {
         clearAppleDeviceRun: (machineId) => invoke('clear_apple_device_run', { machineId }),
 
         listSigningKits: () => invoke('list_signing_kits'),
+        listSigningCredentials: (kitId) => invoke('list_signing_credentials', { kitId }),
+        revealSigningCredential: (kitId, credentialId) =>
+            invoke('reveal_signing_credential', { kitId, credentialId }),
+        exportSigningCredential: (kitId, credentialId, path) =>
+            invoke('export_signing_credential', { kitId, credentialId, path }),
         saveSigningKit: (input) => invoke('save_signing_kit', { input }),
         deleteSigningKit: (kitId) =>
             invoke('delete_signing_kit', { kitId, input: { confirmed: true } }),
@@ -341,6 +429,7 @@ async function createTauriBackend(): Promise<Backend> {
             invoke('attach_env_set', { machineId, input: { setId } }),
         revealEnvSecrets: (setId) => invoke('reveal_env_secrets', { setId }),
         verifyAppleTeam: (machineId) => invoke('verify_apple_developer_team', { machineId }),
+        verifyAndroidSigningKit: (kitId) => invoke('verify_android_signing_kit', { kitId }),
         createAppleProfile: (machineId, certificateId) =>
             invoke('create_apple_replacement_profile', {
                 machineId,
@@ -385,6 +474,12 @@ async function createTauriBackend(): Promise<Backend> {
         onAndroidBuildProgress: subscribe('machine-android-build-progress'),
         onAndroidReleaseProgress: subscribe('machine-android-release-progress'),
         onXcodeDownloadProgress: subscribe('xcode-download-progress'),
+        pickSavePath: (request) =>
+            save({
+                title: request.title,
+                defaultPath: request.defaultPath,
+                filters: request.filter ? [request.filter] : undefined,
+            }),
         pickPaths: async (request) => {
             const selection = await open({
                 title: request.title,

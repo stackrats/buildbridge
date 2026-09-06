@@ -5,19 +5,22 @@ import { ArrowRight, Play } from '@lucide/vue';
 import { computed } from 'vue';
 
 import { machineStateBadge, machineStateLabel } from '../../lib/status';
-import { platformLabel } from '../../model/providers';
-import { focusStep } from '../../model/steps';
+import { platformLabel, providerHostReady, providerPlatform } from '../../model/providers';
+import { focusStep, journeyHeadline } from '../../model/steps';
 import { busyKeyLabel, useMachinesStore } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
+import { useRunnerStore } from '../../stores/runner';
 import type { MachineSummary } from '../../types/backend';
 import Badge from '../ui/Badge.vue';
 import Button from '../ui/Button.vue';
 import JourneyStrip from '../ui/JourneyStrip.vue';
+import PlatformIcon from '../ui/PlatformIcon.vue';
 import Spinner from '../ui/Spinner.vue';
 
 const { machine } = defineProps<{ machine: MachineSummary }>();
 const ui = useUi();
 const machines = useMachinesStore();
+const runner = useRunnerStore();
 
 const host = computed(() => machines.host.value);
 const steps = computed(() => machines.journey(machine.id));
@@ -30,7 +33,12 @@ const archive = computed(
 const canStart = computed(
     () =>
         machine.busyOperation === null &&
-        (host.value?.ready ?? false) &&
+        (machines.session(machine.id).view?.runtime.prerequisites.ready ??
+            providerHostReady(
+                host.value,
+                machine.config.provider,
+                runner.state.status?.platform,
+            )) &&
         (machine.state === 'missing' || machine.state === 'exited' || machine.state === 'created'),
 );
 
@@ -50,7 +58,7 @@ const next = computed(() => {
                   title: `signed ${archive.value.summary.split(' · ')[0]}`,
                   note: 'ready to build again',
               }
-            : { title: 'All done', note: '' };
+            : { title: journeyHeadline(steps.value), note: '' };
     }
     const owner = focus.value.kind === 'automatic' ? 'BuildBridge does this' : 'you do this';
     return {
@@ -89,10 +97,10 @@ const primary = computed(() => {
         };
     }
     return {
-        label: 'Build again',
+        label: archive.value?.status === 'done' ? 'Build again' : 'Build and preview',
         ink: false,
         start: false,
-        action: () => ui.openMachine(machine.id, archive.value?.id ?? 'archive'),
+        action: () => ui.openMachine(machine.id),
     };
 });
 
@@ -106,13 +114,17 @@ async function startAndOpen(): Promise<void> {
     <article
         class="@container rounded-lg border border-zinc-200 bg-white p-3.5 dark:border-zinc-800 dark:bg-zinc-900"
     >
-        <div
-            class="grid items-center gap-x-5 gap-y-3 @2xl:grid-cols-[minmax(0,1.2fr)_auto_minmax(0,1fr)_auto]"
-        >
-            <div class="min-w-0">
+        <div class="grid items-center gap-x-5 gap-y-3 @2xl:grid-cols-[auto_minmax(0,1fr)_auto]">
+            <div class="col-span-full min-w-0">
                 <div class="flex flex-wrap items-center gap-2">
-                    <h3 class="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-                        {{ machine.config.name }}
+                    <h3
+                        class="flex max-w-full min-w-0 items-center gap-1.5 text-sm font-semibold text-zinc-900 dark:text-zinc-50"
+                    >
+                        <PlatformIcon
+                            :platform="providerPlatform[machine.config.provider]"
+                            class="h-4 w-4 shrink-0"
+                        />
+                        <span class="min-w-0 wrap-anywhere">{{ machine.config.name }}</span>
                     </h3>
                     <Badge v-if="machine.busyOperation" tone="warn">
                         <Spinner size="h-3 w-3" tone="text-amber-700 dark:text-amber-400" />
@@ -122,14 +134,18 @@ async function startAndOpen(): Promise<void> {
                         {{ machineStateLabel[machine.state] }}
                     </Badge>
                 </div>
-                <p class="mt-1 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+                <p
+                    class="mt-1 font-mono text-[11px] wrap-anywhere text-zinc-500 dark:text-zinc-400"
+                >
                     {{ platformLabel[machine.platform] }} · {{ machine.config.memoryGib }} GiB ·
                     {{ machine.config.cpuCores }} cores
                     <template v-if="machine.workspaceName"> · {{ machine.workspaceName }}</template>
                     <template v-if="machine.signingKitName">
                         · {{ machine.signingKitName }}</template
                     >
-                    <template v-if="machine.envSetName"> · env {{ machine.envSetName }}</template>
+                    <template v-if="machine.envSetName">
+                        · environment {{ machine.envSetName }}</template
+                    >
                 </p>
             </div>
 
@@ -137,7 +153,7 @@ async function startAndOpen(): Promise<void> {
 
             <div class="min-w-0">
                 <p
-                    class="truncate text-xs font-medium"
+                    class="text-xs font-medium wrap-anywhere"
                     :class="
                         focus?.status === 'failed'
                             ? 'text-red-700 dark:text-red-400'

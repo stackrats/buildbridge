@@ -7,6 +7,7 @@ import { computed } from 'vue';
 import { formatBytes, percent } from '../../../lib/format';
 import { androidBuildPhaseLabel } from '../../../model/phases';
 import type { JourneyStep } from '../../../model/steps';
+import { useBuildFlowStore } from '../../../stores/build-flow';
 import { activityLabel, useMachinesStore, type MachineSession } from '../../../stores/machines';
 import { useUi } from '../../../stores/ui';
 import Button from '../../ui/Button.vue';
@@ -16,14 +17,18 @@ import KeyValue from '../../ui/KeyValue.vue';
 import ProgressRow from '../../ui/ProgressRow.vue';
 import Spinner from '../../ui/Spinner.vue';
 import StepPanel from '../../ui/StepPanel.vue';
+import AndroidHttpOption from '../AndroidHttpOption.vue';
 
 const { session, step } = defineProps<{ session: MachineSession; step: JourneyStep }>();
 const machines = useMachinesStore();
+const flows = useBuildFlowStore();
 const ui = useUi();
 
 const workspace = computed(() => session.view!.android?.workspace ?? null);
 const lastBuild = computed(() => workspace.value?.lastBuild ?? null);
-const busy = computed(() => session.operation !== null);
+const busy = computed(
+    () => !!session.operation || !!session.view?.busyOperation || flows.active(session.id),
+);
 const running = computed(() => step.status === 'running');
 const lastLine = computed(() => session.buildLog.at(-1)?.text ?? null);
 
@@ -55,7 +60,9 @@ const failure = computed(() =>
 // How the APK reaches a phone: adb on this host, with USB debugging on. The command is the
 // whole instruction, so it is offered ready to paste.
 const apk = computed(() => lastBuild.value?.apk ?? null);
-const installCommand = computed(() => (apk.value ? `adb install -r "${apk.value.path}"` : null));
+const installCommand = computed(() =>
+    apk.value ? `adb install -r '${apk.value.path.replaceAll("'", "'\\''")}'` : null,
+);
 const details = computed(() =>
     lastBuild.value
         ? [
@@ -71,6 +78,10 @@ const details = computed(() =>
                       .replace(/"/g, ''),
               },
               { label: 'Build tools', value: lastBuild.value.toolchain.buildToolsVersion },
+              {
+                  label: 'HTTP APIs',
+                  value: lastBuild.value.allowHttp ? 'Allowed for testing' : 'Project settings',
+              },
           ]
         : [],
 );
@@ -83,7 +94,7 @@ const details = computed(() =>
                 size="sm"
                 :disabled="busy || step.status === 'pending'"
                 title="Installs the locked dependencies, builds the web assets, synchronizes Capacitor's Android project, and compiles the debug APK"
-                @click="machines.debugBuild(session.id)"
+                @click="machines.debugBuild(session.id, flows.draft(session.id).androidAllowHttp)"
             >
                 <Spinner
                     v-if="session.operation === 'test-build'"
@@ -103,7 +114,7 @@ const details = computed(() =>
                 @click="machines.revealDebugApk(session.id)"
             >
                 <FolderOpen class="h-3.5 w-3.5" />
-                Reveal APK
+                Show in folder
             </Button>
             <Button
                 v-if="session.buildLog.length"
@@ -131,7 +142,7 @@ const details = computed(() =>
             <FailureBlock
                 v-if="failure && !running"
                 title="The last debug build failed"
-                cause="The diagnostic lines are kept in the log. Fix the project on the host, synchronize again, and run the build again."
+                cause="Review the diagnostic below and the build log, then retry the debug build. If you changed the source, synchronize it before retrying."
                 :diagnostic="failure.message"
             >
                 <template #actions>
@@ -177,20 +188,28 @@ const details = computed(() =>
                 <p class="text-[11px] leading-4 text-zinc-500 dark:text-zinc-400">
                     Installs it on a phone plugged into this host with USB debugging on, or on an
                     emulator running here; the APK is also what any emulator takes by drag and drop.
-                    It is signed with the debug key, so it installs beside a store build.
+                    Installing beside a store build requires a different application identifier in
+                    your project's debug configuration. With the same identifier and a different
+                    signing key, Android rejects the installation.
                 </p>
             </div>
         </template>
 
         <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-            Compiles the debug build type with Gradle, proving the project and the toolchain before
-            any key is involved. The first run on a machine downloads pinned Node and pnpm, Google's
-            command-line tools, the build tools and a second JDK into the container's home on this
-            host, and accepts the SDK licences; the platforms the project asks for follow through
-            its own Gradle plugin, and the project's Gradle wrapper decides which JDK Gradle runs
-            on. Gradle runs without a daemon, so a stopped container holds no memory. If this
+            Builds a debug APK from the synchronized source without release credentials. Show it in
+            its folder to install it on a phone or emulator. Synchronize first to include project
+            changes; the first build also downloads the Android toolchain.
+        </p>
+        <AndroidHttpOption :session="session" :disabled="busy" />
+
+        <template #details>
+            Compiles the debug build type with Gradle. The first run downloads pinned Node and pnpm,
+            Google's command-line tools, the build tools and a second JDK into the container's home
+            on this host, and accepts the SDK licences; the platforms the project asks for follow
+            through its own Gradle plugin, and the project's Gradle wrapper decides which JDK Gradle
+            runs on. Gradle runs without a daemon, so a stopped container holds no memory. If this
             desktop restarts mid-build, running it again reattaches to the job instead of starting a
             second one.
-        </p>
+        </template>
     </StepPanel>
 </template>

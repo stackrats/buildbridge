@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
-    Apple,
     BadgePlus,
+    Eye,
     KeyRound,
     Pencil,
     Plus,
@@ -13,11 +13,16 @@ import { computed, ref, watch } from 'vue';
 
 import { formatDate } from '../../lib/format';
 import { useMachinesStore } from '../../stores/machines';
-import { kitReadiness, kitShortfall } from '../../model/signing';
+import {
+    androidKitShortfall,
+    kitReadiness,
+    kitShortfall,
+    signingKitPlatforms,
+} from '../../model/signing';
 import Input from '../ui/Input.vue';
 import Field from '../ui/Field.vue';
 import { useSigningStore } from '../../stores/signing';
-import type { SigningKitSummary } from '../../types/backend';
+import type { MachinePlatform, SigningKitSummary } from '../../types/backend';
 import Badge from '../ui/Badge.vue';
 import Button from '../ui/Button.vue';
 import CopyButton from '../ui/CopyButton.vue';
@@ -25,14 +30,34 @@ import Callout from '../ui/Callout.vue';
 import Card from '../ui/Card.vue';
 import Chip from '../ui/Chip.vue';
 import EmptyState from '../ui/EmptyState.vue';
-import KeyValue from '../ui/KeyValue.vue';
+import KeyValue, { type KeyValueItem } from '../ui/KeyValue.vue';
 import Spinner from '../ui/Spinner.vue';
+import PlatformIcon from '../ui/PlatformIcon.vue';
+import Tabs from '../ui/Tabs.vue';
+import DisclosureSummary from '../ui/DisclosureSummary.vue';
 import ConfirmDialog from '../dialogs/ConfirmDialog.vue';
 import AppleVerificationCard from './AppleVerificationCard.vue';
+import AndroidVerificationCard from './AndroidVerificationCard.vue';
 import SigningKitDialog from './SigningKitDialog.vue';
+import SigningCredentialsDialog from './SigningCredentialsDialog.vue';
 
 const signing = useSigningStore();
 const machines = useMachinesStore();
+const platform = ref<'all' | MachinePlatform>('all');
+function matchesPlatform(kit: SigningKitSummary, filter: 'all' | MachinePlatform): boolean {
+    const platforms = signingKitPlatforms(kit);
+    return filter === 'all' || platforms.length === 0 || platforms.includes(filter);
+}
+const platformTabs = computed(() =>
+    (['all', 'ios', 'android'] as const).map((value) => ({
+        value,
+        label: value === 'all' ? 'All' : value === 'ios' ? 'iOS' : 'Android',
+        badge: signing.kits.value.filter((kit) => matchesPlatform(kit, value)).length,
+    })),
+);
+const visibleKits = computed(() =>
+    signing.kits.value.filter((kit) => matchesPlatform(kit, platform.value)),
+);
 
 // `?kitDialog=1` opens the form straight away and `?kitDialog=edit` opens the first stored kit,
 // so the browser preview can show either state of it.
@@ -42,6 +67,7 @@ const previewDialog =
         : null;
 const dialogOpen = ref(previewDialog !== null);
 const editing = ref<SigningKitSummary | null>(null);
+const reviewing = ref<SigningKitSummary | null>(null);
 
 if (previewDialog === 'edit') {
     watch(
@@ -95,7 +121,10 @@ const keystoreProblem = computed(() => {
     if (keystoreForm.value.password.length < 6) {
         return 'Choose a password of at least six characters.';
     }
-    if (keystoreForm.value.password !== keystoreForm.value.confirm) {
+    if (
+        !keystorePasswordShown.value &&
+        keystoreForm.value.password !== keystoreForm.value.confirm
+    ) {
         return 'The two passwords differ.';
     }
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(keystoreForm.value.alias)) {
@@ -148,68 +177,126 @@ async function remove(): Promise<void> {
 
 // A missing file is a warning only when nothing will create it: with a Team key it is simply
 // not there yet.
+function hasAppleMaterial(kit: SigningKitSummary): boolean {
+    return signingKitPlatforms(kit).includes('ios');
+}
+
 function detailsFor(kit: SigningKitSummary) {
     const readiness = kitReadiness(kit);
-    return [
-        {
-            label: 'Guest keychain password',
-            value: kit.guestKeychainConfigured ? 'Stored in the OS vault' : 'Not stored',
-            tone: kit.guestKeychainConfigured ? ('default' as const) : ('warn' as const),
-        },
-        {
-            label: 'Team key',
-            value: kit.appStoreConnectKeyId ?? 'None',
-            mono: kit.appStoreConnectKeyId !== null,
-        },
-        {
-            label: 'Distribution identity',
-            value:
-                kit.signingCertificateName ??
-                (readiness.teamKey ? 'Created at Apple when a machine provisions' : 'Not stored'),
-            tone:
-                kit.signingCertificateConfigured || readiness.teamKey
-                    ? ('default' as const)
-                    : ('warn' as const),
-        },
-        {
-            label: 'Export password',
-            value: kit.signingCertificatePasswordStored
-                ? 'Stored in the OS vault'
-                : kit.signingCertificateConfigured
-                  ? 'Not stored'
-                  : readiness.teamKey
-                    ? 'Set when the identity is created'
+    const platforms = signingKitPlatforms(kit);
+    const items: KeyValueItem[] = [];
+    if (platform.value !== 'android' && platforms.includes('ios')) {
+        items.push(
+            {
+                label: 'Guest keychain password',
+                value: kit.guestKeychainConfigured ? 'Stored in the OS vault' : 'Not stored',
+                tone: kit.guestKeychainConfigured ? ('default' as const) : ('warn' as const),
+            },
+            {
+                label: 'Team key',
+                value: kit.appStoreConnectKeyId ?? 'None',
+                mono: kit.appStoreConnectKeyId !== null,
+            },
+            {
+                label: 'Distribution identity',
+                value:
+                    kit.signingCertificateName ??
+                    (readiness.teamKey
+                        ? 'Created at Apple when a machine provisions'
+                        : 'Not stored'),
+                tone:
+                    kit.signingCertificateConfigured || readiness.teamKey
+                        ? ('default' as const)
+                        : ('warn' as const),
+            },
+            {
+                label: 'Export password',
+                value: kit.signingCertificatePasswordStored
+                    ? 'Stored in the OS vault'
+                    : kit.signingCertificateConfigured
+                      ? 'Not stored'
+                      : readiness.teamKey
+                        ? 'Set when the identity is created'
+                        : 'Not stored',
+                tone:
+                    kit.signingCertificatePasswordStored ||
+                    (readiness.teamKey && !kit.signingCertificateConfigured)
+                        ? ('default' as const)
+                        : ('warn' as const),
+            },
+            {
+                label: 'Development identity',
+                value:
+                    kit.developmentCertificateName ??
+                    (readiness.teamKey
+                        ? 'Created at Apple when a phone is prepared'
+                        : 'Not stored · optional, for iPhone builds'),
+            },
+        );
+        if (kit.developmentCertificateConfigured || kit.developmentCertificatePasswordStored) {
+            items.push({
+                label: 'Development export password',
+                value: kit.developmentCertificatePasswordStored
+                    ? 'Stored in the OS vault'
                     : 'Not stored',
-            tone:
-                kit.signingCertificatePasswordStored ||
-                (readiness.teamKey && !kit.signingCertificateConfigured)
-                    ? ('default' as const)
-                    : ('warn' as const),
-        },
-        {
-            label: 'Development identity',
-            value:
-                kit.developmentCertificateName ??
-                (readiness.teamKey
-                    ? 'Created at Apple when a phone is prepared'
-                    : 'Not stored · optional, for iPhone builds'),
-        },
-        {
-            label: 'Android upload key',
-            value: kit.androidKeystoreConfigured
-                ? `${kit.androidKeystoreName ?? 'keystore'} · key ${kit.androidKeyAlias ?? '?'}${kit.androidKeystorePasswordStored ? '' : ' · password not stored'}`
-                : 'None · create one below, or edit the credentials to point at a keystore',
-            mono: kit.androidKeystoreConfigured,
-            tone:
-                kit.androidKeystoreConfigured && !kit.androidKeystorePasswordStored
-                    ? ('warn' as const)
-                    : ('default' as const),
-        },
-        {
-            label: 'Added',
-            value: formatDate(new Date(kit.createdAtEpochSeconds * 1000).toISOString()),
-        },
-    ];
+                tone: kit.developmentCertificatePasswordStored ? 'default' : 'warn',
+            });
+        }
+    }
+    if (platform.value !== 'ios' && platforms.includes('android')) {
+        items.push(
+            {
+                label: 'Android upload keystore',
+                value:
+                    kit.androidKeystoreName ??
+                    (kit.androidKeystoreConfigured ? 'Stored on this host' : 'Not stored'),
+                mono: kit.androidKeystoreName !== null,
+                tone: kit.androidKeystoreConfigured ? 'default' : 'warn',
+            },
+            {
+                label: 'Key alias',
+                value: kit.androidKeyAlias ?? 'Not stored',
+                mono: kit.androidKeyAlias !== null,
+                tone: kit.androidKeyAlias ? 'default' : 'warn',
+            },
+            {
+                label: 'Keystore password',
+                value: kit.androidKeystorePasswordStored ? 'Stored in the OS vault' : 'Not stored',
+                tone: kit.androidKeystorePasswordStored ? 'default' : 'warn',
+            },
+            {
+                label: 'Key password',
+                value: kit.androidKeyPasswordStored
+                    ? 'Stored in the OS vault'
+                    : 'Same as the keystore password',
+            },
+        );
+    }
+    items.push({
+        label: 'Added',
+        value: formatDate(new Date(kit.createdAtEpochSeconds * 1000).toISOString()),
+    });
+    return items;
+}
+
+function incompleteMessage(kit: SigningKitSummary): string | null {
+    const platforms = signingKitPlatforms(kit);
+    if (!platforms.length) {
+        return platform.value === 'android'
+            ? 'Add an Android upload key to use these credentials for a release.'
+            : platform.value === 'ios'
+              ? 'Add a Team key or iOS signing files to use these credentials.'
+              : 'Add iOS signing material or an Android upload key to use these credentials.';
+    }
+    const readiness = kitReadiness(kit);
+    const missing: string[] = [];
+    if (platform.value !== 'android' && platforms.includes('ios') && !readiness.provisionable) {
+        missing.push(`iOS needs ${kitShortfall(kit).join(' and ')}`);
+    }
+    if (platform.value !== 'ios' && platforms.includes('android') && !readiness.android) {
+        missing.push(`Android needs ${androidKitShortfall(kit).join(' and ')}`);
+    }
+    return missing.length ? `${missing.join('. ')}. Edit the credentials to finish setup.` : null;
 }
 
 const anyMachines = computed(() => machines.machines.value.length > 0);
@@ -228,12 +315,9 @@ const orphaned = computed(() =>
             <div>
                 <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">Signing</h1>
                 <p class="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                    Signing credentials are held in this host's operating-system vault: Apple
-                    material for iOS, an upload key for Android, or both. The simplest iOS
-                    credentials are a Team key and a keychain password, from which BuildBridge
-                    creates the certificates and profiles as machines need them; files exported from
-                    a Mac work too. An Android upload key can be created here in one click. Store
-                    one per team or app and attach it to each machine.
+                    Store credentials once per team or app and reuse them across machines. Use a
+                    Team key or existing files for iOS, and an upload key for Android. Passwords
+                    stay in this host's operating-system vault.
                 </p>
             </div>
             <Button size="sm" @click="createKit">
@@ -242,8 +326,14 @@ const orphaned = computed(() =>
             </Button>
         </header>
 
+        <Tabs v-model="platform" :tabs="platformTabs" aria-label="Signing platform" />
+        <p v-if="platform !== 'all'" class="text-xs text-zinc-500 dark:text-zinc-400">
+            Shared credentials appear under both platforms. Empty credentials stay visible until you
+            add signing material.
+        </p>
+
         <Callout
-            v-if="orphaned.length"
+            v-if="platform !== 'android' && orphaned.length"
             tone="danger"
             title="The credentials these machines were provisioned from are no longer stored"
         >
@@ -264,7 +354,7 @@ const orphaned = computed(() =>
         <EmptyState
             v-if="!signing.kits.value.length && !signing.state.loading"
             title="No signing credentials stored"
-            description="Store a Team key (an App Store Connect API key) and a keychain password once, and BuildBridge creates the certificates and profiles it needs at Apple. Or bring the .p12 and profiles exported from a Mac. Every machine can then be attached to them."
+            description="Choose Apple or Android when adding credentials. For iOS, a Team key is enough and BuildBridge generates the guest keychain password. For Android, import an upload key or create one after saving."
         >
             <template #icon><KeyRound class="h-4 w-4" /></template>
             <Button size="sm" @click="createKit">
@@ -273,49 +363,66 @@ const orphaned = computed(() =>
             </Button>
         </EmptyState>
 
-        <Card v-for="kit in signing.kits.value" :key="kit.id">
+        <EmptyState
+            v-if="signing.kits.value.length && !visibleKits.length && !signing.state.loading"
+            :title="
+                platform === 'android' ? 'No Android credentials yet' : 'No iOS credentials yet'
+            "
+            description="Add credentials for this platform, or edit an existing set from All to use it for both."
+        >
+            <template #icon>
+                <PlatformIcon v-if="platform !== 'all'" :platform="platform" class="h-4 w-4" />
+            </template>
+            <Button size="sm" @click="createKit">
+                <Plus class="h-3.5 w-3.5" />
+                Store credentials
+            </Button>
+        </EmptyState>
+
+        <Card v-for="kit in visibleKits" :key="kit.id">
             <template #title>
                 <span class="flex flex-wrap items-center gap-2">
+                    <PlatformIcon
+                        v-for="kitPlatform in signingKitPlatforms(kit)"
+                        :key="kitPlatform"
+                        :platform="kitPlatform"
+                        class="h-4 w-4"
+                    />
                     {{ kit.name }}
-                    <Badge v-if="kitReadiness(kit).provisionable" tone="ok">iOS ready</Badge>
-                    <Badge v-else-if="!kitReadiness(kit).android" tone="warn">incomplete</Badge>
-                    <Badge v-if="kitReadiness(kit).android" tone="ok">Android ready</Badge>
+                    <Badge v-if="!signingKitPlatforms(kit).length"
+                        >No platform credentials yet</Badge
+                    >
                     <Badge
-                        v-if="kitReadiness(kit).provisionable && kitReadiness(kit).archive === null"
+                        v-if="
+                            platform !== 'android' &&
+                            kitReadiness(kit).provisionable &&
+                            kitReadiness(kit).archive
+                        "
+                        tone="ok"
+                        >iOS release ready</Badge
+                    >
+                    <Badge v-if="incompleteMessage(kit)" tone="warn">Incomplete</Badge>
+                    <Badge v-if="platform !== 'ios' && kitReadiness(kit).android"
+                        >Android configured</Badge
+                    >
+                    <Badge
+                        v-if="
+                            platform !== 'android' &&
+                            kitReadiness(kit).provisionable &&
+                            kitReadiness(kit).archive === null
+                        "
                         tone="warn"
-                        >phone only</Badge
+                        >Phone only</Badge
                     >
                 </span>
             </template>
             <template #actions>
-                <!-- Provisioning and the device step create these themselves; the buttons
-                     are for creating one ahead of time, so they go once the identity exists. -->
                 <Button
-                    v-if="kit.appStoreConnectConfigured && !kit.signingCertificateConfigured"
-                    variant="outline"
-                    size="sm"
-                    title="Not required: provisioning creates it when a machine first needs it"
-                    :disabled="creatingAny"
-                    @click="certifying = { kit, kind: 'distribution' }"
-                >
-                    <Spinner v-if="signing.state.creatingCertificateKitId === kit.id" />
-                    <BadgePlus v-else class="h-3.5 w-3.5" />
-                    Create distribution certificate now
-                </Button>
-                <Button
-                    v-if="kit.appStoreConnectConfigured && !kit.developmentCertificateConfigured"
-                    variant="outline"
-                    size="sm"
-                    title="Not required: preparing a phone creates it when needed"
-                    :disabled="creatingAny"
-                    @click="certifying = { kit, kind: 'development' }"
-                >
-                    <Spinner v-if="signing.state.creatingDevelopmentCertificateKitId === kit.id" />
-                    <Smartphone v-else class="h-3.5 w-3.5" />
-                    Create development certificate now
-                </Button>
-                <Button
-                    v-if="!kit.androidKeystoreConfigured"
+                    v-if="
+                        platform !== 'ios' &&
+                        !kit.androidKeystoreConfigured &&
+                        !hasAppleMaterial(kit)
+                    "
                     variant="outline"
                     size="sm"
                     title="A 2048-bit RSA upload key in a PKCS12 keystore, created in a container of the toolchain image and kept owner-only on this host"
@@ -325,6 +432,10 @@ const orphaned = computed(() =>
                     <Spinner v-if="signing.state.creatingKeystoreKitId === kit.id" />
                     <Smartphone v-else class="h-3.5 w-3.5" />
                     Create Android upload key
+                </Button>
+                <Button variant="outline" size="sm" @click="reviewing = kit">
+                    <Eye class="h-3.5 w-3.5" />
+                    Review credentials
                 </Button>
                 <Button variant="outline" size="sm" @click="editKit(kit)">
                     <Pencil class="h-3.5 w-3.5" />
@@ -346,23 +457,33 @@ const orphaned = computed(() =>
                 </Callout>
             </template>
 
-            <KeyValue :items="detailsFor(kit)" :columns="3" />
+            <AndroidVerificationCard
+                v-if="platform !== 'ios' && kitReadiness(kit).android"
+                :kit="kit"
+                class="mb-3"
+            />
+
+            <details class="group rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
+                <DisclosureSummary
+                    class="cursor-pointer text-xs font-medium text-zinc-700 dark:text-zinc-200"
+                >
+                    Credential details
+                </DisclosureSummary>
+                <KeyValue class="mt-3" :items="detailsFor(kit)" :columns="3" />
+            </details>
             <p
-                v-if="!kitReadiness(kit).provisionable && !kitReadiness(kit).android"
+                v-if="incompleteMessage(kit)"
                 class="mt-2 text-[11px] leading-4 text-amber-700 dark:text-amber-400"
             >
-                Not usable yet: still needs {{ kitShortfall(kit).join(' and ') }} for iOS, or an
-                upload key for Android. Edit the credentials to add either.
+                {{ incompleteMessage(kit) }}
             </p>
+
             <p
-                v-else-if="!kitReadiness(kit).provisionable"
-                class="mt-2 text-[11px] leading-4 text-zinc-500 dark:text-zinc-400"
-            >
-                Signs Android releases. For iOS it still needs
-                {{ kitShortfall(kit).join(' and ') }}.
-            </p>
-            <p
-                v-else-if="kitReadiness(kit).archive === null"
+                v-else-if="
+                    platform !== 'android' &&
+                    kitReadiness(kit).provisionable &&
+                    kitReadiness(kit).archive === null
+                "
                 class="mt-2 text-[11px] leading-4 text-amber-700 dark:text-amber-400"
             >
                 These credentials can run Debug builds on a phone, but cannot sign an App Store
@@ -370,7 +491,58 @@ const orphaned = computed(() =>
                 to add either.
             </p>
 
-            <div class="mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+            <details
+                v-if="platform !== 'android' && hasAppleMaterial(kit)"
+                class="mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-800"
+            >
+                <DisclosureSummary
+                    class="cursor-pointer text-xs font-medium text-zinc-700 dark:text-zinc-200"
+                >
+                    Profiles and optional signing actions
+                </DisclosureSummary>
+                <div class="my-3 flex flex-wrap gap-2">
+                    <!-- Provisioning and the device step create these themselves; the buttons
+                     are for creating one ahead of time, so they go once the identity exists. -->
+                    <Button
+                        v-if="kit.appStoreConnectConfigured && !kit.signingCertificateConfigured"
+                        variant="outline"
+                        size="sm"
+                        title="Not required: provisioning creates it when a machine first needs it"
+                        :disabled="creatingAny"
+                        @click="certifying = { kit, kind: 'distribution' }"
+                    >
+                        <Spinner v-if="signing.state.creatingCertificateKitId === kit.id" />
+                        <BadgePlus v-else class="h-3.5 w-3.5" />
+                        Create distribution certificate now
+                    </Button>
+                    <Button
+                        v-if="
+                            kit.appStoreConnectConfigured && !kit.developmentCertificateConfigured
+                        "
+                        variant="outline"
+                        size="sm"
+                        title="Not required: preparing a phone creates it when needed"
+                        :disabled="creatingAny"
+                        @click="certifying = { kit, kind: 'development' }"
+                    >
+                        <Spinner
+                            v-if="signing.state.creatingDevelopmentCertificateKitId === kit.id"
+                        />
+                        <Smartphone v-else class="h-3.5 w-3.5" />
+                        Create development certificate now
+                    </Button>
+                    <Button
+                        v-if="platform !== 'ios' && !kit.androidKeystoreConfigured"
+                        variant="outline"
+                        size="sm"
+                        :disabled="creatingAny"
+                        @click="openKeystoreDialog(kit)"
+                    >
+                        <Spinner v-if="signing.state.creatingKeystoreKitId === kit.id" />
+                        <Smartphone v-else class="h-3.5 w-3.5" />
+                        Add Android upload key
+                    </Button>
+                </div>
                 <p class="text-[11px] text-zinc-500 dark:text-zinc-400">
                     Provisioning profiles
                     <span class="tabular-nums">({{ kit.provisioningProfileNames.length }})</span>
@@ -404,7 +576,7 @@ const orphaned = computed(() =>
                     None stored. A signed archive needs an App Store profile for the project's exact
                     bundle identifier; a Team key would create one.
                 </p>
-            </div>
+            </details>
 
             <div class="mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-800">
                 <p class="text-[11px] text-zinc-500 dark:text-zinc-400">Attached machines</p>
@@ -464,7 +636,7 @@ const orphaned = computed(() =>
                             title="Fills both fields with a random password and shows it"
                             @click="generateKeystorePassword"
                         >
-                            Invent one
+                            Generate password
                         </Button>
                     </template>
                 </Field>
@@ -497,16 +669,19 @@ const orphaned = computed(() =>
             </p>
         </ConfirmDialog>
 
-        <AppleVerificationCard v-if="signing.kits.value.length && anyMachines" />
+        <AppleVerificationCard
+            v-if="platform !== 'android' && signing.kits.value.length && anyMachines"
+        />
 
-        <Card tone="well">
-            <template #title>
-                <span class="flex items-center gap-2">
-                    <Apple class="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
-                    Signing in through Xcode instead
-                </span>
-            </template>
-            <template #description> Optional, and not needed by anything above. </template>
+        <details
+            v-if="platform !== 'android'"
+            class="rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-950"
+        >
+            <DisclosureSummary
+                class="cursor-pointer text-xs font-medium text-zinc-700 dark:text-zinc-200"
+            >
+                Optional: signing in through Xcode
+            </DisclosureSummary>
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
                 You can open Xcode inside a machine, sign in under Settings, then Accounts, and let
                 it manage certificates. Apple often rejects account sign-in inside a virtual
@@ -514,9 +689,24 @@ const orphaned = computed(() =>
                 verification failure. BuildBridge never collects an Apple Account password or a
                 two-factor code, so it cannot verify this route or use it for a signed build.
             </p>
-        </Card>
+        </details>
 
-        <SigningKitDialog v-model:open="dialogOpen" :kit="editing" />
+        <SigningKitDialog
+            v-model:open="dialogOpen"
+            :kit="editing"
+            :default-platform="platform === 'android' ? 'android' : 'ios'"
+        />
+
+        <SigningCredentialsDialog
+            v-if="reviewing"
+            :open="true"
+            :kit="reviewing"
+            @update:open="
+                (value) => {
+                    if (!value) reviewing = null;
+                }
+            "
+        />
 
         <ConfirmDialog
             :open="certifying !== null"

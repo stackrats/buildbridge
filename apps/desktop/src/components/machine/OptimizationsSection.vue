@@ -92,10 +92,10 @@ async function apply(item: GuestOptimizationView): Promise<void> {
 
 const stateBadge = (item: GuestOptimizationView) =>
     item.applied === true
-        ? { tone: 'ok' as const, label: 'applied' }
+        ? { tone: 'ok' as const, label: 'Applied' }
         : item.applied === false
-          ? { tone: 'neutral' as const, label: 'not applied' }
-          : { tone: 'neutral' as const, label: 'unknown' };
+          ? { tone: 'neutral' as const, label: 'Not applied' }
+          : { tone: 'neutral' as const, label: 'Unknown' };
 </script>
 
 <template>

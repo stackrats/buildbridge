@@ -6,4 +6,10 @@ export type HeartbeatRequest = { version: string, capabilities: Array<string>,
  * The machines this runner can build on, so a control plane can offer them by name.
  * Additive in protocol v1: an older control plane ignores the field.
  */
-machines?: Array<MachineReport>, };
+machines?: Array<MachineReport>, 
+/**
+ * Whether the owner has paused shared builds. Additive in protocol v1 like `machines`: a
+ * runner that is not pausing sends nothing, so a strict older control plane still accepts
+ * the heartbeat.
+ */
+sharing_paused?: boolean, };

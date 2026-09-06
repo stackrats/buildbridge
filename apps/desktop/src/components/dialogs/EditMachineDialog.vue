@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, ref, useId, watch } from 'vue';
 
 import { useMachinesStore } from '../../stores/machines';
 import type { MachineConfig, MachineView } from '../../types/backend';
@@ -15,6 +15,7 @@ const machines = useMachinesStore();
 
 const profile = ref<MachineConfig>({ ...view.profile });
 const saving = ref(false);
+const formId = useId();
 
 watch(open, (value) => {
     if (value) {
@@ -40,8 +41,8 @@ async function save(): Promise<void> {
 </script>
 
 <template>
-    <Modal v-model:open="open" title="Machine profile">
-        <form class="space-y-3" @submit.prevent="save">
+    <Modal v-model:open="open" title="Machine profile" :busy="saving">
+        <form :id="formId" class="space-y-3" @submit.prevent="save">
             <Callout
                 v-if="hardwareLocked && view.profile.provider === 'android_toolchain'"
                 tone="neutral"
@@ -63,20 +64,22 @@ async function save(): Promise<void> {
             <Callout v-if="machines.session(view.machineId).error" tone="danger">
                 {{ machines.session(view.machineId).error }}
             </Callout>
+        </form>
+        <template #footer>
             <div class="flex justify-end gap-2">
                 <Button variant="outline" size="sm" :disabled="saving" @click="open = false">
                     Cancel
                 </Button>
                 <Button
                     type="submit"
+                    :form="formId"
                     size="sm"
-                    title="Memory, cores and port apply at the next start"
                     :disabled="saving || profile.name.trim() === ''"
                 >
                     <Spinner v-if="saving" tone="text-white dark:text-zinc-950" />
-                    Save
+                    {{ saving ? 'Saving changes' : 'Save changes' }}
                 </Button>
             </div>
-        </form>
+        </template>
     </Modal>
 </template>

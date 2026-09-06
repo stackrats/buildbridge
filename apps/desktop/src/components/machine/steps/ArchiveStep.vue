@@ -3,11 +3,14 @@ import { FolderOpen, Package, ScrollText, FileCheck } from '@lucide/vue';
 import { computed, onMounted, ref, watch } from 'vue';
 
 import { formatBytes, percent, shortHash } from '../../../lib/format';
+import { requestedVersion } from '../../../model/build-flow';
 import type { JourneyStep } from '../../../model/steps';
 import { archivePhaseLabel } from '../../../model/phases';
+import { useBuildFlowStore } from '../../../stores/build-flow';
 import { useEnvSetsStore } from '../../../stores/envs';
 import { useMachinesStore, type MachineSession } from '../../../stores/machines';
 import { useUi } from '../../../stores/ui';
+import VersionFields from '../VersionFields.vue';
 import Button from '../../ui/Button.vue';
 import Callout from '../../ui/Callout.vue';
 import ConfirmDialog from '../../dialogs/ConfirmDialog.vue';
@@ -33,6 +36,8 @@ const progress = computed(() => session.archive);
 const lastLine = computed(() => session.archiveLog.at(-1)?.text ?? null);
 const clearOpen = ref(false);
 const blocked = computed(() => workspace.value?.lastNativeLockUpdated ?? false);
+// The version fields below share the machine's build draft with the guided build page.
+const draft = useBuildFlowStore().draft(session.id);
 
 // The env is chosen per archive: the web assets are rebuilt inside the guest with it before
 // archiving, so staging and production archives come from one synced snapshot. Defaults to
@@ -47,10 +52,19 @@ watch(attachedEnvSet, (set, previous) => {
 });
 onMounted(() => void envs.load());
 const envOptions = computed(() => [
-    { value: '', label: 'No environment' },
+    {
+        value: '',
+        label: 'Use prepared assets',
+        description:
+            'Keep web assets from the most recent build, including their environment values.',
+    },
     ...envs.sets.value.map((set) => ({
         value: set.id,
-        label: set.id === attachedEnvSet.value?.id ? `${set.name} · attached` : `${set.name}`,
+        label: set.name,
+        description:
+            set.id === attachedEnvSet.value?.id
+                ? 'Rebuild web assets · machine default'
+                : 'Rebuild web assets with this environment',
     })),
 ]);
 const chosenEnvName = computed(() => envs.setById(envSetId.value)?.name ?? null);
@@ -67,10 +81,10 @@ const recipe = computed(() => [
     },
     { label: 'Profile', value: signing.value?.profiles[0]?.uuid ?? null, mono: true },
     {
-        label: 'Environment',
+        label: 'Web assets for this build',
         value: chosenEnvName.value
             ? `${chosenEnvName.value} · web assets rebuilt with it before archiving`
-            : 'None · web assets as the test build left them',
+            : 'Prepared assets · keeps the values from the most recent build',
     },
 ]);
 
@@ -95,20 +109,28 @@ async function clear(): Promise<void> {
             <span
                 v-if="envs.sets.value.length"
                 class="w-56 max-w-full"
-                title="The environment the web assets are rebuilt with for this archive; the one attached at the sync step is the default"
+                v-tip="
+                    'The environment the web assets are rebuilt with for this archive; the one attached at the sync step is the default'
+                "
             >
                 <Select
                     v-model="envSetId"
                     :options="envOptions"
                     size="sm"
-                    placeholder="No environment"
+                    placeholder="Use prepared assets"
                     :disabled="busy"
                 />
             </span>
             <Button
                 size="sm"
                 :disabled="busy || blocked || step.status === 'pending'"
-                @click="machines.signedArchive(session.id, envSetId || null)"
+                @click="
+                    machines.signedArchive(
+                        session.id,
+                        envSetId || null,
+                        requestedVersion(view, draft),
+                    )
+                "
             >
                 <Spinner
                     v-if="session.operation === 'archive'"
@@ -126,7 +148,7 @@ async function clear(): Promise<void> {
                 @click="machines.revealArchive(session.id)"
             >
                 <FolderOpen class="h-3.5 w-3.5" />
-                Reveal folder
+                Show in folder
             </Button>
             <Button
                 v-if="session.archiveLog.length"
@@ -259,21 +281,29 @@ async function clear(): Promise<void> {
             <p class="mt-2 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
                 {{ archive.marketingVersion }} ({{ archive.buildNumber }}) ·
                 {{ archive.bundleIdentifier }} · profile
-                {{ shortHash(archive.provisioningProfileUuid, 8) }} · env
-                {{ view.archiveEnvSet ?? 'none' }} · sha256
+                {{ shortHash(archive.provisioningProfileUuid, 8) }} · environment
+                {{ view.archiveEnvSet ?? 'prepared assets (environment not recorded)' }} · sha256
                 {{ shortHash(archive.ipa.sha256, 12) }}
             </p>
         </template>
 
         <div class="space-y-3">
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                Runs a fixed <span class="font-mono">xcodebuild archive</span> and
-                <span class="font-mono">-exportArchive</span> recipe, verifies the signature,
-                packages the archive, and copies both artifacts to this host with matching SHA-256
-                checksums. Nothing is uploaded to Apple.
+                Creates a signed IPA and Xcode archive from the synchronized source and saves both
+                on this host. Nothing is uploaded to Apple. To include project changes, synchronize
+                and run the test build first.
             </p>
             <KeyValue :items="recipe" :columns="3" />
+            <VersionFields :session="session" :disabled="busy" />
         </div>
+
+        <template #details>
+            Runs a fixed <span class="font-mono">xcodebuild archive</span> and
+            <span class="font-mono">-exportArchive</span> recipe, verifies the signature, packages
+            the archive, and checks SHA-256 checksums after copying both artifacts to this host. Use
+            prepared assets keeps any environment values already compiled into the web app; choosing
+            an environment rebuilds those assets before archiving.
+        </template>
 
         <ConfirmDialog
             v-model:open="clearOpen"

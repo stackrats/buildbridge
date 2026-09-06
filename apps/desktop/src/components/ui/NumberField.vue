@@ -2,9 +2,19 @@
 // A bounded whole number. The browser's own spinner is hidden and replaced with two steppers, so
 // a number reads like every other control here rather than like a raw form element.
 import { ChevronDown, ChevronUp } from '@lucide/vue';
-import { computed } from 'vue';
+import { computed, inject, useAttrs } from 'vue';
 
+import { fieldKey } from '../../lib/field';
 import { clampNumber } from '../../lib/numbers';
+
+defineOptions({ inheritAttrs: false });
+
+const field = inject(fieldKey, null);
+const attrs = useAttrs();
+const controlAttrs = computed(() => {
+    const { class: _class, style: _style, ...rest } = attrs;
+    return rest;
+});
 
 const model = defineModel<number>({ required: true });
 const {
@@ -45,8 +55,18 @@ const stepperClass =
 </script>
 
 <template>
-    <span class="relative block w-full">
+    <span
+        class="relative block w-full"
+        :class="attrs.class"
+        :style="attrs.style as string | undefined"
+    >
         <input
+            :id="field?.controlId"
+            :aria-labelledby="attrs['aria-label'] ? undefined : field?.labelId"
+            :aria-describedby="field?.descriptionId.value"
+            :aria-required="field?.required.value || undefined"
+            :aria-invalid="field?.invalid.value || undefined"
+            v-bind="controlAttrs"
             type="number"
             inputmode="numeric"
             :value="model"
@@ -54,7 +74,10 @@ const stepperClass =
             :max="max"
             :step="step"
             :disabled="disabled"
-            class="flex h-8 w-full [appearance:textfield] rounded-md border border-zinc-200 bg-white pr-7 pl-2.5 text-[13px] text-zinc-900 tabular-nums transition-colors outline-none focus-visible:border-zinc-700 disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-50 dark:focus-visible:border-zinc-300 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+            class="flex h-8 w-full [appearance:textfield] rounded-md border bg-white pr-7 pl-2.5 text-[13px] text-zinc-900 tabular-nums transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 disabled:opacity-50 dark:bg-zinc-900 dark:text-zinc-50 dark:focus-visible:outline-zinc-300 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+            :class="
+                field?.invalid.value ? 'border-red-500' : 'border-zinc-200 dark:border-zinc-800'
+            "
             @input="onInput"
             @blur="onBlur"
         />

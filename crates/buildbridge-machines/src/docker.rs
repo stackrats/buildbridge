@@ -2,6 +2,73 @@
 
 use super::*;
 
+/// macOS applications opened from Finder do not inherit a login shell's PATH. Keep the
+/// caller's executable preference, then try Docker Desktop's documented CLI locations.
+/// The child also needs these directories to find Docker's credential helper during pulls.
+pub(crate) fn docker_command() -> Command {
+    #[cfg(target_os = "macos")]
+    {
+        let path = std::env::var_os("PATH");
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        macos_docker_command(&macos_docker_paths(path.as_deref(), home.as_deref()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Command::new("docker")
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_docker_paths(path: Option<&std::ffi::OsStr>, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = path
+        .map(std::env::split_paths)
+        .into_iter()
+        .flatten()
+        .filter(|directory| directory.is_absolute())
+        .collect();
+    let mut fallback = vec![PathBuf::from("/usr/local/bin")];
+    if let Some(home) = home {
+        fallback.push(home.join(".docker/bin"));
+    }
+    fallback.push(PathBuf::from(
+        "/Applications/Docker.app/Contents/Resources/bin",
+    ));
+    if let Some(home) = home {
+        fallback.push(home.join("Applications/Docker.app/Contents/Resources/bin"));
+    }
+    for directory in fallback {
+        if directory.is_absolute() && !paths.contains(&directory) {
+            paths.push(directory);
+        }
+    }
+    paths
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_docker_command(paths: &[PathBuf]) -> Command {
+    let executable = paths
+        .iter()
+        .map(|directory| directory.join("docker"))
+        .find(|path| {
+            fs::metadata(path).is_ok_and(|metadata| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                }
+                #[cfg(not(unix))]
+                {
+                    metadata.is_file()
+                }
+            })
+        });
+    let mut command = Command::new(executable.as_deref().unwrap_or(Path::new("docker")));
+    if let Ok(path) = std::env::join_paths(paths) {
+        command.env("PATH", path);
+    }
+    command
+}
+
 pub fn probe_host() -> HostPrerequisites {
     probe_host_for(MachineProvider::DockerOsx)
 }
@@ -10,14 +77,14 @@ pub fn probe_host() -> HostPrerequisites {
 /// X display, dockur/macos serves it as a web page but needs the tun device for its network.
 pub fn probe_host_for(provider: MachineProvider) -> HostPrerequisites {
     let supported_host = cfg!(target_os = "linux") && std::env::consts::ARCH == "x86_64";
-    let docker_cli_output = Command::new("docker").arg("--version").output();
+    let docker_cli_output = docker_command().arg("--version").output();
     let docker_cli = docker_cli_output.is_ok();
     let docker_version = docker_cli_output
         .ok()
         .filter(|output| output.status.success())
         .map(|output| clean_output(&output.stdout));
     let docker_daemon = docker_cli
-        && Command::new("docker")
+        && docker_command()
             .args(["info", "--format", "{{.ServerVersion}}"])
             .output()
             .is_ok_and(|output| output.status.success());
@@ -239,7 +306,7 @@ const DEFAULT_STOP_GRACE_SECONDS: u32 = 30;
 /// macOS to shut down before QEMU exits and is created with two minutes for that, and a stop
 /// that cut it short would kill the guest mid-shutdown.
 pub(crate) fn stop_grace_seconds(container_name: &str) -> u32 {
-    Command::new("docker")
+    docker_command()
         .args([
             "inspect",
             "--format",
@@ -313,7 +380,7 @@ pub fn recent_logs(container_name: &str) -> Result<Vec<String>, ProviderError> {
 pub(crate) fn inspect_container(
     container_name: &str,
 ) -> Result<(ContainerState, Option<String>, Option<String>), ProviderError> {
-    let output = Command::new("docker")
+    let output = docker_command()
         .args([
             "inspect",
             "--format",
@@ -366,7 +433,7 @@ pub(crate) fn is_missing_container_error(message: &str) -> bool {
 }
 
 pub(crate) fn ensure_image(image: &str) -> Result<(), ProviderError> {
-    let exists = Command::new("docker")
+    let exists = docker_command()
         .args(["image", "inspect", image])
         .output()
         .map_err(|error| ProviderError::DockerUnavailable(error.to_string()))?
@@ -596,7 +663,7 @@ pub(crate) fn run_docker(
     operation: &'static str,
     args: &[String],
 ) -> Result<Output, ProviderError> {
-    let output = Command::new("docker")
+    let output = docker_command()
         .args(args)
         .tracked_output()
         .map_err(|error| ProviderError::DockerUnavailable(error.to_string()))?;
@@ -630,4 +697,122 @@ pub(crate) fn clean_output(output: &[u8]) -> String {
         .chars()
         .take(4_000)
         .collect()
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    #[test]
+    fn macos_docker_search_keeps_the_callers_path_and_adds_desktop_cli_locations() {
+        let current = std::env::join_paths(["/opt/custom/bin", "/usr/bin", "/bin"]).unwrap();
+        let paths = macos_docker_paths(Some(&current), Some(Path::new("/Users/Example User")));
+        assert_eq!(paths[0], Path::new("/opt/custom/bin"));
+        assert!(paths.contains(&PathBuf::from("/usr/local/bin")));
+        assert!(paths.contains(&PathBuf::from("/Users/Example User/.docker/bin")));
+        assert!(paths.contains(&PathBuf::from(
+            "/Applications/Docker.app/Contents/Resources/bin"
+        )));
+        assert!(paths.contains(&PathBuf::from(
+            "/Users/Example User/Applications/Docker.app/Contents/Resources/bin"
+        )));
+    }
+
+    #[test]
+    fn macos_child_path_can_find_credential_helpers_without_changing_the_parent_environment() {
+        let paths = macos_docker_paths(None, Some(Path::new("/Users/Builder")));
+        let command = macos_docker_command(&paths);
+        let child_path = command
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .unwrap()
+            .1
+            .unwrap();
+        assert_eq!(std::env::split_paths(child_path).collect::<Vec<_>>(), paths);
+        assert!(
+            command.get_args().next().is_none(),
+            "callers still provide a fixed argument vector"
+        );
+    }
+
+    #[test]
+    fn macos_docker_search_does_not_load_a_cli_from_the_working_project() {
+        let current = std::env::join_paths(["", ".", "node_modules/.bin", "/usr/bin"]).unwrap();
+        let paths = macos_docker_paths(Some(&current), Some(Path::new("relative-home")));
+        assert!(paths.iter().all(|path| path.is_absolute()));
+        assert_eq!(paths[0], Path::new("/usr/bin"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn macos_docker_resolution_respects_a_valid_explicit_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "buildbridge-docker-command-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("docker");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let command = macos_docker_command(std::slice::from_ref(&directory));
+        assert_eq!(command.get_program(), executable.as_os_str());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn macos_docker_search_skips_unusable_candidates_and_falls_back_to_the_path_lookup() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "buildbridge-docker-search-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let not_executable = directory.join("not-executable");
+        let folder = directory.join("folder");
+        let missing = directory.join("missing");
+        let usable = directory.join("usable");
+        fs::create_dir_all(folder.join("docker")).unwrap();
+        for (location, mode) in [(&not_executable, 0o600), (&usable, 0o700)] {
+            fs::create_dir_all(location).unwrap();
+            let executable = location.join("docker");
+            fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let command = macos_docker_command(&[
+            not_executable.clone(),
+            folder.clone(),
+            missing.clone(),
+            usable.clone(),
+        ]);
+        assert_eq!(command.get_program(), usable.join("docker").as_os_str());
+        let command = macos_docker_command(&[not_executable, folder, missing]);
+        assert_eq!(command.get_program(), "docker");
+        let command = macos_docker_command(&[PathBuf::from("/opt/with:colon")]);
+        assert!(
+            command.get_envs().all(|(key, _)| key != "PATH"),
+            "an unjoinable PATH is left inherited, not truncated"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn command_output_is_lossy_trimmed_and_capped_by_characters() {
+        let mut output = b"  ".to_vec();
+        output.extend_from_slice("é".repeat(4_500).as_bytes());
+        output.extend_from_slice(b"\xff\n");
+        let cleaned = clean_output(&output);
+        assert_eq!(cleaned.chars().count(), 4_000);
+        assert!(cleaned.chars().all(|character| character == 'é'));
+        assert_eq!(clean_output(b"\n ok \n"), "ok");
+        assert_eq!(clean_output(b"\xff"), "\u{FFFD}");
+    }
 }

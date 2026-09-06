@@ -1,0 +1,79 @@
+# The checks CLAUDE.md asks for before a change is finished, run on every push and pull
+# request: format and lint, the desktop typecheck and tests, clippy and the Rust tests, and
+# a check that the generated TypeScript contract matches the Rust DTOs. A second job compiles
+# the workspace on macOS, because the native Mac paths cannot be type-checked from Linux.
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+
+concurrency:
+    group: ci-${{ github.ref }}
+    cancel-in-progress: true
+
+env:
+    CARGO_TERM_COLOR: always
+    RUSTFLAGS: -D warnings
+
+jobs:
+    linux:
+        name: Linux checks
+        runs-on: ubuntu-22.04
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Install Tauri's Linux dependencies
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y --no-install-recommends \
+                      libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+                      libxdo-dev libssl-dev patchelf build-essential curl wget file
+
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: clippy, rustfmt
+            - uses: Swatinem/rust-cache@v2
+
+            - uses: pnpm/action-setup@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 24
+                  cache: pnpm
+            - name: Install JavaScript dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Format and lint
+              run: pnpm exec vp check
+            - name: Desktop typecheck
+              run: pnpm --filter @buildbridge/desktop typecheck
+            - name: Desktop tests
+              run: pnpm --filter @buildbridge/desktop test
+
+            - name: Rust formatting
+              run: cargo fmt --all --check
+            - name: Clippy
+              run: cargo clippy --workspace --all-targets
+            - name: Rust tests
+              run: cargo test --workspace
+
+            - name: Generated types match the Rust DTOs
+              run: |
+                  pnpm exec vp run types:generate
+                  git diff --exit-code -- apps/desktop/src/types/generated \
+                      || { echo '::error::apps/desktop/src/types/generated is out of date; run `vp run types:generate` and commit the result'; exit 1; }
+
+    macos:
+        name: macOS compile check
+        runs-on: macos-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: clippy
+            - uses: Swatinem/rust-cache@v2
+            - name: Clippy on macOS
+              run: cargo clippy --workspace --all-targets
+            - name: Rust tests on macOS
+              run: cargo test --workspace

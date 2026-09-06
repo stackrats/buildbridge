@@ -9,7 +9,7 @@
 import Pusher from 'pusher-js';
 import { reactive } from 'vue';
 
-import { useBackend } from '../lib/backend';
+import { useBackend, type Unlisten } from '../lib/backend';
 import { describeRealtimeFailure } from '../lib/realtime';
 import { describeError } from '../lib/utils';
 import type { DesktopStatus, PairInput } from '../types/backend';
@@ -44,6 +44,7 @@ let client: Pusher | null = null;
 let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 let workRequested = false;
 let activityId = 0;
+let activityUnlisten: Unlisten | null = null;
 
 function log(tone: ActivityEntry['tone'], message: string, buildId: string | null = null): void {
     activityId += 1;
@@ -214,6 +215,15 @@ export function useRunnerStore() {
     return {
         state,
         async initialize(): Promise<void> {
+            activityUnlisten ??= await useBackend().onRunnerActivity((result) => {
+                if (result.state === 'completed' || result.state === 'failed') {
+                    log(
+                        result.state === 'completed' ? 'success' : 'danger',
+                        result.message,
+                        result.buildId,
+                    );
+                }
+            });
             await refreshStatus();
             if (isPaired()) {
                 await connectRealtime();
@@ -250,6 +260,8 @@ export function useRunnerStore() {
         },
         dispose(): void {
             disconnectRealtime();
+            activityUnlisten?.();
+            activityUnlisten = null;
         },
         clearError(): void {
             state.error = null;

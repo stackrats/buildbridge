@@ -7,6 +7,7 @@ import type { MacGuestAccessView } from "./MacGuestAccessView";
 import type { MachineConfig } from "./MachineConfig";
 import type { MachineTemplateRef } from "./MachineTemplateRef";
 import type { MachineUsbStatus } from "./MachineUsbStatus";
+import type { ProjectVersion } from "./ProjectVersion";
 import type { RuntimeStatus } from "./RuntimeStatus";
 import type { SigningHealth } from "./SigningHealth";
 import type { SigningKitSummary } from "./SigningKitSummary";
@@ -29,7 +30,14 @@ envSet: EnvSetSummary | null, signingHealth: SigningHealth,
 /**
  * Why the credential vault could not be read, when that is the problem.
  */
-vaultIssue: string | null, guest: MacGuestAccessView, appleWorkspace: StoredAppleWorkspace | null, signing: SigningProvisioningResult | null, archive: AppleArchiveResult | null, 
+vaultIssue: string | null, guest: MacGuestAccessView, appleWorkspace: StoredAppleWorkspace | null, 
+/**
+ * The version and build number the approved project declares on this host right now,
+ * read from its own files each time the view is built; `None` until a project is
+ * approved, or when it does not declare exactly one of each. A build that asks for a
+ * different one writes it back into those files.
+ */
+projectVersion: ProjectVersion | null, signing: SigningProvisioningResult | null, archive: AppleArchiveResult | null, 
 /**
  * The env set the retained archive was built with, if any.
  */

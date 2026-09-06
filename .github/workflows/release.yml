@@ -1,0 +1,112 @@
+# Builds the desktop bundles and the command line for a tag and attaches them to a DRAFT
+# GitHub release, which stays a draft until someone publishes it by hand. Push a tag named
+# after the workspace version, `v0.1.0`, to run it; the tag's annotation becomes the release
+# notes. The bundles are not code-signed or notarized: Gatekeeper and SmartScreen will warn.
+name: Release
+
+on:
+    push:
+        tags: ['v*']
+    workflow_dispatch:
+
+permissions:
+    contents: write
+
+env:
+    CARGO_TERM_COLOR: always
+
+jobs:
+    draft:
+        name: Create the draft release
+        runs-on: ubuntu-22.04
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - name: Check the tag matches the workspace version
+              run: |
+                  version=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+                  tag="${GITHUB_REF_NAME#v}"
+                  [ "$tag" = "$version" ] || { echo "::error::tag $GITHUB_REF_NAME does not match workspace version $version"; exit 1; }
+            - name: Create the draft if it does not exist
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+                      || gh release create "$GITHUB_REF_NAME" --draft --verify-tag --notes-from-tag --title "BuildBridge $GITHUB_REF_NAME"
+
+    bundles:
+        name: ${{ matrix.name }}
+        needs: draft
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - name: Linux x86_64
+                      os: ubuntu-22.04
+                      cli_target: x86_64-unknown-linux-gnu
+                      tauri_args: ''
+                    - name: macOS universal
+                      os: macos-latest
+                      cli_target: universal-apple-darwin
+                      tauri_args: --target universal-apple-darwin
+        runs-on: ${{ matrix.os }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Install Tauri's Linux dependencies
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y --no-install-recommends \
+                      libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+                      libxdo-dev libssl-dev patchelf build-essential curl wget file
+
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+            - uses: Swatinem/rust-cache@v2
+
+            - uses: pnpm/action-setup@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 24
+                  cache: pnpm
+            - name: Install JavaScript dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build the desktop bundles
+              run: pnpm --filter @buildbridge/desktop exec tauri build ${{ matrix.tauri_args }}
+
+            - name: Build the command line
+              run: |
+                  version="${GITHUB_REF_NAME#v}"
+                  mkdir -p release
+                  if [ "${{ runner.os }}" = macOS ]; then
+                      cargo build --release -p buildbridge-cli --target aarch64-apple-darwin
+                      cargo build --release -p buildbridge-cli --target x86_64-apple-darwin
+                      lipo -create -output release/buildbridge \
+                          target/aarch64-apple-darwin/release/buildbridge \
+                          target/x86_64-apple-darwin/release/buildbridge
+                  else
+                      cargo build --release -p buildbridge-cli
+                      cp target/release/buildbridge release/buildbridge
+                  fi
+                  tar -C release -czf "release/buildbridge-${version}-${{ matrix.cli_target }}.tar.gz" buildbridge
+                  rm release/buildbridge
+
+            - name: Collect the bundles
+              run: |
+                  if [ "${{ runner.os }}" = macOS ]; then
+                      cp target/universal-apple-darwin/release/bundle/dmg/*.dmg release/
+                  else
+                      cp target/release/bundle/deb/*.deb target/release/bundle/rpm/*.rpm target/release/bundle/appimage/*.AppImage release/
+                  fi
+                  cd release
+                  if command -v sha256sum >/dev/null; then sha256sum * > "SHA256SUMS-${{ matrix.cli_target }}.txt"; else shasum -a 256 * > "SHA256SUMS-${{ matrix.cli_target }}.txt"; fi
+                  ls -l
+
+            - name: Attach to the draft release
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: gh release upload "$GITHUB_REF_NAME" release/* --clobber

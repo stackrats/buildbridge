@@ -255,15 +255,29 @@ fn download_xcode(
 }
 
 /// Opens a page in this host's browser rather than in a window of this app: a provider's
-/// repository is someone else's page, read best where the person's browser already is. Only
-/// `https` addresses with a host are accepted, since any script in the webview can call this,
-/// and the address is one fixed argument to the platform's opener.
+/// repository is someone else's page, read best where the person's browser already is.
+/// HTTPS and loopback HTTP dashboards are accepted. The address is one fixed argument to
+/// the platform's opener; other schemes and embedded credentials are rejected.
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     let parsed =
         tauri::Url::parse(&url).map_err(|error| format!("The address is invalid: {error}"))?;
-    if parsed.scheme() != "https" || parsed.host_str().is_none() {
-        return Err("Only https addresses are opened in the browser.".to_string());
+    let loopback = parsed.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || !(parsed.scheme() == "https" || (parsed.scheme() == "http" && loopback))
+    {
+        return Err(
+            "Use an HTTPS address, or HTTP on localhost, without embedded credentials.".to_string(),
+        );
     }
     let mut command = if cfg!(target_os = "macos") {
         std::process::Command::new("open")
@@ -277,6 +291,13 @@ fn open_url(url: String) -> Result<(), String> {
         .spawn()
         .map_err(|error| format!("Could not open the browser: {error}"))?;
     Ok(())
+}
+
+#[tauri::command]
+async fn open_android_web_inspector() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(buildbridge_engine::open_android_inspector)
+        .await
+        .map_err(|error| format!("Could not open the Android inspector: {error}"))?
 }
 
 #[tauri::command]
@@ -334,6 +355,91 @@ async fn heartbeat_runner(desktop: State<'_, Desktop>) -> Result<HeartbeatSummar
 #[tauri::command]
 async fn run_once(desktop: State<'_, Desktop>) -> Result<RunOnceResult, String> {
     buildbridge_engine::run_once(&desktop.engine).await
+}
+
+#[tauri::command]
+async fn get_sharing(desktop: State<'_, Desktop>) -> Result<SharingOverview, String> {
+    buildbridge_engine::get_sharing(&desktop.engine).await
+}
+
+#[tauri::command]
+async fn create_sharing_invitation(
+    desktop: State<'_, Desktop>,
+    input: ShareMachineInput,
+) -> Result<SharingInvitation, String> {
+    buildbridge_engine::create_sharing_invitation(&desktop.engine, input).await
+}
+
+#[tauri::command]
+async fn approve_sharing_grant(
+    desktop: State<'_, Desktop>,
+    grant_id: String,
+) -> Result<(), String> {
+    buildbridge_engine::approve_sharing_grant(&desktop.engine, grant_id).await
+}
+
+#[tauri::command]
+async fn revoke_sharing_grant(desktop: State<'_, Desktop>, grant_id: String) -> Result<(), String> {
+    buildbridge_engine::revoke_sharing_grant(&desktop.engine, grant_id).await
+}
+
+#[tauri::command]
+async fn set_sharing_paused(desktop: State<'_, Desktop>, paused: bool) -> Result<(), String> {
+    buildbridge_engine::set_sharing_paused(&desktop.engine, paused).await
+}
+
+#[tauri::command]
+async fn native_mac_status(
+    desktop: State<'_, Desktop>,
+    force_refresh: Option<bool>,
+) -> Result<NativeMacStatus, String> {
+    if force_refresh.unwrap_or(false) {
+        buildbridge_engine::refresh_native_mac_status(&desktop.engine).await
+    } else {
+        buildbridge_engine::native_mac_status(&desktop.engine).await
+    }
+}
+
+#[tauri::command]
+async fn approve_native_mac_project(
+    desktop: State<'_, Desktop>,
+    input: NativeMacProjectInput,
+) -> Result<NativeMacConfig, String> {
+    buildbridge_engine::approve_native_mac_project(&desktop.engine, input).await
+}
+
+#[tauri::command]
+async fn configure_native_mac_signing(
+    desktop: State<'_, Desktop>,
+    input: NativeMacSigningInput,
+) -> Result<NativeMacConfig, String> {
+    buildbridge_engine::configure_native_mac_signing(&desktop.engine, input).await
+}
+
+#[tauri::command]
+async fn run_native_mac_build(
+    desktop: State<'_, Desktop>,
+    input: NativeMacBuildInput,
+) -> Result<NativeMacBuildResult, String> {
+    buildbridge_engine::run_native_mac_build(&desktop.engine, input).await
+}
+
+#[tauri::command]
+async fn cancel_native_mac_build(desktop: State<'_, Desktop>) -> Result<(), String> {
+    buildbridge_engine::cancel_native_mac_build(&desktop.engine).await
+}
+
+#[tauri::command]
+async fn set_native_mac_login(desktop: State<'_, Desktop>, enabled: bool) -> Result<(), String> {
+    buildbridge_engine::set_native_mac_login(&desktop.engine, enabled).await
+}
+
+#[tauri::command]
+async fn reveal_native_mac_artifacts(
+    desktop: State<'_, Desktop>,
+    path: String,
+) -> Result<(), String> {
+    buildbridge_engine::reveal_native_mac_artifacts(&desktop.engine, path).await
 }
 
 #[tauri::command]
@@ -548,6 +654,69 @@ async fn list_signing_kits(desktop: State<'_, Desktop>) -> Result<Vec<SigningKit
     buildbridge_engine::list_signing_kits(&desktop.engine).await
 }
 
+/// Credential recovery is available only to the local main UI, never the guest screen or
+/// the external pages opened in additional webviews.
+fn require_credential_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let denied = || "Open saved credentials from the main BuildBridge window.".to_string();
+    let url = window.url().map_err(|_| denied())?;
+    let config = window.app_handle().config();
+    let dev_url = if cfg!(debug_assertions) {
+        config.build.dev_url.as_ref()
+    } else {
+        None
+    };
+    if !credential_window_is_trusted(window.label(), &url, dev_url) {
+        return Err(denied());
+    }
+    Ok(())
+}
+
+fn credential_window_is_trusted(
+    label: &str,
+    url: &tauri::Url,
+    dev_url: Option<&tauri::Url>,
+) -> bool {
+    label == "main"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && ((url.port().is_none()
+            && matches!(
+                (url.scheme(), url.host_str()),
+                ("tauri", Some("localhost")) | ("http" | "https", Some("tauri.localhost"))
+            ))
+            || dev_url.is_some_and(|expected| url.origin() == expected.origin()))
+}
+
+#[tauri::command]
+async fn list_signing_credentials(
+    window: tauri::WebviewWindow,
+    kit_id: String,
+) -> Result<Vec<SigningCredential>, String> {
+    require_credential_window(&window)?;
+    buildbridge_engine::list_signing_credentials(kit_id).await
+}
+
+#[tauri::command]
+async fn reveal_signing_credential(
+    window: tauri::WebviewWindow,
+    kit_id: String,
+    credential_id: String,
+) -> Result<String, String> {
+    require_credential_window(&window)?;
+    buildbridge_engine::reveal_signing_credential(kit_id, credential_id).await
+}
+
+#[tauri::command]
+async fn export_signing_credential(
+    window: tauri::WebviewWindow,
+    kit_id: String,
+    credential_id: String,
+    path: String,
+) -> Result<(), String> {
+    require_credential_window(&window)?;
+    buildbridge_engine::export_signing_credential(kit_id, credential_id, path).await
+}
+
 #[tauri::command]
 async fn save_signing_kit(
     desktop: State<'_, Desktop>,
@@ -673,7 +842,11 @@ async fn attach_env_set(
 }
 
 #[tauri::command]
-async fn reveal_env_secrets(set_id: String) -> Result<Vec<EnvVariableSummary>, String> {
+async fn reveal_env_secrets(
+    window: tauri::WebviewWindow,
+    set_id: String,
+) -> Result<Vec<EnvVariableSummary>, String> {
+    require_credential_window(&window)?;
     buildbridge_engine::reveal_env_secrets(set_id).await
 }
 
@@ -793,8 +966,19 @@ async fn run_apple_signed_archive(
     desktop: State<'_, Desktop>,
     machine_id: String,
     env_set_id: Option<String>,
+    version: Option<ProjectVersionInput>,
 ) -> Result<RunAppleArchiveResult, String> {
-    buildbridge_engine::run_apple_signed_archive(&desktop.engine, machine_id, env_set_id).await
+    buildbridge_engine::run_apple_signed_archive(&desktop.engine, machine_id, env_set_id, version)
+        .await
+}
+
+#[tauri::command]
+async fn upload_apple_archive(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+    expected_sha256: String,
+) -> Result<(), String> {
+    buildbridge_engine::upload_apple_archive(&desktop.engine, machine_id, expected_sha256).await
 }
 
 #[tauri::command]
@@ -823,6 +1007,68 @@ async fn approve_android_workspace(
 }
 
 #[tauri::command]
+async fn list_android_devices(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+) -> Result<AndroidDevices, String> {
+    buildbridge_engine::list_android_devices(&desktop.engine, machine_id).await
+}
+
+#[tauri::command]
+async fn run_android_device(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+    input: AndroidDeviceRunInput,
+) -> Result<AndroidDeviceRunResult, String> {
+    buildbridge_engine::run_android_device(&desktop.engine, machine_id, input).await
+}
+
+#[tauri::command]
+async fn google_play_connection(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+) -> Result<GooglePlayConnection, String> {
+    buildbridge_engine::google_play_connection(&desktop.engine, machine_id).await
+}
+
+#[tauri::command]
+async fn configure_google_play(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+    path: String,
+) -> Result<GooglePlayConnection, String> {
+    buildbridge_engine::configure_google_play(&desktop.engine, machine_id, path).await
+}
+
+#[tauri::command]
+async fn export_google_play_credential(
+    desktop: State<'_, Desktop>,
+    window: tauri::WebviewWindow,
+    machine_id: String,
+    path: String,
+) -> Result<(), String> {
+    require_credential_window(&window)?;
+    buildbridge_engine::export_google_play_credential(&desktop.engine, machine_id, path).await
+}
+
+#[tauri::command]
+async fn disconnect_google_play(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+) -> Result<(), String> {
+    buildbridge_engine::disconnect_google_play(&desktop.engine, machine_id).await
+}
+
+#[tauri::command]
+async fn upload_google_play(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+    expected_sha256: String,
+) -> Result<GooglePlayUploadResult, String> {
+    buildbridge_engine::upload_google_play(&desktop.engine, machine_id, expected_sha256).await
+}
+
+#[tauri::command]
 async fn clear_android_workspace(
     desktop: State<'_, Desktop>,
     machine_id: String,
@@ -842,8 +1088,14 @@ async fn sync_android_workspace(
 async fn run_android_debug_build(
     desktop: State<'_, Desktop>,
     machine_id: String,
+    allow_http: Option<bool>,
 ) -> Result<RunAndroidBuildResult, String> {
-    buildbridge_engine::run_android_debug_build(&desktop.engine, machine_id).await
+    buildbridge_engine::run_android_debug_build(
+        &desktop.engine,
+        machine_id,
+        allow_http.unwrap_or(false),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -851,8 +1103,17 @@ async fn run_android_signed_release(
     desktop: State<'_, Desktop>,
     machine_id: String,
     env_set_id: Option<String>,
+    outputs: Option<AndroidReleaseOutputs>,
+    version: Option<ProjectVersionInput>,
 ) -> Result<RunAndroidReleaseResult, String> {
-    buildbridge_engine::run_android_signed_release(&desktop.engine, machine_id, env_set_id).await
+    buildbridge_engine::run_android_signed_release(
+        &desktop.engine,
+        machine_id,
+        env_set_id,
+        outputs,
+        version,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -888,6 +1149,11 @@ async fn create_android_keystore(
     buildbridge_engine::create_android_keystore(&desktop.engine, kit_id, input).await
 }
 
+#[tauri::command]
+async fn verify_android_signing_kit(kit_id: String) -> Result<AndroidSigningVerification, String> {
+    buildbridge_engine::verify_android_signing_kit(kit_id).await
+}
+
 pub fn run() {
     tauri::Builder::default()
         // Native file pickers for the paths BuildBridge asks for: signing files, a project
@@ -901,6 +1167,18 @@ pub fn run() {
             authorize_realtime,
             heartbeat_runner,
             run_once,
+            get_sharing,
+            create_sharing_invitation,
+            approve_sharing_grant,
+            revoke_sharing_grant,
+            set_sharing_paused,
+            native_mac_status,
+            approve_native_mac_project,
+            configure_native_mac_signing,
+            run_native_mac_build,
+            cancel_native_mac_build,
+            set_native_mac_login,
+            reveal_native_mac_artifacts,
             list_machines,
             create_machine,
             delete_machine,
@@ -909,6 +1187,7 @@ pub fn run() {
             open_developer_tools,
             open_machine_screen,
             open_url,
+            open_android_web_inspector,
             open_safari_web_inspector,
             list_machine_templates,
             save_machine_template,
@@ -930,6 +1209,9 @@ pub fn run() {
             clear_apple_device_run,
             create_apple_development_certificate,
             list_signing_kits,
+            list_signing_credentials,
+            reveal_signing_credential,
+            export_signing_credential,
             save_signing_kit,
             delete_signing_kit,
             attach_signing_kit,
@@ -960,9 +1242,17 @@ pub fn run() {
             run_apple_smoke_build,
             adopt_guest_podfile_lock,
             run_apple_signed_archive,
+            upload_apple_archive,
             reveal_apple_archive,
             clear_apple_archive,
             approve_android_workspace,
+            list_android_devices,
+            run_android_device,
+            google_play_connection,
+            configure_google_play,
+            export_google_play_credential,
+            disconnect_google_play,
+            upload_google_play,
             clear_android_workspace,
             sync_android_workspace,
             run_android_debug_build,
@@ -971,6 +1261,7 @@ pub fn run() {
             clear_android_release,
             reveal_android_debug_apk,
             create_android_keystore,
+            verify_android_signing_kit,
             download_xcode
         ])
         .on_window_event(|window, event| {
@@ -989,13 +1280,45 @@ pub fn run() {
                     app: app.handle().clone(),
                 }),
             };
-            app.manage(Desktop {
-                engine: Engine::new(deps),
-            });
+            let engine = Engine::new(deps);
+            let service_engine = engine.clone();
+            tauri::async_runtime::spawn(buildbridge_engine::run_runner_service(service_engine));
+            app.manage(Desktop { engine });
             app.manage(XcodeDownloads::default());
             let _ = tray::setup(app);
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod credential_window_tests {
+    use super::credential_window_is_trusted;
+
+    #[test]
+    fn only_local_main_window_can_recover_credentials() {
+        let dev_url = tauri::Url::parse("http://localhost:1420").unwrap();
+        for address in ["tauri://localhost/index.html", "http://tauri.localhost/"] {
+            let url = tauri::Url::parse(address).unwrap();
+            assert!(credential_window_is_trusted("main", &url, None));
+            assert!(!credential_window_is_trusted("screen-machine", &url, None));
+        }
+        assert!(credential_window_is_trusted(
+            "main",
+            &dev_url,
+            Some(&dev_url)
+        ));
+        assert!(!credential_window_is_trusted("main", &dev_url, None));
+        for address in [
+            "https://developer.apple.com/download/all/",
+            "http://127.0.0.1:8006/",
+            "http://localhost:1421/",
+            "http://tauri.localhost.attacker.example/",
+            "http://username@tauri.localhost/",
+        ] {
+            let url = tauri::Url::parse(address).unwrap();
+            assert!(!credential_window_is_trusted("main", &url, Some(&dev_url)));
+        }
+    }
 }

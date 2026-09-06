@@ -23,8 +23,8 @@ use crate::qmp::QmpClient;
 use crate::qmp::QmpEndpoint;
 use crate::{
     ContainerState, DOCKER_IMAGE, LaunchOptions, MachineConfig, MachineProvider, ProviderError,
-    RuntimeStatus, TrackedCommand, clean_output, create_container, inspect_container, probe_host,
-    probe_host_for, run_docker, status, status_for, stop,
+    RuntimeStatus, TrackedCommand, clean_output, create_container, docker_command,
+    inspect_container, probe_host, probe_host_for, run_docker, status, status_for, stop,
 };
 use ts_rs::TS;
 
@@ -436,7 +436,7 @@ pub(crate) fn container_layout(
 pub fn inspect_container_layout(
     container_name: &str,
 ) -> Result<Option<ContainerLayout>, ProviderError> {
-    let output = Command::new("docker")
+    let output = docker_command()
         .args([
             "inspect",
             "--format",
@@ -524,7 +524,7 @@ where
 {
     let partial = PathBuf::from(format!("{}.part", destination.display()));
     let _ = fs::remove_file(&partial);
-    let mut child = Command::new("docker")
+    let mut child = docker_command()
         .args(["cp", &format!("{container_name}:{source}")])
         .arg(&partial)
         .stdin(Stdio::null())

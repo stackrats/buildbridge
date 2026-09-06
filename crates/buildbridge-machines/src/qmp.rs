@@ -8,14 +8,14 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::{MachineProvider, ProviderError};
+use crate::{MachineProvider, ProviderError, docker_command};
 
 /// The QEMU device id of the phone. Fixed, so the guest can hold at most one and a re-attach
 /// replaces rather than stacks.
@@ -183,7 +183,7 @@ impl QmpClient {
             }
             QmpEndpoint::ContainerExec { container, socket } => {
                 // `-q 1`: netcat leaves a second after its input closes, which frees the socket.
-                let mut relay = Command::new("docker")
+                let mut relay = docker_command()
                     .args([
                         "exec",
                         "--interactive",

@@ -162,9 +162,9 @@ pub(crate) fn normalize_signing_kit(input: SigningKitInput) -> Result<StoredSign
         development_certificate_password: optional_trim(input.development_certificate_password),
         development_certificate_serial_number: None,
         android_keystore_path: optional_trim(input.android_keystore_path),
-        android_keystore_password: optional_trim(input.android_keystore_password),
+        android_keystore_password: optional_android_password(input.android_keystore_password),
         android_key_alias: optional_trim(input.android_key_alias),
-        android_key_password: optional_trim(input.android_key_password),
+        android_key_password: optional_android_password(input.android_key_password),
     };
     let app_store_connect_values = [
         secrets.app_store_connect_key_id.is_some(),
@@ -307,6 +307,11 @@ pub(crate) fn valid_android_key_alias(value: &str) -> bool {
         })
 }
 
+// An empty field keeps a saved password; surrounding spaces are part of a nonempty secret.
+fn optional_android_password(value: String) -> Option<String> {
+    if value.is_empty() { None } else { Some(value) }
+}
+
 /// Whether a kit can sign an Android release: a keystore, the alias of the key in it, and
 /// the keystore password. The key password defaults to the keystore's.
 pub(crate) fn kit_has_android_signing(kit: &StoredSigningKit) -> bool {
@@ -345,6 +350,56 @@ pub(crate) fn android_signing_material(
         keystore_password,
         key_alias,
         key_password,
+    })
+}
+
+/// Public metadata from an explicit local keystore check; no Google account authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidSigningVerification {
+    pub kit_id: String,
+    pub key_alias: String,
+    pub certificate_sha256: String,
+    pub certificate_sha1: String,
+    pub algorithm: AndroidSigningAlgorithm,
+    pub key_bits: u32,
+    #[ts(type = "number")]
+    pub valid_from_epoch_seconds: i64,
+    #[ts(type = "number")]
+    pub valid_until_epoch_seconds: i64,
+    #[ts(type = "number")]
+    pub verified_at_epoch_seconds: u64,
+}
+
+/// Proves local key access and reports public certificate metadata. This does not check
+/// Google Play account access or whether Google accepts the certificate for an app.
+pub async fn verify_android_signing_kit(
+    kit_id: String,
+) -> Result<AndroidSigningVerification, String> {
+    let kit = read_signing_kits()
+        .await?
+        .kits
+        .into_iter()
+        .find(|kit| kit.id == kit_id)
+        .ok_or_else(|| "These signing credentials are no longer stored.".to_string())?;
+    let signing = android_signing_material(&kit)?;
+    let certificate = tokio::task::spawn_blocking(move || {
+        buildbridge_machines::verify_android_signing_material(&signing)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "The Android signing check could not finish.".to_string())??;
+    Ok(AndroidSigningVerification {
+        kit_id,
+        key_alias: certificate.key_alias,
+        certificate_sha256: certificate.certificate_sha256,
+        certificate_sha1: certificate.certificate_sha1,
+        algorithm: certificate.algorithm,
+        key_bits: certificate.key_bits,
+        valid_from_epoch_seconds: certificate.valid_from_epoch_seconds,
+        valid_until_epoch_seconds: certificate.valid_until_epoch_seconds,
+        verified_at_epoch_seconds: machines::now_epoch_seconds(),
     })
 }
 

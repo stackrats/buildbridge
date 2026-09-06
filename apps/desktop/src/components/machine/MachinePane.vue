@@ -1,6 +1,5 @@
 <script setup lang="ts">
-// One machine as one journey: the header, the full-width timeline with the open step showing
-// everything it has, and the log drawer under it. There is one layout at every window size.
+// Setup guides the first visit; a prepared machine opens on its everyday build workspace.
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 import {
@@ -13,22 +12,31 @@ import {
 } from '../../model/steps';
 import { formatBytes } from '../../lib/format';
 import { isAndroid } from '../../model/providers';
+import { projectWorkspace } from '../../model/build-flow';
+import { useBuildFlowStore } from '../../stores/build-flow';
 import { useMachinesStore } from '../../stores/machines';
-import { useUi } from '../../stores/ui';
+import { useUi, type MachineSection } from '../../stores/ui';
 import Callout from '../ui/Callout.vue';
-import Spinner from '../ui/Spinner.vue';
 import StepTimeline from '../ui/StepTimeline.vue';
+import Tabs from '../ui/Tabs.vue';
+import BuildWorkspace from './BuildWorkspace.vue';
+import GuidedBuildStatus from './GuidedBuildStatus.vue';
+import MachinePreview from './MachinePreview.vue';
 import LogDrawer from './LogDrawer.vue';
 import MachineHeader from './MachineHeader.vue';
+import MachineLoading from './MachineLoading.vue';
 import OptimizationsSection from './OptimizationsSection.vue';
 import StepDetail from './StepDetail.vue';
+import PublishStep from './steps/PublishStep.vue';
 
 const { machineId } = defineProps<{ machineId: string }>();
 const ui = useUi();
 const machines = useMachinesStore();
+const flows = useBuildFlowStore();
 
 const session = computed(() => machines.session(machineId));
 const view = computed(() => session.value.view);
+const summary = computed(() => machines.machines.value.find((machine) => machine.id === machineId));
 
 const now = ref(Date.now());
 const runningStep = computed(() => machines.runningStep(machineId));
@@ -47,6 +55,62 @@ const steps = computed<JourneyStep[]>(() =>
 
 const focus = computed(() => focusStep(steps.value));
 const headline = computed(() => journeyHeadline(steps.value));
+const openedAtStep = ui.selectedStep(machineId) !== null;
+const prepared = computed(
+    () =>
+        !!view.value &&
+        (!!projectWorkspace(view.value) ||
+            steps.value
+                .filter((step) => step.phase === 'setup')
+                .every((step) => step.status === 'done')),
+);
+const section = computed<MachineSection>({
+    get: () =>
+        ui.state.machineSections[machineId] ??
+        (openedAtStep ? 'steps' : prepared.value ? 'build' : 'setup'),
+    set: (value) => {
+        ui.state.machineSections[machineId] = value;
+    },
+});
+const tabs = (
+    [
+        { value: 'setup', label: 'Machine setup' },
+        { value: 'build', label: 'Build' },
+        { value: 'preview', label: 'Preview' },
+        { value: 'publish', label: 'Publish' },
+        { value: 'steps', label: 'All steps' },
+    ] satisfies { value: MachineSection; label: string }[]
+).map((tab) => ({
+    ...tab,
+    id: `${machineId}-${tab.value}-tab`,
+    panelId: `${machineId}-workspace-panel`,
+}));
+const timelineSteps = computed(() =>
+    section.value === 'setup' ? steps.value.filter((step) => step.phase === 'setup') : steps.value,
+);
+function openStep(id: JourneyStepId): void {
+    ui.selectStep(machineId, id);
+    section.value =
+        id === 'publish'
+            ? 'publish'
+            : steps.value.find((step) => step.id === id)?.phase === 'setup'
+              ? 'setup'
+              : 'steps';
+}
+function openResult(): void {
+    const build = flows.builds[machineId];
+    openStep(
+        build?.request.outcome === 'release'
+            ? isAndroid(view.value!.profile.provider)
+                ? 'release'
+                : 'archive'
+            : 'test-build',
+    );
+}
+function openTestBuild(): void {
+    flows.draft(machineId).outcome = 'test';
+    section.value = 'build';
+}
 
 // What each phase achieved, for its header once the phase folds away. Setup is the one you
 // stop thinking about, so its line is the toolchain every later build reuses.
@@ -70,7 +134,7 @@ const summaries = computed<Partial<Record<StepPhase, string>>>(() => {
                           .join(' ')
                     : null,
                 release
-                    ? `${release.versionName} (${release.versionCode}) · bundle ${formatBytes(release.aab.bytes)}`
+                    ? `${release.versionName} (${release.versionCode}) · ${[release.aab ? `AAB ${formatBytes(release.aab.bytes)}` : null, release.apk ? `APK ${formatBytes(release.apk.bytes)}` : null].filter(Boolean).join(' · ')}`
                     : null,
             ]
                 .filter(Boolean)
@@ -110,15 +174,16 @@ const selected = computed<JourneyStepId | null>({
         if (chosen === '') {
             return null;
         }
-        if (chosen && steps.value.some((step) => step.id === chosen)) {
+        if (chosen && timelineSteps.value.some((step) => step.id === chosen)) {
             return chosen as JourneyStepId;
         }
         // With nothing to do, land on the last thing achieved or the last required step, so a
         // finished machine opens on its artifacts rather than on an optional experiment.
         return (
-            focus.value?.id ??
-            [...steps.value].reverse().find((step) => step.status === 'done' || !step.optional)
-                ?.id ??
+            focusStep(timelineSteps.value)?.id ??
+            [...timelineSteps.value]
+                .reverse()
+                .find((step) => step.status === 'done' || !step.optional)?.id ??
             null
         );
     },
@@ -183,14 +248,14 @@ onBeforeUnmount(() => {
 <template>
     <div class="flex h-full flex-col">
         <div class="min-h-0 flex-1 overflow-y-auto">
-            <div class="mx-auto max-w-4xl p-5">
-                <div
-                    v-if="!view && session.loading"
-                    class="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400"
-                >
-                    <Spinner />
-                    Probing the machine…
-                </div>
+            <div
+                class="mx-auto w-full max-w-4xl p-5"
+                :class="{ 'flex min-h-full flex-col': !view }"
+            >
+                <MachineLoading
+                    v-if="!view && (session.loading || !session.error)"
+                    :machine="summary"
+                />
                 <Callout v-else-if="!view && session.error" tone="danger">{{
                     session.error
                 }}</Callout>
@@ -198,27 +263,84 @@ onBeforeUnmount(() => {
                 <template v-else-if="view">
                     <MachineHeader :session="session" :now="now" />
 
-                    <div v-if="session.error || session.notice" class="mt-4">
-                        <Callout v-if="session.error" tone="danger">{{ session.error }}</Callout>
-                        <Callout v-else-if="session.notice" tone="ok">{{ session.notice }}</Callout>
+                    <div
+                        v-if="session.error || (session.notice && !flows.active(machineId))"
+                        class="mt-4"
+                    >
+                        <Callout
+                            v-if="session.error && flows.builds[machineId]?.status !== 'failed'"
+                            tone="danger"
+                            >{{ session.error }}</Callout
+                        >
+                        <Callout v-else-if="session.notice && !flows.builds[machineId]" tone="ok">{{
+                            session.notice
+                        }}</Callout>
                     </div>
 
-                    <div class="mt-5">
-                        <StepTimeline
-                            v-model:selected="selected"
-                            :steps="steps"
-                            :headline="headline"
-                            :summaries="summaries"
-                            :running-seconds="runningSeconds"
+                    <div class="mt-5 space-y-5">
+                        <GuidedBuildStatus
+                            :session="session"
+                            :now="now"
+                            @review="openStep"
+                            @results="openResult"
+                        />
+                        <Tabs v-model="section" :tabs="tabs" aria-label="Machine workspace" />
+                        <div
+                            :id="`${machineId}-workspace-panel`"
+                            role="tabpanel"
+                            :aria-labelledby="`${machineId}-${section}-tab`"
+                            class="space-y-5"
                         >
-                            <template #detail="{ step }">
-                                <StepDetail :key="step.id" :session="session" :step="step" />
-                            </template>
-                        </StepTimeline>
+                            <BuildWorkspace
+                                v-if="section === 'build'"
+                                :session="session"
+                                :steps="steps"
+                                @step="openStep"
+                                @preview="section = 'preview'"
+                            />
+                            <MachinePreview
+                                v-if="section === 'preview'"
+                                :session="session"
+                                :steps="steps"
+                                @step="openStep"
+                                @build="openTestBuild"
+                            />
+                            <div v-if="section === 'setup'" class="space-y-1">
+                                <h2 class="text-base font-semibold">Prepare this machine once</h2>
+                                <p class="text-sm leading-6 text-zinc-500 dark:text-zinc-400">
+                                    Follow the next action below. Completed setup is kept for future
+                                    builds.
+                                </p>
+                            </div>
+                            <PublishStep
+                                v-if="section === 'publish'"
+                                :session="session"
+                                :step="steps.find((step) => step.id === 'publish')!"
+                            />
+                            <StepTimeline
+                                v-if="section === 'setup' || section === 'steps'"
+                                v-model:selected="selected"
+                                :steps="timelineSteps"
+                                :headline="
+                                    section === 'setup'
+                                        ? (focusStep(timelineSteps)?.title ?? 'Ready to build')
+                                        : headline
+                                "
+                                :summaries="summaries"
+                                :running-seconds="runningSeconds"
+                            >
+                                <template #detail="{ step }">
+                                    <StepDetail :key="step.id" :session="session" :step="step" />
+                                </template>
+                            </StepTimeline>
+                        </div>
                     </div>
 
                     <OptimizationsSection
-                        v-if="!isAndroid(view.profile.provider)"
+                        v-if="
+                            !isAndroid(view.profile.provider) &&
+                            (section === 'setup' || section === 'steps')
+                        "
                         :session="session"
                     />
                 </template>

@@ -22,6 +22,9 @@ export type OperationId =
     | 'attach-env'
     | 'clear-signing'
     | 'archive'
+    | 'upload-archive'
+    | 'upload-google-play'
+    | 'android-run-device'
     | 'release'
     | 'reveal'
     | 'clear-archive'
@@ -57,6 +60,16 @@ export const busyKeyStep: Record<string, string> = {
     test_building: 'test-build',
     adopting_lock: 'test-build',
     archiving: 'archive',
+    uploading_archive: 'publish',
+    uploading_google_play: 'publish',
+    uploading_artifacts: 'publish',
+    configuring_google_play: 'publish',
+    approving_android_workspace: 'approve',
+    clearing_android_workspace: 'approve',
+    clearing_android_release: 'release',
+    running_android_device: 'run-device',
+    listing_android_devices: 'run-device',
+    clearing_archive: 'archive',
     releasing: 'release',
     deleting: 'launch',
     discarding: 'launch',
@@ -84,6 +97,16 @@ export const busyKeyLabel: Record<string, string> = {
     test_building: 'Running the test build',
     adopting_lock: 'Adopting the guest Podfile.lock',
     archiving: 'Building the signed archive',
+    uploading_archive: 'Uploading with Transporter',
+    uploading_google_play: 'Uploading to Google Play',
+    uploading_artifacts: 'Uploading artifacts to the dashboard',
+    configuring_google_play: 'Saving Google Play credentials',
+    approving_android_workspace: 'Approving the Android project',
+    clearing_android_workspace: 'Removing the Android project approval',
+    clearing_android_release: 'Clearing retained Android artifacts',
+    running_android_device: 'Installing and opening on Android',
+    listing_android_devices: 'Finding Android devices',
+    clearing_archive: 'Clearing retained artifacts',
     releasing: 'Building the signed release',
     deleting: 'Deleting the machine',
     discarding: 'Discarding the container',
@@ -122,6 +145,9 @@ export const operationLabel: Record<OperationId, string> = {
     'attach-env': 'Changing the environment',
     'clear-signing': 'Removing guest signing',
     archive: 'Building the signed archive',
+    'upload-archive': 'Uploading with Transporter',
+    'upload-google-play': 'Uploading to Google Play',
+    'android-run-device': 'Installing and opening on Android',
     release: 'Building the signed release',
     reveal: 'Revealing the artifacts',
     'clear-archive': 'Clearing retained artifacts',
@@ -148,7 +174,14 @@ export function activityLabel(operation: string | null | undefined): string | nu
     if (!operation) {
         return null;
     }
-    return busyKeyLabel[operation] ?? operationLabel[operation as OperationId] ?? null;
+    // Own keys only: a backend-supplied name like "constructor" must not find Object.prototype.
+    if (Object.hasOwn(busyKeyLabel, operation)) {
+        return busyKeyLabel[operation] ?? null;
+    }
+    if (Object.hasOwn(operationLabel, operation)) {
+        return operationLabel[operation as OperationId] ?? null;
+    }
+    return null;
 }
 
 export const operationStep: Partial<Record<OperationId, string>> = {
@@ -163,6 +196,9 @@ export const operationStep: Partial<Record<OperationId, string>> = {
     provision: 'provision',
     'clear-signing': 'provision',
     archive: 'archive',
+    'upload-archive': 'publish',
+    'upload-google-play': 'publish',
+    'android-run-device': 'run-device',
     release: 'release',
     'clear-release': 'release',
     'usb-rule': 'run-device',

@@ -1,8 +1,14 @@
 // Keyboard movement for a listbox, kept out of the component so it can be tested directly.
 
+import type { MachinePlatform } from '../types/backend';
+
 export interface ListboxOption {
     value: string;
     label: string;
+    /** Consequences or guidance shown below the option name without truncation. */
+    description?: string;
+    /** Platforms represented by this choice, shown with the shared accessible icons. */
+    platforms?: MachinePlatform[];
     disabled?: boolean;
 }
 
