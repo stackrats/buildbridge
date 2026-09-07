@@ -112,14 +112,17 @@ export function useUi() {
                 useMachineOrder().markUsed(route.id);
             }
         },
-        /** Show a machine, optionally on one step; without a step it opens on its focus step. */
+        /**
+         * Show a machine, optionally on one step. A named step opens on the All steps tab;
+         * without one the machine keeps the tab it was on and lands on its focus step, so
+         * clicking between machines and pages never loses the tab a person chose.
+         */
         openMachine(id: string, stepId?: string): void {
             if (stepId) {
                 state.machineSteps[id] = stepId;
                 state.machineSections[id] = 'steps';
             } else {
                 delete state.machineSteps[id];
-                delete state.machineSections[id];
             }
             state.route = { kind: 'machine', id };
             saveSelection(serializeRoute(state.route));
