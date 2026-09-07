@@ -71,7 +71,7 @@ export function developmentIdentityStatus(
 
 /**
  * How a kit gets a kind of signing done: with files it holds, or with a Team key that has
- * BuildBridge create the certificate and profile at Apple when a machine first needs them.
+ * buildbridge create the certificate and profile at Apple when a machine first needs them.
  */
 export type SigningRoute = 'files' | 'team_key';
 

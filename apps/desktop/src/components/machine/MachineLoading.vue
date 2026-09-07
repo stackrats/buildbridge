@@ -13,7 +13,7 @@ defineProps<{ machine?: MachineSummary }>();
                 {{ machine?.config.name ?? 'Machine' }}
             </h1>
             <p class="mt-1 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
-                {{ machine ? providerLabel[machine.config.provider] : 'Loading machine details…' }}
+                {{ machine ? providerLabel[machine.config.provider] : 'Loading machine details' }}
             </p>
         </header>
 

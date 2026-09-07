@@ -34,7 +34,7 @@ pub const USB_UDEV_RULE_PATH: &str = "/etc/udev/rules.d/40-buildbridge-iphone.ru
 /// this host, Linux binds `cdc_ncm` to them, and the interfaces the guest needs are taken by
 /// the wrong machine. Configuration 0 exposes no interfaces at all, so nothing here can bind,
 /// and macOS chooses a configuration itself while enumerating, the way it would over a cable.
-pub const USB_UDEV_RULE: &str = "# Written by BuildBridge; remove this file to restore usbmuxd handling of iPhones.\n\
+pub const USB_UDEV_RULE: &str = "# Written by buildbridge; remove this file to restore usbmuxd handling of iPhones.\n\
 SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ENV{PRODUCT}==\"5ac/12[9a][0-9a-f]/*\", ENV{USBMUX_SUPPORTED}=\"0\", ENV{SYSTEMD_WANTS}=\"\", TAG-=\"systemd\", GROUP=\"plugdev\", MODE=\"0660\"\n";
 /// The character-device major of `/dev/bus/usb`, for the container's device cgroup rule.
 pub const USB_BUS_MAJOR: u32 = 189;
@@ -320,11 +320,11 @@ pub fn host_usb_status(attached: Option<(u8, &str)>) -> HostUsbStatus {
     }
     match rule {
         UdevRuleState::Missing => issues.push(
-            "Install the BuildBridge iPhone rule so usbmuxd releases phones to the machine."
+            "Install the buildbridge iPhone rule so usbmuxd releases phones to the machine."
                 .to_string(),
         ),
         UdevRuleState::Modified => issues.push(
-            "The BuildBridge iPhone rule on this host differs from the expected content; reinstall it."
+            "The buildbridge iPhone rule on this host differs from the expected content; reinstall it."
                 .to_string(),
         ),
         UdevRuleState::Installed => {}

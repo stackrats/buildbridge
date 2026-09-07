@@ -110,7 +110,7 @@ async function remove(): Promise<void> {
                 title="Provisioning failed"
                 :cause="
                     expiredCertificate
-                        ? 'The exported identity has expired. On the Mac that owns the private key, open Keychain Access → login → My Certificates, select the unexpired Distribution identity, confirm it has a private key, and export only that item as a new .p12. Store the new path and password in the signing credentials; profiles and the Team key are kept.'
+                        ? 'The exported identity has expired. On the Mac that owns the private key, open Keychain Access › login › My Certificates, select the unexpired Distribution identity, confirm it has a private key, and export only that item as a new .p12. Store the new path and password in the signing credentials; profiles and the Team key are kept.'
                         : null
                 "
                 :diagnostic="failure.message"
@@ -184,8 +184,9 @@ async function remove(): Promise<void> {
                                                 : ''
                                         }`,
                                 )
-                                .join(', ') || 'none',
-                        mono: true,
+                                .join(', ') || 'None',
+                        mono: signing.profiles.length > 0,
+                        copyable: signing.profiles.length > 0,
                     },
                     { label: 'Keychain', value: signing.keychainPath, mono: true },
                 ]"
@@ -193,7 +194,7 @@ async function remove(): Promise<void> {
         </div>
 
         <template #details>
-            BuildBridge creates a dedicated guest keychain, imports identities as non-extractable,
+            buildbridge creates a dedicated guest keychain, imports identities as non-extractable,
             installs matching profiles, and tests each private key by signing and verifying a
             disposable binary. Passwords travel from the host vault over protected SSH input and
             never appear in arguments or logs.
@@ -206,7 +207,7 @@ async function remove(): Promise<void> {
             @confirm="remove"
         >
             <p>
-                The BuildBridge keychain and the installed profiles are deleted inside this machine.
+                The buildbridge keychain and the installed profiles are deleted inside this machine.
                 The signing credentials in the host vault are kept, so you can provision again at
                 any time.
             </p>

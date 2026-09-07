@@ -2,10 +2,10 @@
 import type { OptimizationTier } from "./OptimizationTier";
 
 /**
- * One tweak from sickcodes/osx-optimizer as BuildBridge can run it: a fixed script for the
+ * One tweak from sickcodes/osx-optimizer as buildbridge can run it: a fixed script for the
  * guest, a check that reports whether it is already in effect, and the caveat the source gives.
  * Admin tweaks run in the guest's own Terminal, where `sudo` reads the password from its TTY;
- * BuildBridge never sees it.
+ * buildbridge never sees it.
  */
 export type GuestOptimization = { id: string, title: string, summary: string, tier: OptimizationTier, 
 /**

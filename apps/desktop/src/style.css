@@ -5,7 +5,7 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /*
- * BuildBridge uses stock Tailwind utilities everywhere — no custom colour classes — so any
+ * buildbridge uses stock Tailwind utilities everywhere — no custom colour classes — so any
  * Tailwind developer can read a template and know exactly what it renders.
  *
  * The palette is fixed by convention rather than by configuration:
@@ -22,8 +22,8 @@
  *   success emerald · warning amber · failure red
  *
  * Actions remain neutral. Status uses emerald, amber and red; active spinners use amber.
- * Platform icons use neutral white/dark ink for Apple and emerald for Android, with distinct shapes
- * and accessible names. Filled buttons keep contrasting spinner colours.
+ * Platform icons use neutral white/dark ink for Apple and one emerald (400) for Android in both
+ * modes, with distinct shapes and accessible names. Filled buttons keep contrasting spinner colours.
  *
  * Standing rules: sentence case, no uppercase styling, no gradients, one glyph per row, and
  * colour never carries meaning on its own.
@@ -54,11 +54,18 @@
         color: var(--color-zinc-900);
         font-size: 14px;
         line-height: 1.5;
+        /* Dark text on a light ground draws heavier stems under subpixel antialiasing than light
+           text on a dark ground does, so the same weight reads bolder in light mode. Grayscale
+           antialiasing evens the two out; dark mode keeps the engine's default. */
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
     }
 
     .dark body {
         background: var(--color-zinc-950);
         color: var(--color-zinc-50);
+        -webkit-font-smoothing: auto;
+        -moz-osx-font-smoothing: auto;
     }
 
     button {

@@ -123,7 +123,7 @@ const strip = computed<Strip>(() => {
                 @click="machines.stop(session.id)"
             >
                 <Spinner v-if="session.operation === 'stop'" />
-                <Square v-else class="h-3.5 w-3.5 text-red-700 dark:text-red-400" />
+                <Square v-else class="h-3.5 w-3.5" />
                 Stop safely
             </Button>
         </template>

@@ -48,24 +48,31 @@ mod guest_access;
 mod machine_lifecycle;
 pub mod machines;
 mod native_mac;
+mod opener;
 mod ops;
 mod optimizations;
 mod project_version;
 mod publishing;
 mod records;
 mod runner;
+mod settings;
 mod sharing;
 #[cfg(test)]
 mod sharing_transport_tests;
 mod signing_kits;
+mod store_builds;
 mod templates;
+mod usage;
 mod usb;
 mod views;
 pub use android_builds::*;
 pub use android_devices::*;
 pub use android_inspector::*;
 pub use apple_profiles::*;
-pub use buildbridge_machines::{AndroidDevice, AndroidDeviceRunResult, AndroidDevices};
+pub use buildbridge_machines::{
+    AndroidDevice, AndroidDeviceRunPhase, AndroidDeviceRunProgress, AndroidDeviceRunResult,
+    AndroidDevices,
+};
 pub use builds::*;
 pub use certificates::*;
 pub use credentials::*;
@@ -75,16 +82,20 @@ pub use google_play::*;
 pub use guest_access::*;
 pub use machine_lifecycle::*;
 pub use native_mac::*;
+pub use opener::*;
 pub use ops::*;
 pub use optimizations::*;
 pub use project_version::*;
 pub use publishing::*;
 pub use records::*;
 pub use runner::*;
+pub use settings::*;
 pub use sharing::*;
 pub use signing_kits::*;
+pub use store_builds::*;
 pub use templates::*;
 use ts_rs::TS;
+pub use usage::*;
 pub use usb::*;
 use views::*;
 
@@ -103,6 +114,7 @@ const USB_ATTACH_PROGRESS_EVENT: &str = "machine-usb-attach-progress";
 const TEMPLATE_PROGRESS_EVENT: &str = "machine-template-progress";
 const ANDROID_BUILD_PROGRESS_EVENT: &str = "machine-android-build-progress";
 const ANDROID_RELEASE_PROGRESS_EVENT: &str = "machine-android-release-progress";
+const ANDROID_DEVICE_RUN_PROGRESS_EVENT: &str = "machine-android-device-progress";
 
 const CREDENTIAL_SERVICE: &str = "dev.buildbridge.desktop";
 /// The vault entry every signing kit lives in. The value predates the second platform and stays
@@ -271,7 +283,7 @@ pub struct StoredSigningKit {
     development_certificate_path: Option<String>,
     #[serde(default)]
     development_certificate_password: Option<String>,
-    /// Apple's serial for the development `.p12` BuildBridge created; derived with OpenSSL for
+    /// Apple's serial for the development `.p12` buildbridge created; derived with OpenSSL for
     /// a hand-supplied file and cached here.
     #[serde(default)]
     development_certificate_serial_number: Option<String>,
@@ -591,6 +603,11 @@ pub struct StoredAppleWorkspace {
     last_sync_file_count: Option<u64>,
     #[ts(type = "number | null")]
     last_sync_bytes: Option<u64>,
+    /// When the snapshot was copied, so a saved snapshot can be told from the folder as it is
+    /// now; `None` on records from before it was kept.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    last_synced_at_epoch_seconds: Option<u64>,
     last_build_succeeded: bool,
     last_xcode_version: Option<String>,
     #[serde(default)]
@@ -705,7 +722,8 @@ pub struct MachineView {
 }
 
 /// What an Android machine carries: the approved project and what was last built from it, the
-/// retained signed release, and the failure kept from the last release attempt.
+/// retained signed release, the failure kept from the last release attempt, and the last run on
+/// a device with its own retained failure.
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
@@ -715,6 +733,10 @@ pub struct AndroidMachineView {
     /// The env set the retained release was built with, if any.
     release_env_set: Option<String>,
     release_error: Option<String>,
+    /// The last run on an Android device, kept until cleared, as the iPhone run is.
+    device_run: Option<StoredAndroidDeviceRun>,
+    /// The last failed device run, retained like `release_error` until cleared.
+    device_run_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -741,6 +763,11 @@ pub struct StoredAndroidWorkspace {
     last_sync_file_count: Option<u64>,
     #[ts(type = "number | null")]
     last_sync_bytes: Option<u64>,
+    /// When the snapshot was copied, so a saved snapshot can be told from the folder as it is
+    /// now; `None` on records from before it was kept.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    last_synced_at_epoch_seconds: Option<u64>,
     last_build_succeeded: bool,
     /// What the last debug build produced and built with; `None` until one succeeds.
     #[serde(default)]
@@ -867,6 +894,9 @@ pub struct PairGuestDeviceInput {
 pub struct RunAppleSmokeBuildInput {
     #[serde(default)]
     target: UnsignedBuildTarget,
+    /// A version to build with, written into the project first; none builds it as synced.
+    #[serde(default)]
+    version: Option<ProjectVersionInput>,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -1403,7 +1433,7 @@ mod tests {
         assert!(rendered.contains("VITE_API_URL=\"https://api.example.com/v1\"\n"));
         assert!(rendered.contains("VITE_PRICE=\"\\$5 and \\`more\\`\"\n"));
         assert!(rendered.contains("VITE_QUOTED='say \"hi\"'\n"));
-        assert!(rendered.starts_with("# Written by BuildBridge"));
+        assert!(rendered.starts_with("# Written by buildbridge"));
     }
 
     #[test]
@@ -1576,9 +1606,9 @@ mod tests {
         assert_eq!(key[0], "genpkey");
         assert!(key.contains(&"rsa_keygen_bits:2048".to_string()));
 
-        let csr = certificate_csr_args("/keys/key.pem", "BuildBridge Distribution");
+        let csr = certificate_csr_args("/keys/key.pem", "buildbridge Distribution");
         assert!(csr.contains(&"-batch".to_string()), "must never prompt");
-        assert!(csr.contains(&"/CN=BuildBridge Distribution".to_string()));
+        assert!(csr.contains(&"/CN=buildbridge Distribution".to_string()));
 
         let p12 = certificate_p12_args(
             "/keys/key.pem",
@@ -1589,7 +1619,7 @@ mod tests {
         assert!(!p12.iter().any(|arg| arg.starts_with("pass:")));
         assert!(
             !p12.contains(&"-out".to_string()),
-            "the .p12 is written owner-only by BuildBridge"
+            "the .p12 is written owner-only by buildbridge"
         );
         for arg in key.iter().chain(csr.iter()).chain(p12.iter()) {
             assert!(!arg.contains(';') && !arg.contains("$("));

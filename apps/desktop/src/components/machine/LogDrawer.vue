@@ -47,9 +47,11 @@ const sources = computed<{ value: LogSource; label: string; count: number }[]>((
         label: android.value ? 'Signed release' : 'Signed archive',
         count: session.archiveLog.length,
     },
-    ...(android.value
-        ? []
-        : [{ value: 'device' as const, label: 'Device console', count: session.deviceLog.length }]),
+    {
+        value: 'device',
+        label: android.value ? 'App log' : 'Device console',
+        count: session.deviceLog.length,
+    },
     { value: 'console', label: 'Machine console', count: consoleLines.value.length },
 ]);
 
@@ -77,7 +79,9 @@ const emptyText = computed(() => {
         case 'archive':
             return 'Output from the signed archive appears here while it runs.';
         case 'device':
-            return 'The app’s console appears here while it runs on the iPhone.';
+            return android.value
+                ? 'The app’s log appears here while it runs on the Android device.'
+                : 'The app’s console appears here while it runs on the iPhone.';
         default:
             return 'Operations started from this desktop and their results are recorded here.';
     }
@@ -85,7 +89,7 @@ const emptyText = computed(() => {
 
 /** Which source a step writes to, so the drawer opens on the lines that matter. */
 function sourceFor(step: string | null): LogSource {
-    if (step === 'sync' || step === 'test-build') {
+    if (step === 'project' || step === 'test-build') {
         return 'build';
     }
     if (step === 'archive' || step === 'release') {
@@ -256,7 +260,7 @@ onBeforeUnmount(() => {
                 >
                 <span
                     v-if="running && elapsed !== null"
-                    class="shrink-0 font-mono text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
+                    class="ml-auto shrink-0 font-mono text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
                     >{{ formatElapsed(elapsed) }}</span
                 >
             </button>
@@ -269,9 +273,10 @@ onBeforeUnmount(() => {
                     @click="source = option.value"
                 >
                     {{ option.label }}
-                    <span class="text-[10px] text-zinc-500 tabular-nums dark:text-zinc-400">{{
-                        option.count
-                    }}</span>
+                    <span
+                        class="inline-block w-[3ch] text-right text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
+                        >{{ option.count }}</span
+                    >
                 </Chip>
             </div>
             <Button
@@ -306,7 +311,9 @@ onBeforeUnmount(() => {
                     {{
                         source === 'device'
                             ? 'The device console keeps the last 600 lines the app printed. Secret values never appear here.'
-                            : 'Build logs keep the last 600 lines the guest printed; the complete Xcode output stays in the guest. Secret values never appear here.'
+                            : android
+                              ? 'Build logs keep the last 600 lines the toolchain printed; the complete Gradle output stays in the container. Secret values never appear here.'
+                              : 'Build logs keep the last 600 lines the guest printed; the complete Xcode output stays in the guest. Secret values never appear here.'
                     }}
                 </p>
             </div>

@@ -155,7 +155,7 @@ pub async fn prepare_apple_device_signing(
         return Err("Complete the unsigned project test build first.".to_string());
     }
     let bundle_identifier = workspace.bundle_identifier.clone().ok_or_else(|| {
-        "BuildBridge could not detect one release bundle identifier. Re-approve the project after setting PRODUCT_BUNDLE_IDENTIFIER in Xcode."
+        "buildbridge could not detect one release bundle identifier. Re-approve the project after setting PRODUCT_BUNDLE_IDENTIFIER in Xcode."
             .to_string()
     })?;
     let current = build_machine_view(app, &paths).await?;
@@ -298,7 +298,7 @@ pub async fn prepare_apple_device_signing(
                 .await?;
                 certificate_created = true;
                 let serial = kit.development_certificate_serial_number.clone().ok_or_else(|| {
-                    "BuildBridge created a development certificate but recorded no serial for it."
+                    "buildbridge created a development certificate but recorded no serial for it."
                         .to_string()
                 })?;
                 apple_api::find_certificate_by_serial(
@@ -477,6 +477,9 @@ pub struct RunAppleDeviceBuildInput {
     pub(crate) udid: String,
     #[serde(default)]
     pub(crate) env_set_id: Option<String>,
+    /// A version to build with, written into the project first; none builds it as synced.
+    #[serde(default)]
+    pub(crate) version: Option<ProjectVersionInput>,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -541,6 +544,7 @@ pub async fn run_apple_device_build(
     if !workspace.last_build_succeeded || workspace.last_snapshot_sha256.is_none() {
         return Err("Complete the unsigned project test build first.".to_string());
     }
+    let requested_version = resolve_apple_project_version(&workspace.local_path, input.version)?;
     let current = build_machine_view(app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let signing = current
@@ -594,6 +598,13 @@ pub async fn run_apple_device_build(
     let known_hosts_path = paths.known_hosts();
     let scheme = workspace.scheme.clone();
     let guard = begin_machine_operation(app, &machine_id, "running_on_device")?;
+    // The project takes the version before the build does, so it is never behind the phone.
+    if let Some(version) = &requested_version
+        && let Err(error) = write_apple_project_version(&workspace.local_path, version)
+    {
+        drop(guard);
+        return Err(error);
+    }
 
     let event_app = app.clone();
     let event_machine_id = machine_id.clone();
@@ -618,6 +629,7 @@ pub async fn run_apple_device_build(
             &device,
             &keychain_password,
             chosen_env.as_ref().map(|(_, files)| files),
+            requested_version.as_ref(),
             |progress: AppleDeviceRunProgress| {
                 emit_machine_progress(
                     &event_app,

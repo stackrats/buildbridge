@@ -268,7 +268,7 @@ mod tests {
         }
         let error = reviewed_ipa_path(&fixture.paths, &fixture.archive, IPA_SHA256).unwrap_err();
         assert!(
-            error.contains("outside BuildBridge's managed directory"),
+            error.contains("outside buildbridge's managed directory"),
             "{error}"
         );
     }
@@ -283,7 +283,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &fixture.archive.ipa.path).unwrap();
         let error = reviewed_ipa_path(&fixture.paths, &fixture.archive, IPA_SHA256).unwrap_err();
         assert!(
-            error.contains("outside BuildBridge's managed directory"),
+            error.contains("outside buildbridge's managed directory"),
             "{error}"
         );
     }

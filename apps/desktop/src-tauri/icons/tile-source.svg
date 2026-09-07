@@ -1,6 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" fill="none">
   <rect width="1254" height="1254" rx="180" fill="#0B0B0B"/>
-  <path d="M514.91,628.98 A90.5,117.5 0 0 1 449,827.5 H343.5 A90,90 0 0 1 253.5,737.5 V401.5 L290.5,364.5 H468 A71.5,113.5 0 0 1 468,591.5 M732.5,790.5 V401.5 L769.5,364.5 H947 A71.5,113.5 0 0 1 947,591.5 M732.5,591.5 H947" stroke="#F4F1EA" stroke-width="53" stroke-linecap="butt" stroke-linejoin="miter" stroke-miterlimit="10"/>
-  <path d="M523.43,604.33 L783.27,823.79" stroke="#0B0B0B" stroke-width="129" stroke-linecap="butt"/>
-  <path d="M253.5,591.5 H468.00 A110,110 0 0 1 538.98,617.46 L762.51,806.26 A90,90 0 0 0 820.58,827.50 H928 A90.5,117.5 0 0 0 928,591.5" stroke="#F4F1EA" stroke-width="53" stroke-linecap="butt" stroke-linejoin="miter" stroke-miterlimit="10"/>
+  <g transform="translate(218,312.39) scale(4.19487)" fill="#F4F1EA">
+    <path d="M0 0 L16 18.4 V128 A6 6 0 0 0 22 134 H59 A9 9 0 0 0 68 125 V96.43 L84 114.83 V125 A25 25 0 0 1 59 150 H22 A22 22 0 0 1 0 128 Z"/>
+    <path d="M0 66 H58.33 A30 30 0 0 1 80.98 76.3 L126.94 129.19 A14 14 0 0 0 137.51 134 H171 A8 8 0 0 0 179 126 V90 A8 8 0 0 0 171 82 H111 V66 H171 A24 24 0 0 1 195 90 V126 A24 24 0 0 1 171 150 H137.51 A30 30 0 0 1 114.86 139.7 L68.9 86.81 A14 14 0 0 0 58.33 82 H0 Z"/>
+    <path d="M111 0 L127 18.4 V118.59 L111 100.19 Z"/>
+  </g>
 </svg>

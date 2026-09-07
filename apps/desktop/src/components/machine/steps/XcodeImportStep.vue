@@ -1,8 +1,8 @@
 <script setup lang="ts">
 // Getting Xcode into the guest. Apple keeps the archive behind an Apple ID sign-in and
-// BuildBridge never handles Apple credentials, so the download is hosted rather than made: a
+// buildbridge never handles Apple credentials, so the download is hosted rather than made: a
 // window of this app opens Apple's page, the person signs in there, the .xip lands in
-// BuildBridge's folder with its size shown here, and the import starts the moment it is
+// buildbridge's folder with its size shown here, and the import starts the moment it is
 // complete. An archive already on this host can still be imported by path.
 import { Download, Upload } from '@lucide/vue';
 import { computed, ref } from 'vue';
@@ -51,7 +51,7 @@ const failure = computed(() =>
             <Button
                 size="sm"
                 :disabled="busy"
-                :title="`Opens Apple's downloads page in a window of BuildBridge, searched for ${recommendation.label}`"
+                :title="`Opens Apple's downloads page in a window of buildbridge, searched for ${recommendation.label}`"
                 @click="machines.downloadXcode(session.id, recommendation.query)"
             >
                 <Download class="h-3.5 w-3.5" />
@@ -90,7 +90,7 @@ const failure = computed(() =>
                 </span>
                 <Button size="sm" @click="machines.importXcode(session.id, download.path)">
                     <Upload class="h-3.5 w-3.5" />
-                    Import it
+                    Import
                 </Button>
             </div>
             <FailureBlock
@@ -103,10 +103,10 @@ const failure = computed(() =>
 
         <div class="space-y-3">
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                Apple keeps Xcode behind an Apple ID sign-in, and BuildBridge never sees that
+                Apple keeps Xcode behind an Apple ID sign-in, and buildbridge never sees that
                 sign-in. The button opens Apple's downloads page in a window of this app, searched
                 for the right version; sign in there, choose the Universal
-                <span class="font-mono">.xip</span>, and the download lands in BuildBridge's own
+                <span class="font-mono">.xip</span>, and the download lands in buildbridge's own
                 folder with its progress shown here. The import starts by itself when it is
                 complete: the archive is streamed through the pinned SSH bridge and macOS verifies
                 and expands Apple's signature.

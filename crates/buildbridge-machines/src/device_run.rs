@@ -859,11 +859,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::{
     APPLE_BUILD_DIAGNOSTIC_LINES, APPLE_BUILD_OUTPUT_TAIL_LINES, AppleArchiveProgress,
-    GuestEnvFiles, ProvisioningProfileSummary, SIGNING_KEYCHAIN_NAME,
-    apple_archive_signing_xcconfig, apple_build_log_is_diagnostic, build_setting_value,
-    profile_allows_bundle, rebuild_web_assets_with_env, run_guest_command, sanitize_build_log_line,
-    stream_bytes_to_guest, valid_apple_scheme, valid_release_value, validate_signing_target,
-    write_secret_frame,
+    GuestEnvFiles, ProjectVersion, ProvisioningProfileSummary, SIGNING_KEYCHAIN_NAME,
+    apple_archive_signing_xcconfig, apple_build_log_is_diagnostic, apple_version_xcconfig,
+    build_setting_value, profile_allows_bundle, rebuild_web_assets_with_env, run_guest_command,
+    sanitize_build_log_line, stream_bytes_to_guest, valid_apple_scheme, valid_release_value,
+    validate_apple_version, validate_signing_target, write_secret_frame,
 };
 
 const DEVICE_RUN_JOB: &str = "apple-device-run";
@@ -1521,6 +1521,7 @@ pub fn run_apple_device_build<F>(
     device: &GuestDevice,
     keychain_password: &str,
     env: Option<&GuestEnvFiles>,
+    version: Option<&ProjectVersion>,
     mut on_progress: F,
 ) -> Result<AppleDeviceRunResult, ProviderError>
 where
@@ -1528,6 +1529,9 @@ where
 {
     validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
     validate_signing_target(signing.development_team, signing.bundle_identifier)?;
+    if let Some(version) = version {
+        validate_apple_version(version).map_err(ProviderError::GuestBridge)?;
+    }
     // Set while the target is resolved; a reattached run does not resolve it again.
     let mut project_bundle_identifier: Option<String> = None;
     if !valid_apple_scheme(scheme) {
@@ -1685,7 +1689,7 @@ where
             target.bundle_identifier = signed_as;
             project_bundle_identifier = project_identifier;
 
-            let xcconfig = device_signing_xcconfig(
+            let mut xcconfig = device_signing_xcconfig(
                 &target.target,
                 signing.development_team,
                 signing.identity_sha1,
@@ -1694,6 +1698,18 @@ where
                     .as_deref()
                     .map(|_| target.bundle_identifier.as_str()),
             );
+            // The requested version rides in the same settings file as the signing, the way
+            // the archive carries it; the built app is checked against it below.
+            if let Some(version) = version {
+                xcconfig.push_str(&apple_version_xcconfig(version));
+                let note = format!("Building as version {}.", version.display());
+                on_progress(device_progress(
+                    AppleDeviceRunPhase::ResolvingTarget,
+                    started_at,
+                    &note,
+                    vec![note.clone()],
+                ));
+            }
             install_signing_helper(
                 ssh_port,
                 username,
@@ -1754,6 +1770,17 @@ where
                 return Err(ProviderError::GuestBridge(format!(
                     "the built app carries bundle identifier {}, not {}",
                     inspection.bundle_identifier, target.bundle_identifier
+                )));
+            }
+            if let Some(version) = version
+                && (inspection.marketing_version != version.version
+                    || inspection.build_number != version.build)
+            {
+                return Err(ProviderError::GuestBridge(format!(
+                    "the built app reports version {} ({}), not the requested {}; the app's Info.plist must take CFBundleShortVersionString from MARKETING_VERSION and CFBundleVersion from CURRENT_PROJECT_VERSION for a version set here to reach it",
+                    inspection.marketing_version,
+                    inspection.build_number,
+                    version.display()
                 )));
             }
 

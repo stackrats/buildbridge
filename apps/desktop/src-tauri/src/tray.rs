@@ -128,15 +128,15 @@ fn menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     }
 
     let refresh = MenuItemBuilder::with_id("refresh", "Refresh machine status").build(app)?;
-    let open = MenuItemBuilder::with_id("open", "Open BuildBridge").build(app)?;
+    let open = MenuItemBuilder::with_id("open", "Open buildbridge").build(app)?;
     let stop_all_and_quit = MenuItemBuilder::with_id(
         "stop-all-and-quit",
-        "Stop all machines and quit BuildBridge",
+        "Stop all machines and quit buildbridge",
     )
     .enabled(any_live)
     .build(app)?;
     let quit =
-        MenuItemBuilder::with_id("quit", "Quit BuildBridge (keep machines running)").build(app)?;
+        MenuItemBuilder::with_id("quit", "Quit buildbridge (keep machines running)").build(app)?;
 
     builder
         .item(&refresh)
@@ -173,8 +173,8 @@ fn tooltip(app: &AppHandle) -> String {
     let running = states.iter().filter(|entry| is_live(entry.state)).count();
 
     match states.len() {
-        0 => "BuildBridge — no machines".to_string(),
-        total => format!("BuildBridge — {running} of {total} machines running"),
+        0 => "buildbridge — no machines".to_string(),
+        total => format!("buildbridge — {running} of {total} machines running"),
     }
 }
 

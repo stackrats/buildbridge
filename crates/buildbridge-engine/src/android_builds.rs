@@ -110,6 +110,7 @@ pub(crate) async fn sync_android_workspace_with_env(
     workspace.last_snapshot_sha256 = Some(sync.snapshot_sha256.clone());
     workspace.last_sync_file_count = Some(sync.source_file_count);
     workspace.last_sync_bytes = Some(sync.source_bytes);
+    workspace.last_synced_at_epoch_seconds = Some(crate::machines::now_epoch_seconds());
     workspace.last_build_succeeded = false;
     workspace.last_build = None;
     workspace.last_source = Some(source);
@@ -123,10 +124,13 @@ pub(crate) async fn sync_android_workspace_with_env(
 /// The debug build: the Android counterpart of the unsigned test build. The first run also
 /// prepares the toolchain, which is where its download shows its progress. `allow_http` applies
 /// only to this APK; neither the workspace nor a subsequent release inherits the override.
+/// The debug build. A requested version is written into the project on the host and into
+/// the synced copy in the container first, so the project and the APK say the same thing.
 pub async fn run_android_debug_build(
     app: &Engine,
     machine_id: String,
     allow_http: bool,
+    version: Option<ProjectVersionInput>,
 ) -> Result<RunAndroidBuildResult, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     ensure_android_machine(app, &machine_id)?;
@@ -136,12 +140,21 @@ pub async fn run_android_debug_build(
     if workspace.last_snapshot_sha256.is_none() {
         return Err("Synchronize the approved project before running a debug build.".to_string());
     }
+    let requested_version = resolve_android_project_version(&workspace.local_path, version)?;
     let current = build_machine_view(app, &paths).await?;
     ensure_android_container_ready(&current)?;
     // Hold the operation lock before removing the previous APK so an in-flight device
     // installation can finish reading it. A new debug build replaces this retained output.
     remove_android_debug_outputs(&paths)?;
     let output_directory = prepare_android_debug_output_dir(&paths)?;
+    // The project takes the version before the build does, so it is never behind an APK.
+    if let Some(version) = &requested_version
+        && let Err(error) = write_android_project_version(&workspace.local_path, version)
+    {
+        drop(guard);
+        let _ = fs::remove_dir(&output_directory);
+        return Err(error);
+    }
     workspace.last_build_succeeded = false;
     workspace.last_build = None;
     if let Err(error) = save_android_workspace(&paths, &workspace) {
@@ -162,6 +175,7 @@ pub async fn run_android_debug_build(
             &container_name,
             &operation_output_directory,
             allow_http,
+            requested_version.as_ref(),
             |progress: AndroidBuildProgress| {
                 emit_machine_progress(
                     &event_app,
@@ -306,22 +320,6 @@ pub async fn reveal_android_debug_apk(app: &Engine, machine_id: String) -> Resul
     reveal_directory(&directory, "the debug APK")
 }
 
-pub(crate) fn reveal_directory(directory: &std::path::Path, what: &str) -> Result<(), String> {
-    let mut command = if cfg!(target_os = "macos") {
-        Command::new("open")
-    } else if cfg!(target_os = "windows") {
-        Command::new("explorer")
-    } else {
-        Command::new("xdg-open")
-    };
-    command
-        .arg(directory)
-        .spawn()
-        .map_err(|error| format!("Could not reveal {what}: {error}"))?;
-
-    Ok(())
-}
-
 pub async fn reveal_android_release(app: &Engine, machine_id: String) -> Result<(), String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     let stored = load_android_release(&paths)?
@@ -411,7 +409,7 @@ mod operation_tests {
             let errors = [
                 clear_android_workspace(&app, id.clone()).await.unwrap_err(),
                 clear_android_release(&app, id.clone()).await.unwrap_err(),
-                run_android_debug_build(&app, id.clone(), false)
+                run_android_debug_build(&app, id.clone(), false, None)
                     .await
                     .unwrap_err(),
                 run_android_signed_release(&app, id.clone(), None, None, None)

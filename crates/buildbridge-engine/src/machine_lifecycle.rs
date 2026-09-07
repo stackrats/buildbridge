@@ -50,7 +50,7 @@ pub async fn create_machine(
     let mut registry = machines::load_registry(app)?;
     if registry.machines.len() >= machines::MAX_MACHINES {
         return Err(format!(
-            "BuildBridge manages at most {} machines on one host.",
+            "buildbridge manages at most {} machines on one host.",
             machines::MAX_MACHINES
         ));
     }
@@ -178,6 +178,7 @@ pub async fn discard_machine_container(
         workspace.last_snapshot_sha256 = None;
         workspace.last_sync_file_count = None;
         workspace.last_sync_bytes = None;
+        workspace.last_synced_at_epoch_seconds = None;
         workspace.last_build_succeeded = false;
         workspace.last_build = None;
         save_android_workspace(&paths, &workspace)?;

@@ -1,4 +1,6 @@
 //! Host ADB previews from the machine's reviewed, retained APK; no running container needed.
+//! The app's log streams back the way the iPhone console does, and the run is kept until
+//! cleared.
 
 use super::*;
 
@@ -19,6 +21,28 @@ pub struct AndroidDeviceRunInput {
     pub expected_sha256: String,
 }
 
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct RunAndroidDeviceResult {
+    pub(crate) view: MachineView,
+    pub(crate) run: AndroidDeviceRunResult,
+}
+
+/// The last run on an Android device, kept beside the machine until cleared: which retained
+/// APK went, what it was, and how its log session ended.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredAndroidDeviceRun {
+    pub(crate) kind: AndroidDeviceBuildKind,
+    pub(crate) version_name: String,
+    pub(crate) version_code: String,
+    pub(crate) result: AndroidDeviceRunResult,
+    #[ts(type = "number")]
+    pub(crate) finished_at_epoch_seconds: u64,
+}
+
 /// What host ADB sees. The listing reads nothing of the machine's and changes nothing, so it
 /// takes no machine operation: the device list refreshes while a build runs, and a slow
 /// `adb devices` never holds a build up. Installing does claim the machine, below.
@@ -32,33 +56,130 @@ pub async fn list_android_devices(
         .map_err(|error| error.to_string())?
 }
 
+/// Installs and launches the retained APK on one host ADB device, then streams the app's log
+/// until the session ends. A Stop while the app runs is the normal end and the run is retained;
+/// a failure before launch is kept as the step's diagnostic, as the iPhone run's is.
 pub async fn run_android_device(
     app: &Engine,
     machine_id: String,
     input: AndroidDeviceRunInput,
-) -> Result<AndroidDeviceRunResult, String> {
+) -> Result<RunAndroidDeviceResult, String> {
     ensure_android_device_machine(app, &machine_id)?;
     let paths = MachinePaths::resolve(app, &machine_id)?;
-    run_machine_operation(app, &machine_id, "running_android_device", move || {
+    remove_android_device_run_error(&paths)?;
+    let kind = input.kind;
+    let guard = begin_machine_operation(app, &machine_id, "running_android_device")?;
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
+    let event_app = app.clone();
+    let event_machine_id = machine_id.clone();
+    let record_paths = paths.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        let _operation = buildbridge_machines::enter_operation(scope);
         // Read the record after claiming the machine; every hash/path comes from that record.
-        let (application_id, artifact) = match input.kind {
+        let (application_id, artifact, version_name, version_code) = match input.kind {
             AndroidDeviceBuildKind::Debug => {
-                let build = load_android_workspace(&paths)?.and_then(|workspace| workspace.last_build)
+                let build = load_android_workspace(&record_paths)?.and_then(|workspace| workspace.last_build)
                     .ok_or_else(|| "Build and retain a debug APK before running it on a device.".to_string())?;
-                (build.application_id, build.apk.ok_or_else(|| "No debug APK is retained. Run a new debug build.".to_string())?)
+                let apk = build.apk.ok_or_else(|| "No debug APK is retained. Run a new debug build.".to_string())?;
+                (build.application_id, apk, build.version_name, build.version_code)
             }
             AndroidDeviceBuildKind::Release => {
-                let release = load_android_release(&paths)?
+                let release = load_android_release(&record_paths)?
                     .ok_or_else(|| "Build and retain a release APK before running it on a device.".to_string())?.result;
-                (release.application_id, release.apk.ok_or_else(|| "This release contains only an app bundle. Build a release APK to run it on a device.".to_string())?)
+                let apk = release.apk.ok_or_else(|| "This release contains only an app bundle. Build a release APK to run it on a device.".to_string())?;
+                (release.application_id, apk, release.version_name, release.version_code)
             }
         };
-        let apk = reviewed_android_apk_path(&paths, &artifact, input.kind, &input.expected_sha256)?;
+        let apk = reviewed_android_apk_path(&record_paths, &artifact, input.kind, &input.expected_sha256)?;
         verify_android_apk(&apk, artifact.bytes, &input.expected_sha256)?;
-        buildbridge_machines::run_host_android_device(
-            &input.serial, &application_id, &apk, &input.expected_sha256,
-        )
-    }).await
+        let run = buildbridge_machines::run_host_android_device(
+            &input.serial,
+            &application_id,
+            &apk,
+            &input.expected_sha256,
+            |progress| {
+                emit_machine_progress(
+                    &event_app,
+                    ANDROID_DEVICE_RUN_PROGRESS_EVENT,
+                    &event_machine_id,
+                    progress,
+                );
+            },
+        )?;
+        Ok((run, version_name, version_code))
+    })
+    .await
+    .map_err(|error| error.to_string());
+    drop(guard);
+    let (run, version_name, version_code) = match finish_operation(&cancel_probe, joined) {
+        Ok(value) => value,
+        Err(error) => {
+            if error != CANCELLED_MESSAGE {
+                let _ = save_android_device_run_error(&paths, &error);
+            }
+            return Err(error);
+        }
+    };
+    save_android_device_run(
+        &paths,
+        &StoredAndroidDeviceRun {
+            kind,
+            version_name,
+            version_code,
+            result: run.clone(),
+            finished_at_epoch_seconds: machines::now_epoch_seconds(),
+        },
+    )?;
+    let view = build_machine_view(app, &paths).await?;
+
+    Ok(RunAndroidDeviceResult { view, run })
+}
+
+pub async fn clear_android_device_run(
+    app: &Engine,
+    machine_id: String,
+) -> Result<MachineView, String> {
+    ensure_android_device_machine(app, &machine_id)?;
+    let paths = MachinePaths::resolve(app, &machine_id)?;
+    remove_file_if_present(&paths.android_device_run_record())?;
+    remove_android_device_run_error(&paths)?;
+
+    build_machine_view(app, &paths).await
+}
+
+pub(crate) fn load_android_device_run(
+    paths: &MachinePaths,
+) -> Result<Option<StoredAndroidDeviceRun>, String> {
+    match fs::read(paths.android_device_run_record()) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| format!("The Android device run record is invalid: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn save_android_device_run(
+    paths: &MachinePaths,
+    run: &StoredAndroidDeviceRun,
+) -> Result<(), String> {
+    let encoded = serde_json::to_vec_pretty(run).map_err(|error| error.to_string())?;
+
+    write_restricted_file(&paths.android_device_run_record(), &encoded)
+}
+
+fn save_android_device_run_error(paths: &MachinePaths, error: &str) -> Result<(), String> {
+    let error = error
+        .chars()
+        .filter(|character| !character.is_control() || *character == '\n')
+        .take(8_000)
+        .collect::<String>();
+    write_restricted_file(&paths.android_device_run_error(), error.as_bytes())
+}
+
+fn remove_android_device_run_error(paths: &MachinePaths) -> Result<(), String> {
+    remove_file_if_present(&paths.android_device_run_error())
 }
 
 fn ensure_android_device_machine(app: &Engine, machine_id: &str) -> Result<(), String> {
@@ -248,7 +369,7 @@ mod tests {
                 SHA256
             )
             .unwrap_err()
-            .contains("outside BuildBridge")
+            .contains("outside buildbridge")
         );
 
         let directory = fixture.paths.artifacts_dir().join("debug-test");
@@ -282,6 +403,6 @@ mod tests {
             SHA256,
         )
         .unwrap_err();
-        assert!(error.contains("outside BuildBridge"), "{error}");
+        assert!(error.contains("outside buildbridge"), "{error}");
     }
 }

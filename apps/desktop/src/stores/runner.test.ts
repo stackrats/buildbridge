@@ -1,13 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
-import type { DesktopStatus, RunOnceResult } from '../types/backend';
+import type { DesktopStatus, RealtimeConfiguration, RunOnceResult } from '../types/backend';
 
 const backend = vi.hoisted(() => ({
     getRunnerStatus: vi.fn<() => Promise<DesktopStatus>>(),
     runOnce: vi.fn<() => Promise<RunOnceResult>>(),
+    onRunnerActivity: vi.fn<() => Promise<() => void>>(),
+    getRealtimeConfiguration: vi.fn<() => Promise<RealtimeConfiguration>>(),
 }));
 vi.mock('../lib/backend', () => ({ useBackend: () => backend }));
-vi.mock('pusher-js', () => ({ default: vi.fn() }));
+// Enough of a Pusher for the store to bind its handlers to; the socket itself is not the
+// subject of these tests, only whether the store opens one at all.
+vi.mock('pusher-js', () => ({
+    default: class {
+        connection = { bind: vi.fn() };
+        subscribe = () => ({ bind: vi.fn() });
+        disconnect = vi.fn();
+    },
+}));
 
 function status(paired: boolean): DesktopStatus {
     return {
@@ -97,5 +107,43 @@ describe('runner claim loop', () => {
         await store.checkForWork();
         expect(backend.runOnce).not.toHaveBeenCalled();
         expect(store.state.checking).toBe(false);
+    });
+});
+
+describe('a host with remote builds off', () => {
+    beforeEach(() => {
+        vi.resetModules();
+        vi.resetAllMocks();
+    });
+
+    async function initialize(remoteBuilds: boolean) {
+        backend.getRunnerStatus.mockResolvedValue(status(true));
+        backend.onRunnerActivity.mockResolvedValue(() => {});
+        backend.getRealtimeConfiguration.mockResolvedValue({
+            key: 'key',
+            host: 'realtime.example.test',
+            port: 443,
+            scheme: 'https',
+            channel: 'private-runner.1',
+        });
+        const { useRunnerStore } = await import('./runner');
+        const store = useRunnerStore();
+        await store.initialize(remoteBuilds);
+        return store;
+    }
+
+    it('reads the local status but reaches no control plane, even while paired', async () => {
+        const store = await initialize(false);
+        // The platform is why the status is still read: the rest of the window needs it.
+        expect(store.state.status?.platform).toBe('linux');
+        expect(backend.onRunnerActivity).not.toHaveBeenCalled();
+        expect(backend.getRealtimeConfiguration).not.toHaveBeenCalled();
+        expect(store.state.realtime).toBe('disconnected');
+    });
+
+    it('subscribes and connects once the host turns them on', async () => {
+        await initialize(true);
+        expect(backend.onRunnerActivity).toHaveBeenCalledTimes(1);
+        expect(backend.getRealtimeConfiguration).toHaveBeenCalledTimes(1);
     });
 });

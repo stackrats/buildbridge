@@ -214,18 +214,26 @@ function disconnectRealtime(): void {
 export function useRunnerStore() {
     return {
         state,
-        async initialize(): Promise<void> {
-            activityUnlisten ??= await useBackend().onRunnerActivity((result) => {
-                if (result.state === 'completed' || result.state === 'failed') {
-                    log(
-                        result.state === 'completed' ? 'success' : 'danger',
-                        result.message,
-                        result.buildId,
-                    );
-                }
-            });
+        /**
+         * `remoteBuilds` is this host's setting. The status is read either way, because it is
+         * a local answer this window needs regardless — it names the host's platform, which
+         * decides whether there is a Mac to build on. What the setting gates is everything
+         * that reaches a control plane: the activity feed and the realtime connection.
+         */
+        async initialize(remoteBuilds: boolean): Promise<void> {
+            if (remoteBuilds) {
+                activityUnlisten ??= await useBackend().onRunnerActivity((result) => {
+                    if (result.state === 'completed' || result.state === 'failed') {
+                        log(
+                            result.state === 'completed' ? 'success' : 'danger',
+                            result.message,
+                            result.buildId,
+                        );
+                    }
+                });
+            }
             await refreshStatus();
-            if (isPaired()) {
+            if (remoteBuilds && isPaired()) {
                 await connectRealtime();
             }
         },

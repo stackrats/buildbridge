@@ -1,11 +1,20 @@
 <script setup lang="ts">
-import { FolderOpen, Package, ScrollText, FileCheck } from '@lucide/vue';
+import {
+    FolderOpen,
+    Package,
+    ScrollText,
+    FileCheck,
+    Variable,
+    ArrowRight,
+    KeyRound,
+} from '@lucide/vue';
 import { computed, onMounted, ref, watch } from 'vue';
 
 import { formatBytes, percent, shortHash } from '../../../lib/format';
-import { requestedVersion } from '../../../model/build-flow';
+import { requestedVersion, type BuildRequest } from '../../../model/build-flow';
 import type { JourneyStep } from '../../../model/steps';
 import { archivePhaseLabel } from '../../../model/phases';
+import { describeSnapshot } from '../../../model/snapshot';
 import { useBuildFlowStore } from '../../../stores/build-flow';
 import { useEnvSetsStore } from '../../../stores/envs';
 import { useMachinesStore, type MachineSession } from '../../../stores/machines';
@@ -16,6 +25,7 @@ import Callout from '../../ui/Callout.vue';
 import ConfirmDialog from '../../dialogs/ConfirmDialog.vue';
 import CopyButton from '../../ui/CopyButton.vue';
 import FailureBlock from '../../ui/FailureBlock.vue';
+import Field from '../../ui/Field.vue';
 import KeyValue from '../../ui/KeyValue.vue';
 import ProgressRow from '../../ui/ProgressRow.vue';
 import Spinner from '../../ui/Spinner.vue';
@@ -30,14 +40,23 @@ const view = computed(() => session.view!);
 const workspace = computed(() => view.value.appleWorkspace);
 const signing = computed(() => view.value.signing);
 const archive = computed(() => view.value.archive);
-const busy = computed(() => session.operation !== null);
+const flows = useBuildFlowStore();
+const busy = computed(() => session.operation !== null || flows.active(session.id));
 const archiving = computed(() => step.status === 'running');
 const progress = computed(() => session.archive);
 const lastLine = computed(() => session.archiveLog.at(-1)?.text ?? null);
 const clearOpen = ref(false);
+const snapshotSummary = computed(() => describeSnapshot(view.value));
 const blocked = computed(() => workspace.value?.lastNativeLockUpdated ?? false);
-// The version fields below share the machine's build draft with the guided build page.
-const draft = useBuildFlowStore().draft(session.id);
+// The source and version choices live in the machine's build draft, shared with the other
+// build steps.
+const draft = flows.draft(session.id);
+const source = computed<BuildRequest['source']>({
+    get: () => draft.source,
+    set: (value) => {
+        draft.source = value;
+    },
+});
 
 // The env is chosen per archive: the web assets are rebuilt inside the guest with it before
 // archiving, so staging and production archives come from one synced snapshot. Defaults to
@@ -61,17 +80,41 @@ const envOptions = computed(() => [
     ...envs.sets.value.map((set) => ({
         value: set.id,
         label: set.name,
-        description:
-            set.id === attachedEnvSet.value?.id
-                ? 'Rebuild web assets · machine default'
-                : 'Rebuild web assets with this environment',
+        description: 'Rebuild web assets with this environment',
     })),
 ]);
 const chosenEnvName = computed(() => envs.setById(envSetId.value)?.name ?? null);
 
+// The latest source goes through the guide, copy, test build, then archive, pausing for any
+// decision on the way; the saved snapshot is archived as it is.
+function build(): void {
+    if (busy.value) return;
+    if (source.value === 'latest') {
+        void flows.start(
+            session.id,
+            {
+                source: 'latest',
+                outcome: 'release',
+                target: 'device_sdk',
+                envSetId: envSetId.value || null,
+                androidOutputs: draft.androidOutputs,
+                androidAllowHttp: draft.androidAllowHttp,
+                version: draft.version ?? null,
+            },
+            chosenEnvName.value,
+        );
+        return;
+    }
+    void machines.signedArchive(
+        session.id,
+        envSetId.value || null,
+        requestedVersion(view.value, draft),
+    );
+}
+
 const recipe = computed(() => [
     { label: 'Scheme', value: workspace.value?.scheme ?? 'App' },
-    { label: 'Configuration', value: 'Release' },
+    { label: 'Configuration', value: 'Release', copyable: false },
     { label: 'Export', value: 'App Store Connect · manual signing · app target only' },
     { label: 'Bundle identifier', value: workspace.value?.bundleIdentifier, mono: true },
     {
@@ -106,39 +149,32 @@ async function clear(): Promise<void> {
 <template>
     <StepPanel :step="step">
         <template #action>
-            <span
-                v-if="envs.sets.value.length"
-                class="w-56 max-w-full"
-                v-tip="
-                    'The environment the web assets are rebuilt with for this archive; the one attached at the sync step is the default'
-                "
-            >
-                <Select
-                    v-model="envSetId"
-                    :options="envOptions"
-                    size="sm"
-                    placeholder="Use prepared assets"
-                    :disabled="busy"
-                />
-            </span>
             <Button
                 size="sm"
-                :disabled="busy || blocked || step.status === 'pending'"
-                @click="
-                    machines.signedArchive(
-                        session.id,
-                        envSetId || null,
-                        requestedVersion(view, draft),
-                    )
+                :disabled="
+                    busy ||
+                    blocked ||
+                    step.status === 'pending' ||
+                    (source === 'snapshot' && !workspace?.lastSnapshotSha256)
                 "
+                :title="
+                    source === 'latest'
+                        ? 'Copies the latest local source, runs the test build, then archives and exports'
+                        : 'Archives and exports the saved snapshot as it is'
+                "
+                @click="build"
             >
                 <Spinner
-                    v-if="session.operation === 'archive'"
+                    v-if="session.operation === 'archive' || flows.active(session.id)"
                     tone="text-white dark:text-zinc-950"
                 />
                 <Package v-else class="h-3.5 w-3.5" />
                 {{
-                    archive ? 'Build the signed archive again' : 'Build the signed archive and IPA'
+                    source === 'latest'
+                        ? 'Build and sign the latest source'
+                        : archive
+                          ? 'Build the signed archive again'
+                          : 'Build the signed archive and IPA'
                 }}
             </Button>
             <Button
@@ -177,10 +213,10 @@ async function clear(): Promise<void> {
             #status
         >
             <ProgressRow
+                v-if="archiving"
                 stoppable
                 :stopping="session.cancelling"
                 @stop="machines.cancelOperation(session.id)"
-                v-if="archiving"
                 :label="progress ? archivePhaseLabel[progress.phase] : 'Preparing'"
                 :detail="progress?.detail"
                 :elapsed-seconds="progress?.elapsedSeconds ?? null"
@@ -189,7 +225,7 @@ async function clear(): Promise<void> {
             />
             <FailureBlock
                 v-if="view.archiveError && !archiving"
-                title="The last signed build failed"
+                title="The last signed archive failed"
                 cause="The diagnostic is kept until the artifacts are cleared. Fix the cause, then build the signed archive again."
                 :diagnostic="view.archiveError"
             >
@@ -271,30 +307,95 @@ async function clear(): Promise<void> {
                         {{ artifact.file.path }}
                     </span>
                     <span
-                        class="shrink-0 font-mono text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
+                        class="w-[4.5rem] shrink-0 text-right font-mono text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
                     >
                         {{ formatBytes(artifact.file.bytes) }}
                     </span>
-                    <CopyButton :text="artifact.file.path" label="Copy path" />
+                    <CopyButton
+                        :text="artifact.file.path"
+                        :what="`Copy the ${artifact.label} path`"
+                        size="iconXs"
+                    />
                 </li>
             </ul>
             <p class="mt-2 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
                 {{ archive.marketingVersion }} ({{ archive.buildNumber }}) ·
                 {{ archive.bundleIdentifier }} · profile
-                {{ shortHash(archive.provisioningProfileUuid, 8) }} · environment
-                {{ view.archiveEnvSet ?? 'prepared assets (environment not recorded)' }} · sha256
-                {{ shortHash(archive.ipa.sha256, 12) }}
+                {{ shortHash(archive.provisioningProfileUuid, 8) }} ·
+                <span class="inline-flex items-center gap-1" v-tip="'Environment'">
+                    <Variable class="h-3 w-3 shrink-0" aria-hidden="true" />
+                    <span class="sr-only">environment</span
+                    >{{ view.archiveEnvSet ?? 'prepared assets (environment not recorded)' }}
+                </span>
+                · sha256 {{ shortHash(archive.ipa.sha256, 12) }}
             </p>
         </template>
 
         <div class="space-y-3">
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                Creates a signed IPA and Xcode archive from the synchronized source and saves both
-                on this host. Nothing is uploaded to Apple. To include project changes, synchronize
-                and run the test build first.
+                Creates a signed IPA and Xcode archive and saves both on this host. Nothing is
+                uploaded to Apple. The latest local source is copied and test-built first; the saved
+                snapshot is built and signed as it is.
             </p>
+            <div class="grid gap-4 sm:grid-cols-2">
+                <Field
+                    label="Source"
+                    :hint="
+                        source === 'latest'
+                            ? 'Copies the current files from the approved folder, runs the test build, then archives and exports.'
+                            : `The saved snapshot is built and signed as it is: ${snapshotSummary}. New local edits are not included.`
+                    "
+                >
+                    <Select
+                        v-model="source"
+                        :disabled="busy"
+                        :options="[
+                            { value: 'latest', label: 'Latest local source' },
+                            {
+                                value: 'snapshot',
+                                label: 'Saved snapshot',
+                                description: snapshotSummary ?? undefined,
+                                disabled: !workspace?.lastSnapshotSha256,
+                            },
+                        ]"
+                    />
+                </Field>
+                <Field
+                    v-if="envs.sets.value.length"
+                    label="Environment"
+                    :hint="
+                        chosenEnvName
+                            ? 'The web assets are rebuilt with this environment before archiving.'
+                            : 'Keeps the web assets from the most recent build, including their environment values.'
+                    "
+                >
+                    <Select
+                        v-model="envSetId"
+                        :options="envOptions"
+                        placeholder="Use prepared assets"
+                        :disabled="busy"
+                    />
+                </Field>
+            </div>
             <KeyValue :items="recipe" :columns="3" />
-            <VersionFields :session="session" :disabled="busy" />
+            <p class="flex flex-wrap items-center gap-1.5 text-xs">
+                <KeyRound
+                    class="h-3.5 w-3.5 shrink-0 text-zinc-500 dark:text-zinc-400"
+                    aria-hidden="true"
+                />
+                <span class="sr-only">Signing credentials</span>
+                <span v-tip="'Signing credentials'">{{
+                    view.signingKit?.name ?? 'Choose before signing'
+                }}</span>
+                <Button variant="ghost" size="sm" @click="ui.selectStep(session.id, 'signing-kit')"
+                    >{{
+                        view.signingKit
+                            ? 'Review signing credentials'
+                            : 'Choose signing credentials'
+                    }}<ArrowRight class="h-3.5 w-3.5"
+                /></Button>
+            </p>
+            <VersionFields :session="session" :disabled="busy" store-check />
         </div>
 
         <template #details>

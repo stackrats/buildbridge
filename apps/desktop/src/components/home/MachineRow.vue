@@ -1,7 +1,9 @@
 <script setup lang="ts">
 // One machine on the overview: its state, the whole journey as a strip, and the next thing
-// to do as the button. Drawn from the same step model as the machine page.
-import { ArrowRight, Play } from '@lucide/vue';
+// to do as the button. Drawn from the same step model as the machine page. On the facts line
+// the project, the signing credentials and the environment are named by the sidebar's glyphs
+// rather than by a word each, so the line reads as facts, not sentences.
+import { ArrowRight, Folder, KeyRound, Play, Variable } from '@lucide/vue';
 import { computed } from 'vue';
 
 import { machineStateBadge, machineStateLabel } from '../../lib/status';
@@ -14,6 +16,7 @@ import type { MachineSummary } from '../../types/backend';
 import Badge from '../ui/Badge.vue';
 import Button from '../ui/Button.vue';
 import JourneyStrip from '../ui/JourneyStrip.vue';
+import MachineUsage from '../machine/MachineUsage.vue';
 import PlatformIcon from '../ui/PlatformIcon.vue';
 import Spinner from '../ui/Spinner.vue';
 
@@ -42,7 +45,7 @@ const canStart = computed(
         (machine.state === 'missing' || machine.state === 'exited' || machine.state === 'created'),
 );
 
-/** What the row says is next, and whether the person or BuildBridge does it. */
+/** What the row says is next, and whether the person or buildbridge does it. */
 const next = computed(() => {
     if (machine.busyOperation) {
         return {
@@ -60,7 +63,7 @@ const next = computed(() => {
               }
             : { title: journeyHeadline(steps.value), note: '' };
     }
-    const owner = focus.value.kind === 'automatic' ? 'BuildBridge does this' : 'you do this';
+    const owner = focus.value.kind === 'automatic' ? 'buildbridge does this' : 'you do this';
     return {
         title: focus.value.title,
         note:
@@ -127,7 +130,7 @@ async function startAndOpen(): Promise<void> {
                         <span class="min-w-0 wrap-anywhere">{{ machine.config.name }}</span>
                     </h3>
                     <Badge v-if="machine.busyOperation" tone="warn">
-                        <Spinner size="h-3 w-3" tone="text-amber-700 dark:text-amber-400" />
+                        <Spinner size="h-3 w-3" />
                         {{ busyKeyLabel[machine.busyOperation] ?? machine.busyOperation }}
                     </Badge>
                     <Badge v-else :tone="machineStateBadge[machine.state]">
@@ -139,14 +142,30 @@ async function startAndOpen(): Promise<void> {
                 >
                     {{ platformLabel[machine.platform] }} · {{ machine.config.memoryGib }} GiB ·
                     {{ machine.config.cpuCores }} cores
-                    <template v-if="machine.workspaceName"> · {{ machine.workspaceName }}</template>
+                    <template v-if="machine.workspaceName">
+                        ·
+                        <span class="inline-flex items-center gap-1" v-tip="'Approved project'">
+                            <Folder class="h-3 w-3 shrink-0" aria-hidden="true" />
+                            <span class="sr-only">project</span>{{ machine.workspaceName }}
+                        </span>
+                    </template>
                     <template v-if="machine.signingKitName">
-                        · {{ machine.signingKitName }}</template
-                    >
+                        ·
+                        <span class="inline-flex items-center gap-1" v-tip="'Signing credentials'">
+                            <KeyRound class="h-3 w-3 shrink-0" aria-hidden="true" />
+                            <span class="sr-only">signing credentials</span
+                            >{{ machine.signingKitName }}
+                        </span>
+                    </template>
                     <template v-if="machine.envSetName">
-                        · environment {{ machine.envSetName }}</template
-                    >
+                        ·
+                        <span class="inline-flex items-center gap-1" v-tip="'Environment'">
+                            <Variable class="h-3 w-3 shrink-0" aria-hidden="true" />
+                            <span class="sr-only">environment</span>{{ machine.envSetName }}
+                        </span>
+                    </template>
                 </p>
+                <MachineUsage :machine-id="machine.id" :running="machine.state === 'running'" />
             </div>
 
             <JourneyStrip :steps="steps" />
@@ -179,7 +198,7 @@ async function startAndOpen(): Promise<void> {
                 </Button>
                 <Button variant="ghost" size="sm" @click="ui.openMachine(machine.id)">
                     Open
-                    <ArrowRight class="h-3 w-3" />
+                    <ArrowRight class="h-3.5 w-3.5" />
                 </Button>
             </div>
         </div>

@@ -17,10 +17,10 @@ pub enum OptimizationTier {
     ExtremelyInsecure,
 }
 
-/// One tweak from sickcodes/osx-optimizer as BuildBridge can run it: a fixed script for the
+/// One tweak from sickcodes/osx-optimizer as buildbridge can run it: a fixed script for the
 /// guest, a check that reports whether it is already in effect, and the caveat the source gives.
 /// Admin tweaks run in the guest's own Terminal, where `sudo` reads the password from its TTY;
-/// BuildBridge never sees it.
+/// buildbridge never sees it.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
@@ -278,7 +278,7 @@ where
     let terminal_script = format!(
         r#"#!/bin/zsh
 /usr/bin/clear
-/usr/bin/printf "BuildBridge: {title}\n\n"
+/usr/bin/printf "buildbridge: {title}\n\n"
 /usr/bin/printf "Enter the local macOS login password when sudo asks.\n"
 /usr/bin/printf "The password remains inside this macOS Terminal.\n\n"
 trap "/usr/bin/printf \"failed:interrupted\\n\" > {status_path}" EXIT
@@ -290,7 +290,7 @@ else
     result=$?
     trap - EXIT
     /usr/bin/printf "failed:%s\n" "$result" > {status_path}
-    /usr/bin/printf "\nThat did not complete. Return to BuildBridge.\n"
+    /usr/bin/printf "\nThat did not complete. Return to buildbridge.\n"
 fi
 read -k 1 "?Press any key to close this window."
 "#,
@@ -331,7 +331,7 @@ read -k 1 "?Press any key to close this window."
     }
 }
 
-/// Stops any BuildBridge job still running inside the guest after its host-side operation was
+/// Stops any buildbridge job still running inside the guest after its host-side operation was
 /// cancelled. The test build deliberately survives a dropped SSH session so a desktop restart
 /// can reattach; a Stop button must reach past that.
 pub fn stop_guest_jobs(

@@ -1,19 +1,11 @@
 <script setup lang="ts">
-import {
-    ArrowRight,
-    Check,
-    FolderOpen,
-    Hammer,
-    Laptop,
-    Package,
-    RefreshCw,
-    Share2,
-} from '@lucide/vue';
+import { ArrowRight, Check, FolderOpen, Hammer, Package, RefreshCw, Share2 } from '@lucide/vue';
 import { computed, nextTick, onMounted, ref, useId, watch } from 'vue';
 
 import { formatBytes, shortHash } from '../../lib/format';
 import { useEnvSetsStore } from '../../stores/envs';
 import { useNativeMacStore, validNativeCommit, validNativeMinimum } from '../../stores/native-mac';
+import { useSettingsStore } from '../../stores/settings';
 import { useUi } from '../../stores/ui';
 import Badge from '../ui/Badge.vue';
 import Button from '../ui/Button.vue';
@@ -36,6 +28,9 @@ import PublishingGuide from '../machine/PublishingGuide.vue';
 const native = useNativeMacStore();
 const envs = useEnvSetsStore();
 const ui = useUi();
+// This Mac builds for its owner whether or not anyone else can reach it; sharing it is the
+// part that needs a buildbridge server, so only that part follows the setting.
+const remoteBuilds = useSettingsStore().remoteBuilds;
 const state = native.state;
 const id = useId();
 const pane = ref<HTMLElement | null>(null);
@@ -62,11 +57,11 @@ const commitError = computed(() =>
 const buildBlocked = computed(() => {
     if (!status.value?.supported) return 'Native iOS builds require this app to run on a Mac.';
     if (native.busy.value) return 'Wait for the current native operation to finish.';
-    if (!project.value) return 'Approve your project in Setup first.';
+    if (!project.value) return 'Approve your project in setup first.';
     if (!ready.value)
         return state.outcome === 'archive'
-            ? 'Review Setup: the toolchain, project, and App Store signing must be ready.'
-            : 'Review the project and toolchain requirements in Setup.';
+            ? 'Review setup: the toolchain, project, and App Store signing must be ready.'
+            : 'Review the project and toolchain requirements in setup.';
     if (environmentMissing.value) return 'Choose an environment that is still stored on this Mac.';
     if (!validNativeCommit(state.commit)) return 'Enter the full Git commit ID to build.';
     return null;
@@ -169,14 +164,10 @@ function cancelEdit(): void {
 
 <template>
     <div ref="pane" class="mx-auto max-w-4xl space-y-4 p-5">
-        <header class="flex flex-wrap items-start justify-between gap-3">
+        <header class="flex items-start justify-between gap-4">
             <div class="min-w-0">
-                <h1
-                    class="flex items-center gap-2 text-lg font-bold text-zinc-900 dark:text-zinc-50"
-                >
-                    <Laptop class="h-5 w-5" /> This Mac
-                </h1>
-                <p class="mt-0.5 max-w-xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">This Mac</h1>
+                <p class="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                     Build iOS apps with this Mac's Xcode and existing signing identities.
                 </p>
             </div>
@@ -190,7 +181,12 @@ function cancelEdit(): void {
                     <Spinner v-if="state.refreshing" /><RefreshCw v-else class="h-3.5 w-3.5" />
                     Recheck
                 </Button>
-                <Button variant="outline" size="sm" @click="ui.navigate({ kind: 'runner' })">
+                <Button
+                    v-if="remoteBuilds"
+                    variant="outline"
+                    size="sm"
+                    @click="ui.navigate({ kind: 'runner' })"
+                >
                     <Share2 class="h-3.5 w-3.5" /> Share this Mac
                 </Button>
             </div>
@@ -207,22 +203,28 @@ function cancelEdit(): void {
             class="flex items-center gap-2 py-8 text-xs text-zinc-500 dark:text-zinc-400"
             role="status"
         >
-            <Spinner /> Checking this Mac's tools and saved approvals…
+            <Spinner /> Checking this Mac's tools and saved approvals
         </div>
-        <Callout v-else-if="status && !status.supported" title="Open BuildBridge on your Mac">
+        <Callout v-else-if="status && !status.supported" title="Open buildbridge on your Mac">
             <p>
                 Native iOS builds require macOS and Xcode. Open this page on the Mac that will build
                 the app.
             </p>
             <p class="mt-1">
-                Android builds on this computer use an Android machine with Docker. Connect to a
-                shared Mac from Remote builds.
+                Android builds on this computer use an Android machine with Docker.<template
+                    v-if="remoteBuilds"
+                >
+                    Connect to a shared Mac from Remote builds.</template
+                ><template v-else> A macOS machine builds for iOS on this computer.</template>
             </p>
             <div class="mt-3 flex flex-wrap gap-2">
-                <Button size="sm" @click="ui.navigate({ kind: 'runner' })"
+                <Button v-if="remoteBuilds" size="sm" @click="ui.navigate({ kind: 'runner' })"
                     >Open Remote builds <ArrowRight class="h-3.5 w-3.5"
                 /></Button>
-                <Button variant="outline" size="sm" @click="ui.navigate({ kind: 'home' })"
+                <Button
+                    :variant="remoteBuilds ? 'outline' : 'default'"
+                    size="sm"
+                    @click="ui.navigate({ kind: 'home' })"
                     >Open machines</Button
                 >
             </div>
@@ -268,11 +270,7 @@ function cancelEdit(): void {
                         </ul>
                     </Callout>
                     <details class="mt-3">
-                        <DisclosureSummary
-                            class="cursor-pointer text-xs font-medium text-zinc-600 dark:text-zinc-300"
-                        >
-                            More tool details
-                        </DisclosureSummary>
+                        <DisclosureSummary> More tool details </DisclosureSummary>
                         <KeyValue
                             class="mt-3"
                             :items="[
@@ -329,9 +327,7 @@ function cancelEdit(): void {
                             />
                         </Field>
                         <details>
-                            <DisclosureSummary
-                                class="cursor-pointer text-xs font-medium text-zinc-600 dark:text-zinc-300"
-                            >
+                            <DisclosureSummary>
                                 Project compatibility requirements (optional)
                             </DisclosureSummary>
                             <p class="mt-2 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
@@ -538,11 +534,7 @@ function cancelEdit(): void {
                             ]"
                         />
                         <details class="mt-3">
-                            <DisclosureSummary
-                                class="cursor-pointer text-xs font-medium text-zinc-600 dark:text-zinc-300"
-                            >
-                                Signing details
-                            </DisclosureSummary>
+                            <DisclosureSummary> Signing details </DisclosureSummary>
                             <KeyValue
                                 class="mt-3"
                                 :items="[
@@ -579,7 +571,7 @@ function cancelEdit(): void {
                 </Callout>
                 <div class="flex flex-wrap items-center justify-between gap-3">
                     <Checkbox v-model="launchAtLogin" :disabled="disabled"
-                        >Open BuildBridge at login</Checkbox
+                        >Open buildbridge at login</Checkbox
                     >
                     <Button
                         :disabled="!status.testReady || native.busy.value"
@@ -588,8 +580,12 @@ function cancelEdit(): void {
                     /></Button>
                 </div>
                 <p class="text-xs text-zinc-500 dark:text-zinc-400">
-                    Opening at login keeps BuildBridge available after you sign in. Shared builds
-                    also need an active connection and the Mac to stay awake.
+                    Opening at login keeps buildbridge available after you sign in.<template
+                        v-if="remoteBuilds"
+                    >
+                        Shared builds also need an active connection and the Mac to stay
+                        awake.</template
+                    >
                 </p>
             </div>
 
@@ -632,7 +628,7 @@ function cancelEdit(): void {
                             <legend
                                 class="mb-2 text-[13px] font-medium text-zinc-700 dark:text-zinc-200"
                             >
-                                What do you need?
+                                Outcome
                             </legend>
                             <button
                                 v-for="option in [
@@ -658,7 +654,7 @@ function cancelEdit(): void {
                                 :class="
                                     state.outcome === option.value
                                         ? 'border-zinc-900 bg-zinc-50 dark:border-zinc-100 dark:bg-zinc-800'
-                                        : 'border-zinc-200 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800'
+                                        : 'border-zinc-200 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800'
                                 "
                                 @click="state.outcome = option.value"
                             >
@@ -716,10 +712,7 @@ function cancelEdit(): void {
                                 :disabled="disabled || envs.state.loading"
                             />
                             <template #action
-                                ><Button
-                                    variant="ghost"
-                                    size="sm"
-                                    @click="ui.navigate({ kind: 'envs' })"
+                                ><Button variant="ghost" @click="ui.navigate({ kind: 'envs' })"
                                     >Manage environments</Button
                                 ></template
                             >
@@ -759,7 +752,7 @@ function cancelEdit(): void {
                         v-if="status.compatibilityWarnings.length"
                         class="mt-3 text-xs leading-5 text-amber-700 dark:text-amber-400"
                     >
-                        <DisclosureSummary class="cursor-pointer font-medium">
+                        <DisclosureSummary>
                             Compatibility needs a build to confirm
                         </DisclosureSummary>
                         <ul class="mt-2 list-disc space-y-1 pl-4">
@@ -776,9 +769,7 @@ function cancelEdit(): void {
                     v-if="state.logs.length || state.running || status.busy"
                     :open="state.running || status.busy || state.buildState === 'failed'"
                 >
-                    <DisclosureSummary
-                        class="cursor-pointer text-xs font-medium text-zinc-600 dark:text-zinc-300"
-                    >
+                    <DisclosureSummary>
                         Build log · {{ state.logs.length }} lines
                     </DisclosureSummary>
                     <LogView class="mt-2" :lines="state.logs" height="h-56" />
@@ -851,9 +842,7 @@ function cancelEdit(): void {
                         v-if="result.outcome === 'archive'"
                         class="mt-4 border-t border-zinc-200 pt-4 dark:border-zinc-800"
                     >
-                        <DisclosureSummary class="text-xs font-medium"
-                            >Publish the release</DisclosureSummary
-                        >
+                        <DisclosureSummary>Publish the release</DisclosureSummary>
                         <PublishingGuide
                             class="mt-4"
                             platform="ios"

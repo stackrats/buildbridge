@@ -7,7 +7,10 @@ use ts_rs::TS;
 /// realtime client can still wake the same runner immediately; run_once serializes claims.
 pub async fn run_runner_service(app: Engine) {
     loop {
-        if let Ok(summary) = heartbeat_runner(&app).await
+        // Read each time round rather than once at startup: turning remote builds on or off
+        // from the command line then takes effect on the next tick, without a restart.
+        if crate::settings::remote_builds_enabled(&app)
+            && let Ok(summary) = heartbeat_runner(&app).await
             && summary.queued_builds > 0
         {
             let result = run_once(&app).await;
@@ -52,6 +55,7 @@ pub async fn get_runner_status(app: &Engine) -> Result<DesktopStatus, String> {
     })
 }
 pub async fn pair_runner(app: &Engine, input: PairInput) -> Result<DesktopStatus, String> {
+    crate::settings::require_remote_builds(app)?;
     let request = PairRunnerRequest {
         code: input.code,
         name: input.runner_name.clone(),
@@ -116,6 +120,7 @@ pub async fn authorize_realtime(
         .map_err(|error| error.to_string())
 }
 pub async fn heartbeat_runner(app: &Engine) -> Result<HeartbeatSummary, String> {
+    crate::settings::require_remote_builds(app)?;
     let (_, client) = paired_client(app).await?;
 
     let response = client
@@ -138,6 +143,8 @@ pub struct HeartbeatSummary {
     pub(crate) queued_builds: u64,
 }
 pub async fn run_once(app: &Engine) -> Result<RunOnceResult, String> {
+    // Checked before the running flag is taken, so a refusal cannot leave the runner marked busy.
+    crate::settings::require_remote_builds(app)?;
     let state = app.state();
     if state.runner_running.swap(true, Ordering::AcqRel) {
         return Ok(RunOnceResult {
@@ -887,7 +894,7 @@ pub(crate) async fn run_remote_android_release(
     log(
         LogStream::System,
         format!(
-            "BuildBridge {} · signed Android release of {} on {}",
+            "buildbridge {} · signed Android release of {} on {}",
             env!("CARGO_PKG_VERSION"),
             approved.name,
             machine.config.name
@@ -965,7 +972,7 @@ pub(crate) async fn run_remote_android_release(
     sync_android_workspace_with_env(app, &payload.machine_id, source, Some(env_set_id.clone()))
         .await?;
     ensure_remote_active(aborted)?;
-    run_android_debug_build(app, payload.machine_id.clone(), false).await?;
+    run_android_debug_build(app, payload.machine_id.clone(), false, None).await?;
     ensure_remote_active(aborted)?;
     let released =
         run_android_signed_release(app, payload.machine_id.clone(), env_set_id, None, None).await?;
@@ -1023,7 +1030,7 @@ pub(crate) async fn run_remote_apple_archive(
     log(
         LogStream::System,
         format!(
-            "BuildBridge {} · signed archive of {} on {}",
+            "buildbridge {} · signed archive of {} on {}",
             env!("CARGO_PKG_VERSION"),
             approved.name,
             machine.config.name

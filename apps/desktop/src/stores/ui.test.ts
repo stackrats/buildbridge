@@ -46,31 +46,30 @@ describe('window view state', () => {
         expect(storage.get('buildbridge.selection')).toBe('signing');
     });
 
-    it('opens a machine on a chosen step, or on its focus step, and tells a closed step from none', async () => {
+    it('opens a machine on a chosen step, otherwise as it was left, and tells a closed step from none', async () => {
         const ui = await load();
         ui.openMachine('a', 'archive');
         expect(ui.route.value).toEqual({ kind: 'machine', id: 'a' });
         expect(ui.selectedStep('a')).toBe('archive');
-        expect(ui.state.machineSections.a).toBe('steps');
+        ui.openMachine('b');
         ui.openMachine('a');
-        expect(ui.selectedStep('a')).toBeNull();
+        expect(ui.selectedStep('a')).toBe('archive');
         ui.selectStep('a', null);
         expect(ui.selectedStep('a')).toBe('');
         expect(ui.selectedStep('b')).toBeNull();
     });
 
-    it('keeps the tab a person chose on each machine while they move between machines and pages', async () => {
+    it('keeps which sections of a machine page a person opened or closed', async () => {
         const ui = await load();
-        ui.openMachine('a');
-        expect(ui.state.machineSections.a).toBeUndefined();
-        ui.state.machineSections.a = 'preview';
+        expect(ui.sectionOpen('a', 'setup')).toBeNull();
+        ui.setSectionOpen('a', 'setup', false);
+        ui.setSectionOpen('a', 'artifacts', true);
         ui.openMachine('b');
         ui.navigate({ kind: 'signing' });
         ui.openMachine('a');
-        expect(ui.state.machineSections.a).toBe('preview');
-        expect(ui.state.machineSections.b).toBeUndefined();
-        ui.openMachine('a', 'signing-kit');
-        expect(ui.state.machineSections.a).toBe('steps');
+        expect(ui.sectionOpen('a', 'setup')).toBe(false);
+        expect(ui.sectionOpen('a', 'artifacts')).toBe(true);
+        expect(ui.sectionOpen('b', 'setup')).toBeNull();
     });
 
     it('keeps the log drawer closed on the activity source until it is opened', async () => {

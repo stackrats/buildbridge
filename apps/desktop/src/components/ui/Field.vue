@@ -46,7 +46,7 @@ provide(fieldKey, {
                         {{ label }}
                         <span
                             v-if="required"
-                            class="ml-0.5 text-xs font-normal text-zinc-500"
+                            class="ml-0.5 text-xs font-normal text-zinc-500 dark:text-zinc-400"
                             aria-hidden="true"
                         >
                             required

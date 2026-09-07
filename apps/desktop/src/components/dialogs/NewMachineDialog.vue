@@ -281,15 +281,13 @@ async function create(): Promise<void> {
             <Callout v-if="error" tone="danger">{{ error }}</Callout>
         </form>
         <template #footer>
-            <div class="flex justify-end gap-2">
-                <Button variant="outline" size="sm" :disabled="saving" @click="open = false"
-                    >Cancel</Button
-                >
-                <Button :form="formId" type="submit" size="sm" :disabled="!canCreate">
-                    <Spinner v-if="saving" tone="text-white dark:text-zinc-950" />
-                    {{ saving ? 'Creating machine' : 'Create machine' }}
-                </Button>
-            </div>
+            <Button variant="outline" size="sm" :disabled="saving" @click="open = false">
+                Cancel
+            </Button>
+            <Button :form="formId" type="submit" size="sm" :disabled="!canCreate">
+                <Spinner v-if="saving" tone="text-white dark:text-zinc-950" />
+                {{ saving ? 'Creating machine' : 'Create machine' }}
+            </Button>
         </template>
     </Modal>
 </template>

@@ -8,18 +8,37 @@ pub fn run_apple_smoke_build<F>(
     identity_path: &Path,
     known_hosts_path: &Path,
     target: UnsignedBuildTarget,
+    version: Option<&ProjectVersion>,
     mut on_progress: F,
 ) -> Result<AppleSmokeBuildResult, ProviderError>
 where
     F: FnMut(AppleProjectProgress),
 {
     validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
+    if let Some(version) = version {
+        validate_apple_version(version).map_err(ProviderError::GuestBridge)?;
+    }
     let started_at = Instant::now();
     let needs_simulator = match target {
         UnsignedBuildTarget::Simulator => "1",
         UnsignedBuildTarget::DeviceSdk => "0",
     };
     let build_destination = unsigned_build_destination_args(target);
+    // The requested version rides on xcodebuild's command line as build settings, the way the
+    // archive carries it in its settings file; the built app is checked against it below.
+    let version_settings = version
+        .map(|version| {
+            format!(
+                " MARKETING_VERSION={} CURRENT_PROJECT_VERSION={}",
+                shell_single_quote(&version.version),
+                shell_single_quote(&version.build)
+            )
+        })
+        .unwrap_or_default();
+    let products_dir = match target {
+        UnsignedBuildTarget::DeviceSdk => "Debug-iphoneos",
+        UnsignedBuildTarget::Simulator => "Debug-iphonesimulator",
+    };
     let guest_home = format!("/Users/{username}");
     let workspace = format!("{guest_home}/BuildBridge/workspaces/active");
     let toolchain = guest_toolchain(&guest_home);
@@ -125,7 +144,7 @@ fi
 
 phase building
 build_ios() {{
-    /usr/bin/xcodebuild -workspace "{workspace}/ios/App/App.xcworkspace" -scheme App -configuration Debug {build_destination} -derivedDataPath "{workspace}/.buildbridge/DerivedData" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO COMPILER_INDEX_STORE_ENABLE=NO build
+    /usr/bin/xcodebuild -workspace "{workspace}/ios/App/App.xcworkspace" -scheme App -configuration Debug {build_destination} -derivedDataPath "{workspace}/.buildbridge/DerivedData" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO COMPILER_INDEX_STORE_ENABLE=NO{version_settings} build
 }}
 build_log="{tools}/apple-build.log"
 build_status_file="{tools}/apple-build.status"
@@ -159,6 +178,12 @@ if /bin/test "$build_status" -ne 0 && /bin/test "$platform_installed" -eq 1; the
     build_ios || build_status=$?
 fi
 /bin/test "$build_status" -eq 0
+app_bundle=$(/usr/bin/find "{workspace}/.buildbridge/DerivedData/Build/Products/{products_dir}" -maxdepth 1 -type d -name '*.app' 2>/dev/null | /usr/bin/head -n 1)
+if /bin/test -n "$app_bundle" && /bin/test -f "$app_bundle/Info.plist"; then
+    app_version=$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$app_bundle/Info.plist" 2>/dev/null || /bin/echo '')
+    app_build=$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$app_bundle/Info.plist" 2>/dev/null || /bin/echo '')
+    /usr/bin/printf '__BUILDBRIDGE_APP_VERSION__\t%s\t%s\n' "$app_version" "$app_build"
+fi
 phase completed"#
     );
     let script = crate::device_run::guest_job_script("apple-smoke-build", tools, "''", &body);
@@ -177,8 +202,12 @@ phase completed"#
     })?;
     let mut phase = AppleProjectPhase::PreparingTools;
     let mut native_lockfile_updated = false;
+    let mut built_version: Option<ProjectVersion> = None;
     let mut output_tail = Vec::new();
     let mut diagnostic_lines = Vec::new();
+    if let Some(version) = version {
+        output_tail.push(format!("Building as version {}.", version.display()));
+    }
     on_progress(apple_progress(
         phase,
         0,
@@ -220,6 +249,19 @@ phase completed"#
             ));
             continue;
         }
+        if let Some(rest) = line.strip_prefix("__BUILDBRIDGE_APP_VERSION__\t") {
+            let mut fields = rest.split('\t');
+            if let (Some(app_version), Some(app_build)) = (fields.next(), fields.next())
+                && valid_release_value(app_version)
+                && valid_release_value(app_build)
+            {
+                built_version = Some(ProjectVersion {
+                    version: app_version.to_string(),
+                    build: app_build.to_string(),
+                });
+            }
+            continue;
+        }
         if line == "__BUILDBRIDGE_REATTACHED__:yes" {
             let message = "Reattached to the build already running inside macOS.".to_string();
             output_tail.push(message.clone());
@@ -235,9 +277,9 @@ phase completed"#
         }
         if let Some(retry_detail) = apple_build_retry_detail(&line) {
             let message = if line.ends_with(":platform_missing") {
-                "Xcode refused the device destination because its iOS platform is not installed. BuildBridge is downloading the platform once, then building again.".to_string()
+                "Xcode refused the device destination because its iOS platform is not installed. buildbridge is downloading the platform once, then building again.".to_string()
             } else {
-                "The first compile started before the new Simulator runtime had settled. BuildBridge is verifying CoreSimulator and retrying once.".to_string()
+                "The first compile started before the new Simulator runtime had settled. buildbridge is verifying CoreSimulator and retrying once.".to_string()
             };
             output_tail.push(message.clone());
             on_progress(apple_progress(
@@ -313,6 +355,19 @@ phase completed"#
         }));
     }
 
+    if let Some(version) = version
+        && built_version.as_ref() != Some(version)
+    {
+        return Err(ProviderError::GuestBridge(format!(
+            "the test build reports version {}, not the requested {}; the app's Info.plist must take CFBundleShortVersionString from MARKETING_VERSION and CFBundleVersion from CURRENT_PROJECT_VERSION for a version set here to reach it",
+            built_version
+                .as_ref()
+                .map(ProjectVersion::display)
+                .unwrap_or_else(|| "unknown".to_string()),
+            version.display()
+        )));
+    }
+
     let xcode_version = parse_xcode_version(&run_guest_command(
         ssh_port,
         username,
@@ -333,6 +388,7 @@ phase completed"#
         target,
         xcode_version,
         native_lockfile_updated,
+        version: built_version,
         output_tail,
     })
 }

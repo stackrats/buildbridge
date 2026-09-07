@@ -2,7 +2,7 @@
 //! Xcode project's `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION`, and the Android app
 //! module's `versionName` and `versionCode`. Both platforms have the same two-part shape, so
 //! one value travels from the desktop or the command line into either build. Nothing here
-//! bumps a number on its own: BuildBridge builds the version the project says, or the one the
+//! bumps a number on its own: buildbridge builds the version the project says, or the one the
 //! person asked for, and writes that into the project so it is there to commit.
 
 use serde::{Deserialize, Serialize};
@@ -187,7 +187,7 @@ pub fn set_xcode_project_version(
     });
     if versions == 0 || builds == 0 {
         return Err(
-            "The Xcode project does not declare MARKETING_VERSION and CURRENT_PROJECT_VERSION in its build settings, so BuildBridge cannot set its version. Set the version and build in Xcode once; after that they can be set here."
+            "The Xcode project does not declare MARKETING_VERSION and CURRENT_PROJECT_VERSION in its build settings, so buildbridge cannot set its version. Set the version and build in Xcode once; after that they can be set here."
                 .to_string(),
         );
     }
@@ -302,11 +302,29 @@ pub fn set_gradle_project_version(
     });
     if versions == 0 || builds == 0 {
         return Err(
-            "The app module's Gradle script does not declare versionName and versionCode as literals, so BuildBridge cannot set its version. Declare both in defaultConfig once; after that they can be set here."
+            "The app module's Gradle script does not declare versionName and versionCode as literals, so buildbridge cannot set its version. Declare both in defaultConfig once; after that they can be set here."
                 .to_string(),
         );
     }
     Ok(rewritten)
+}
+
+/// `3.2.0-16`: the version and build as a file-name tag, so a retained artifact says which
+/// build it is without being opened. Anything a file name should not carry becomes `_`.
+pub fn version_file_tag(version: &str, build: &str) -> String {
+    let clean = |value: &str| {
+        value
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+    };
+    format!("{}-{}", clean(version), clean(build))
 }
 
 /// The build settings that give an archive its version, appended to the signing settings the
@@ -434,6 +452,12 @@ mod tests {
         assert!(validate_android_version(&version("3.2.0", "1.2")).is_err());
         assert!(validate_android_version(&version("3.2.0", "2100000001")).is_err());
         assert!(validate_android_version(&version("", "12")).is_err());
+    }
+
+    #[test]
+    fn the_file_tag_carries_both_numbers_and_nothing_a_file_name_cannot() {
+        assert_eq!(version_file_tag("3.2.0", "16"), "3.2.0-16");
+        assert_eq!(version_file_tag("3.2 beta/1", "16"), "3.2_beta_1-16");
     }
 
     #[test]

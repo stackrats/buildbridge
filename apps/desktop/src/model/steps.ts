@@ -9,6 +9,7 @@ import type {
     HostPrerequisites,
     MachineView,
     MachineSummary,
+    StoredAndroidDeviceRun,
     UnsignedBuildTarget,
 } from '../types/backend';
 import { formatBytes, formatElapsed, relativeTime, secondsSince } from '../lib/format';
@@ -31,9 +32,9 @@ export type StepStatus = 'done' | 'active' | 'running' | 'pending' | 'failed';
 /**
  * Who performs a step.
  *
- * - `automatic`: BuildBridge does it end to end.
+ * - `automatic`: buildbridge does it end to end.
  * - `manual`: the user does it, usually inside the macOS console.
- * - `assisted`: BuildBridge starts it and the user confirms inside macOS.
+ * - `assisted`: buildbridge starts it and the user confirms inside macOS.
  */
 export type StepKind = 'automatic' | 'manual' | 'assisted';
 
@@ -77,8 +78,7 @@ export type SetupStepId =
     | 'xcode-activate';
 
 export type BuildStepId =
-    | 'approve'
-    | 'sync'
+    | 'project'
     | 'test-build'
     | 'signing-kit'
     | 'provision'
@@ -94,8 +94,7 @@ export type BuildStepId =
 export type AndroidStepId =
     | 'host'
     | 'launch'
-    | 'approve'
-    | 'sync'
+    | 'project'
     | 'test-build'
     | 'signing-kit'
     | 'release';
@@ -121,10 +120,10 @@ export const stepKindLabel: Record<StepKind, string> = {
 };
 
 export const stepKindDescription: Record<StepKind, string> = {
-    automatic: 'BuildBridge performs this step end to end.',
-    manual: 'BuildBridge cannot do this for you; follow the instructions and it verifies the result.',
+    automatic: 'buildbridge performs this step end to end.',
+    manual: 'buildbridge cannot do this for you; follow the instructions and it verifies the result.',
     assisted:
-        'BuildBridge prepares this step; you finish it in the relevant app, service or device.',
+        'buildbridge prepares this step; you finish it in the relevant app, service or device.',
 };
 
 /** Short, lowercase names for places with room for a few words, such as the sidebar. */
@@ -136,8 +135,7 @@ export const stepShortTitle: Record<JourneyStepId, string> = {
     access: 'authorize the key',
     'xcode-import': 'import Xcode',
     'xcode-activate': 'activate Xcode',
-    approve: 'approve a project',
-    sync: 'synchronize source',
+    project: 'set up the project',
     'test-build': 'test build',
     'signing-kit': 'attach signing credentials',
     provision: 'provision signing',
@@ -156,9 +154,8 @@ const unlockedBy: Record<JourneyStepId, string> = {
     access: 'after the identity is pinned',
     'xcode-import': 'after the access key is authorized',
     'xcode-activate': 'after Xcode is imported',
-    approve: 'after the machine setup is complete',
-    sync: 'after a project is approved',
-    'test-build': 'after the source is synchronized',
+    project: 'after the machine setup is complete',
+    'test-build': 'after the project is set up',
     'signing-kit': 'after the test build passes',
     provision: 'after complete credentials are attached',
     archive: 'after signing is provisioned',
@@ -203,9 +200,19 @@ const runningSummaryByOperation: Record<string, string> = {
     saving_template: 'Saving the machine as a template; macOS is shut down first',
     'clear-signing': 'Removing the guest keychain and installed profiles',
     clearing_signing: 'Removing the guest keychain and installed profiles',
-    'adopt-lock': 'Adopting the guest’s Podfile.lock into the project',
-    adopting_lock: 'Adopting the guest’s Podfile.lock into the project',
-    'clear-release': 'Clearing the retained release',
+    'adopt-lock': "Adopting the guest's Podfile.lock into the project",
+    adopting_lock: "Adopting the guest's Podfile.lock into the project",
+    'clear-release': 'Clearing the retained artifacts',
+    'clear-archive': 'Clearing the retained artifacts',
+    'clear-device-run': 'Clearing the last device run',
+    'clear-android-device-run': 'Clearing the last device run',
+    approve: 'Validating the project folder; nothing is copied',
+    approving_android_workspace: 'Validating the project folder; nothing is copied',
+    'clear-workspace': 'Forgetting the project; the host folder is not modified',
+    clearing_android_workspace: 'Forgetting the project; the host folder is not modified',
+    'attach-env': 'Applying the environment for the next snapshot',
+    sync: 'Creating and transferring the bounded snapshot',
+    synchronizing: 'Creating and transferring the bounded snapshot',
 };
 
 function runningSummary(context: StepContext, own: string): string {
@@ -265,7 +272,7 @@ function builtWith(workspace: {
 /** Guest setup: everything that prepares one machine to build any project. */
 export function deriveSetupSteps(view: MachineView, context: StepContext): SetupStep[] {
     // A clone boots the template's macOS and is bootstrapped from the template's key, so
-    // the three steps a person does on a fresh install are BuildBridge's here.
+    // the three steps a person does on a fresh install are buildbridge's here.
     const template = view.template;
     const { runtime, guest } = view;
     const { ssh, diagnostics } = guest;
@@ -385,7 +392,7 @@ export function deriveSetupSteps(view: MachineView, context: StepContext): Setup
     steps.push({
         id: 'access',
         phase: 'setup',
-        title: 'Authorize the BuildBridge key',
+        title: 'Authorize the buildbridge key',
         kind: template ? 'automatic' : 'assisted',
         status: authenticated ? 'done' : trusted ? 'active' : 'pending',
         summary: authenticated
@@ -418,7 +425,7 @@ export function deriveSetupSteps(view: MachineView, context: StepContext): Setup
             : xcodeInstalled
               ? xcodeLabel(diagnostics.xcodeVersion)
               : authenticated
-                ? 'Download it from Apple in the window BuildBridge opens; the import follows by itself'
+                ? 'Download it from Apple in the window buildbridge opens; the import follows by itself'
                 : unlockedBy['xcode-import'],
     });
 
@@ -465,34 +472,35 @@ export function deriveBuildSteps(view: MachineView, context: StepContext): Build
 
     const steps: BuildStep[] = [];
 
+    // One step for the project: the folder is approved once, and the snapshot it produces is
+    // refreshed by every build of the latest source, so the row reports both.
     steps.push({
-        id: 'approve',
+        id: 'project',
         phase: 'build',
-        title: 'Approve the project folder',
-        kind: 'manual',
-        status: approved ? 'done' : machineReady ? 'active' : 'pending',
-        summary: approved
-            ? [workspace.name, workspace.developmentTeam, workspace.bundleIdentifier]
-                  .filter(Boolean)
-                  .join(' · ')
-            : machineReady
-              ? 'Choose the one host folder BuildBridge may read'
-              : unlockedBy.approve,
-    });
-
-    steps.push({
-        id: 'sync',
-        phase: 'build',
-        title: 'Synchronize source',
-        kind: 'automatic',
-        status: isRunning('sync') ? 'running' : synced ? 'done' : approved ? 'active' : 'pending',
-        summary: isRunning('sync')
-            ? 'Creating and transferring the bounded snapshot'
-            : synced
-              ? `${workspace.lastSyncFileCount ?? 0} files · ${formatBytes(workspace.lastSyncBytes)} · snapshot ${workspace.lastSnapshotSha256?.slice(0, 12) ?? ''}`
-              : approved
-                ? 'Copy a filtered, checksummed snapshot into the guest over the pinned bridge'
-                : unlockedBy.sync,
+        title: 'Set up the project',
+        kind: approved ? 'automatic' : 'manual',
+        status: isRunning('project')
+            ? 'running'
+            : approved
+              ? 'done'
+              : machineReady
+                ? 'active'
+                : 'pending',
+        summary: isRunning('project')
+            ? runningSummary(context, 'Creating and transferring the bounded snapshot')
+            : approved
+              ? [
+                    workspace.name,
+                    workspace.bundleIdentifier,
+                    synced
+                        ? `snapshot ${workspace.lastSnapshotSha256?.slice(0, 12) ?? ''}${workspace.lastSyncedAtEpochSeconds ? ` · copied ${relativeTime(new Date(workspace.lastSyncedAtEpochSeconds * 1000).toISOString(), context.now)}` : ''} · ${workspace.lastSyncFileCount ?? 0} files · ${formatBytes(workspace.lastSyncBytes)}`
+                        : 'no snapshot yet; the first build copies the source',
+                ]
+                    .filter(Boolean)
+                    .join(' · ')
+              : machineReady
+                ? 'Choose the one host folder buildbridge may read'
+                : unlockedBy.project,
     });
 
     steps.push({
@@ -504,7 +512,7 @@ export function deriveBuildSteps(view: MachineView, context: StepContext): Build
             ? 'running'
             : built
               ? 'done'
-              : synced
+              : approved
                 ? 'active'
                 : 'pending',
         summary: isRunning('test-build')
@@ -513,8 +521,8 @@ export function deriveBuildSteps(view: MachineView, context: StepContext): Build
               ? workspace.lastNativeLockUpdated
                   ? `${builtWith(workspace)} · the guest refreshed Podfile.lock`
                   : builtWith(workspace)
-              : synced
-                ? 'Compile the App scheme without signing, against the device SDK or the Simulator'
+              : approved
+                ? 'Copy the latest source and compile the App scheme without signing, against the device SDK or the Simulator'
                 : unlockedBy['test-build'],
     });
 
@@ -587,11 +595,11 @@ export function deriveBuildSteps(view: MachineView, context: StepContext): Build
                   ? 'active'
                   : 'pending',
         summary: isRunning('archive')
-            ? 'Archiving, exporting, verifying, and transferring artifacts'
+            ? runningSummary(context, 'Archiving, exporting, verifying, and transferring artifacts')
             : archive
               ? `${archive.marketingVersion} (${archive.buildNumber}) · IPA ${formatBytes(archive.ipa.bytes)} · archive ${formatBytes(archive.archive.bytes)}`
               : view.archiveError
-                ? 'The last signed build failed; the diagnostic is kept below'
+                ? 'The last signed archive failed; the diagnostic is kept below'
                 : credentialsLost
                   ? 'Blocked: the signing credentials are missing, and their keychain password is needed to sign'
                   : provisioned && !canArchive
@@ -610,7 +618,8 @@ export function deriveBuildSteps(view: MachineView, context: StepContext): Build
 
     // Off the golden path: a Debug build on a phone plugged into this host. It opens on the
     // archive's gate rather than on the archive, and a failed run outranks an earlier success
-    // because the backend keeps both until the run is cleared.
+    // because the backend keeps both until the run is cleared. A run is an activity rather than
+    // an achievement: the step is never done, and the last run stays on the row as a fact.
     const readiness = deviceReadiness(view);
     const run = view.deviceRun;
     steps.push({
@@ -625,11 +634,9 @@ export function deriveBuildSteps(view: MachineView, context: StepContext): Build
             ? 'running'
             : view.deviceRunError
               ? 'failed'
-              : run
-                ? 'done'
-                : provisioned && built && !credentialsLost
-                  ? 'active'
-                  : 'pending',
+              : provisioned && built && !credentialsLost
+                ? 'active'
+                : 'pending',
         summary: isRunning('run-device')
             ? context.runningLive
                 ? `Running on ${readiness.name}; console streaming`
@@ -649,7 +656,7 @@ export function deriveBuildSteps(view: MachineView, context: StepContext): Build
 }
 
 /**
- * An Android machine's seven steps: the host and the container, then the project, the debug
+ * An Android machine's six steps: the host and the container, then the project, the debug
  * build, the kit with the upload key, and the signed release.
  */
 export function deriveAndroidSteps(view: MachineView, context: StepContext): AndroidStep[] {
@@ -714,32 +721,35 @@ export function deriveAndroidSteps(view: MachineView, context: StepContext): And
                     : `Container is ${runtime.state}`,
     });
 
+    // One step for the project, as on macOS: approved once, its snapshot refreshed by every
+    // build of the latest source.
     steps.push({
-        id: 'approve',
+        id: 'project',
         phase: 'build',
-        title: 'Approve the project folder',
-        kind: 'manual',
-        status: approved ? 'done' : running ? 'active' : 'pending',
-        summary: approved
-            ? [workspace.name, workspace.applicationId].filter(Boolean).join(' · ')
-            : running
-              ? 'Choose the one host folder BuildBridge may read: a Capacitor project with its Android platform'
-              : 'after the toolchain starts',
-    });
-
-    steps.push({
-        id: 'sync',
-        phase: 'build',
-        title: 'Synchronize source',
-        kind: 'automatic',
-        status: isRunning('sync') ? 'running' : synced ? 'done' : approved ? 'active' : 'pending',
-        summary: isRunning('sync')
-            ? 'Creating and transferring the bounded snapshot'
-            : synced
-              ? `${workspace.lastSyncFileCount ?? 0} files · ${formatBytes(workspace.lastSyncBytes)} · snapshot ${workspace.lastSnapshotSha256?.slice(0, 12) ?? ''}`
-              : approved
-                ? 'Copy a filtered, checksummed snapshot into the container'
-                : unlockedBy.sync,
+        title: 'Set up the project',
+        kind: approved ? 'automatic' : 'manual',
+        status: isRunning('project')
+            ? 'running'
+            : approved
+              ? 'done'
+              : running
+                ? 'active'
+                : 'pending',
+        summary: isRunning('project')
+            ? runningSummary(context, 'Creating and transferring the bounded snapshot')
+            : approved
+              ? [
+                    workspace.name,
+                    workspace.applicationId,
+                    synced
+                        ? `snapshot ${workspace.lastSnapshotSha256?.slice(0, 12) ?? ''}${workspace.lastSyncedAtEpochSeconds ? ` · copied ${relativeTime(new Date(workspace.lastSyncedAtEpochSeconds * 1000).toISOString(), context.now)}` : ''} · ${workspace.lastSyncFileCount ?? 0} files · ${formatBytes(workspace.lastSyncBytes)}`
+                        : 'no snapshot yet; the first build copies the source',
+                ]
+                    .filter(Boolean)
+                    .join(' · ')
+              : running
+                ? 'Choose the one host folder buildbridge may read: a Capacitor project with its Android platform'
+                : 'after the toolchain starts',
     });
 
     steps.push({
@@ -751,7 +761,7 @@ export function deriveAndroidSteps(view: MachineView, context: StepContext): And
             ? 'running'
             : built
               ? 'done'
-              : synced
+              : approved
                 ? 'active'
                 : 'pending',
         summary: isRunning('test-build')
@@ -768,8 +778,8 @@ export function deriveAndroidSteps(view: MachineView, context: StepContext): And
                         .filter(Boolean)
                         .join(' · ')
                   : 'Debug build passed'
-              : synced
-                ? 'Install the locked dependencies, build the web assets, and compile the debug APK with Gradle'
+              : approved
+                ? 'Copy the latest source, install the locked dependencies, build the web assets, and compile the debug APK with Gradle'
                 : unlockedBy['test-build'],
     });
 
@@ -789,7 +799,7 @@ export function deriveAndroidSteps(view: MachineView, context: StepContext): And
                     : signingKit === null
                       ? built
                           ? 'Attach credentials holding an upload keystore, or create one on the Signing page'
-                          : unlockedBy['signing-kit']
+                          : 'after the debug build passes'
                       : `${signingKit.name} holds no upload key: ${androidKitShortfall(signingKit).join(', ')} missing`,
     });
 
@@ -818,7 +828,7 @@ export function deriveAndroidSteps(view: MachineView, context: StepContext): And
                   : kitReady && built
                     ? [
                           formatVersion(view.projectVersion),
-                          'Choose an AAB for Google Play, an APK for direct install, or both',
+                          'Choose an AAB for Google Play, an APK for direct installation, or both',
                       ]
                           .filter(Boolean)
                           .join(' · ')
@@ -833,9 +843,23 @@ export function deriveAndroidSteps(view: MachineView, context: StepContext): And
  */
 export function deriveJourney(view: MachineView, context: StepContext): JourneyStep[] {
     if (isAndroid(view.profile.provider)) {
+        const apks = androidDeviceApks(view.android);
+        // A run outlives the APK it installed only until that APK is replaced: after a new
+        // build the retained record describes something the machine no longer holds.
+        const kept = view.android?.deviceRun ?? null;
+        const retained =
+            kept &&
+            apks.some(
+                (apk) => apk.artifact.sha256.toLowerCase() === kept.result.sha256.toLowerCase(),
+            )
+                ? kept
+                : null;
         return [
             ...deriveAndroidSteps(view, context),
-            deriveAndroidDeviceStep(androidDeviceApks(view.android).length > 0, context),
+            deriveAndroidDeviceStep(apks.length > 0, context, {
+                run: retained,
+                error: view.android?.deviceRunError ?? null,
+            }),
             derivePublishStep(!!view.android?.release),
         ];
     }
@@ -846,36 +870,59 @@ export function deriveJourney(view: MachineView, context: StepContext): JourneyS
     ];
 }
 
-/** Completion comes only from the retained APK's confirmed installation and launch. */
-export function deriveAndroidDeviceStep(hasApk?: boolean, context?: StepContext): JourneyStep {
+/**
+ * Completion comes only from the retained APK's confirmed installation and launch. While the
+ * app is up with its log streaming the step is live rather than merely running, the way the
+ * iPhone step is: it has arrived and stays until it is stopped.
+ */
+export function deriveAndroidDeviceStep(
+    hasApk?: boolean,
+    context?: StepContext,
+    retained?: { run: StoredAndroidDeviceRun | null; error: string | null },
+): JourneyStep {
     const run = context?.androidDeviceRun;
+    const kept = retained?.run ?? null;
+    const keptError = retained?.error ?? null;
     const running = context?.runningStep === 'run-device';
+    const live = running && context?.runningLive === true;
+    const device = run?.serial ?? kept?.result.serial ?? 'the device';
+    const keptSummary = kept
+        ? `${kept.result.applicationId} · ${kept.versionName} (${kept.versionCode}) · on ${kept.result.model ?? kept.result.serial} · installed ${relativeTime(
+              new Date(kept.result.installedAtEpochSeconds * 1000).toISOString(),
+              context?.now,
+          )}`
+        : null;
     return {
         id: 'run-device',
         phase: 'device',
         title: 'Run on an Android device',
         kind: 'automatic',
         optional: true,
+        ...(live ? { live: true } : {}),
+        // Never done: a run is an activity, and the last one stays on the row as a fact.
         status: running
             ? 'running'
-            : run?.status === 'complete'
-              ? 'done'
-              : run?.status === 'failed'
-                ? 'failed'
-                : hasApk
-                  ? 'active'
-                  : 'pending',
+            : run?.status === 'failed' || keptError
+              ? 'failed'
+              : hasApk
+                ? 'active'
+                : 'pending',
         summary: running
-            ? 'Installing and opening the selected APK on Android'
+            ? live
+                ? `Live on ${device}; log streaming`
+                : 'Installing and opening the selected APK on Android'
             : run?.status === 'complete'
-              ? `Installed and opened on ${run.serial}`
+              ? (keptSummary ?? `Installed and opened on ${run.serial}`)
               : run?.status === 'failed'
                 ? (run.error ?? 'Installation did not finish')
-                : hasApk
-                  ? 'Build and run fresh source, or install a retained APK on a connected device'
-                  : hasApk === false
-                    ? 'Connect a device, then build and run a debug APK'
-                    : 'Open this machine to check for a retained APK and set up your device',
+                : keptError
+                  ? 'The last device run failed; the diagnostic is kept below'
+                  : (keptSummary ??
+                    (hasApk
+                        ? 'Build and run fresh source, or install a retained APK on a connected device'
+                        : hasApk === false
+                          ? 'Connect a device, then build and run a debug APK'
+                          : 'Open this machine to check for a retained APK and set up your device')),
     };
 }
 
@@ -942,20 +989,12 @@ function summarizeAndroidJourney(
                     : 'Stopped; the SDK and caches are kept',
         },
         {
-            id: 'approve',
+            id: 'project',
             phase: 'build',
-            title: 'Approve the project folder',
+            title: 'Set up the project',
             kind: 'manual',
             done: approved,
             fact: summary.workspaceName ?? '',
-        },
-        {
-            id: 'sync',
-            phase: 'build',
-            title: 'Synchronize source',
-            kind: 'automatic',
-            done: built,
-            fact: 'Snapshot in the container',
         },
         {
             id: 'test-build',
@@ -1012,7 +1051,7 @@ function summarizeAndroidJourney(
             summary:
                 row.id === 'host' || status === 'done' || status === 'failed'
                     ? row.fact
-                    : row.id === 'approve'
+                    : row.id === 'project'
                       ? 'after the toolchain starts'
                       : unlockedBy[row.id],
         };
@@ -1102,7 +1141,7 @@ function summarizeBuildJourney(
         {
             id: 'access',
             phase: 'setup',
-            title: 'Authorize the BuildBridge key',
+            title: 'Authorize the buildbridge key',
             kind: 'assisted',
             done: live && authenticated,
             fact: 'Dedicated Ed25519 key authorized',
@@ -1124,20 +1163,12 @@ function summarizeBuildJourney(
             fact: 'Xcode active',
         },
         {
-            id: 'approve',
+            id: 'project',
             phase: 'build',
-            title: 'Approve the project folder',
+            title: 'Set up the project',
             kind: 'manual',
             done: approved,
             fact: summary.workspaceName ?? '',
-        },
-        {
-            id: 'sync',
-            phase: 'build',
-            title: 'Synchronize source',
-            kind: 'automatic',
-            done: built,
-            fact: 'Snapshot in the guest',
         },
         {
             id: 'test-build',
@@ -1176,8 +1207,10 @@ function summarizeBuildJourney(
             phase: 'device',
             title: 'Run on the device',
             kind: 'assisted',
-            done: summary.deviceRunRetained,
-            fact: 'Ran on the iPhone',
+            done: false,
+            fact: summary.deviceRunRetained
+                ? 'Ran on the iPhone; open this machine to run again'
+                : 'Open this machine to run a Debug build on your iPhone',
             optional: true,
             experimental: true,
         },
@@ -1210,7 +1243,10 @@ function summarizeBuildJourney(
             kind: row.kind,
             status,
             summary:
-                row.id === 'host' || status === 'done' || status === 'failed'
+                row.id === 'host' ||
+                status === 'done' ||
+                status === 'failed' ||
+                (row.id === 'run-device' && status === 'active')
                     ? row.fact
                     : unlockedBy[row.id],
             ...(row.expected ? { expected: row.expected } : {}),
@@ -1301,10 +1337,7 @@ export function journeyHeadline(steps: JourneyStep[]): string {
         const remaining = requiredSteps(steps).find((step) => step.status !== 'done');
         if (remaining) {
             const device = steps.find((step) => step.id === 'run-device');
-            if (
-                remaining.id === 'archive' &&
-                (device?.status === 'active' || device?.status === 'done')
-            ) {
+            if (remaining.id === 'archive' && device?.status === 'active') {
                 return 'device builds ready · release signing needed';
             }
             return `${stepShortTitle[remaining.id]} is not ready`;

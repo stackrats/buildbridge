@@ -1,31 +1,33 @@
 <script setup lang="ts">
-// The window chrome: identity on the left, the two things that are true of the whole
-// application on the right — whether this host can run a machine, and whether the control
-// plane is connected.
-import { Bug, Monitor, Moon, Sun } from '@lucide/vue';
-import { computed, ref } from 'vue';
+// The window chrome: identity on the left, and on the right the things that are true of the
+// whole application — whether this host can run a machine, whether the control plane is
+// connected, what the running machines cost right now — and the way into Settings.
+import { Bug, Settings } from '@lucide/vue';
+import { computed } from 'vue';
 
 import { useBackend } from '../lib/backend';
-import { applyTheme, loadTheme, saveTheme, type Theme } from '../lib/prefs';
+import { formatCores, formatMemory, rollupTotal, series } from '../lib/usage';
 import { useMachinesStore } from '../stores/machines';
 import { controlPlaneChip } from '../model/runner';
 import { providerHostIssues, providerLabel } from '../model/providers';
 import type { MachineProvider } from '../types/backend';
 import { useRunnerStore } from '../stores/runner';
+import { useSettingsStore } from '../stores/settings';
 import { useUi } from '../stores/ui';
+import { useUsageStore } from '../stores/usage';
 import BrandLogo from './ui/BrandLogo.vue';
+import Button from './ui/Button.vue';
 import Chip from './ui/Chip.vue';
+import Sparkline from './ui/Sparkline.vue';
 
 const machines = useMachinesStore();
 const runner = useRunnerStore();
 const ui = useUi();
+const usage = useUsageStore();
 
-const theme = ref<Theme>(loadTheme());
-const themeOptions: { value: Theme; label: string; icon: typeof Sun }[] = [
-    { value: 'system', label: 'System theme', icon: Monitor },
-    { value: 'light', label: 'Light theme', icon: Sun },
-    { value: 'dark', label: 'Dark theme', icon: Moon },
-];
+// Without remote builds there is no control plane to report on, so the chip goes entirely
+// rather than sitting there saying "local only" about a feature this host does not have.
+const remoteBuilds = useSettingsStore().remoteBuilds;
 
 // The webview's own inspector, for what this desktop is doing: its requests to the control
 // plane, its console, its layout. What the app on the phone is doing is a different inspector,
@@ -39,11 +41,34 @@ function openInspector(): void {
         });
 }
 
-function setTheme(next: Theme): void {
-    theme.value = next;
-    saveTheme(next);
-    applyTheme(next);
-}
+// The running machines' cost, summed: cores in cores rather than a percentage, because a
+// percentage of every core reads as "340%" on a busy build, and memory against the host's.
+// A reading is not a state, so it is not a chip: it reads as the same quiet mono line a machine
+// carries, and a rule separates it from the chips that do carry state. It is there only while a
+// machine runs, and it leads the group: the group is pinned to the right edge, so the one item
+// whose width changes every few seconds grows into the empty space on its left and moves
+// nothing. Its figures sit in fixed-width cells for the same reason.
+const usageReading = computed(() => {
+    const latest = usage.latest.value;
+    const total = rollupTotal(latest);
+    if (!latest || total.machines === 0) {
+        return null;
+    }
+    const cores = formatCores(total.cpuCores);
+    const memory = formatMemory(total.memoryBytes);
+    const of = [
+        latest.hostCores ? ` of ${latest.hostCores}` : '',
+        latest.hostMemoryBytes ? ` of ${formatMemory(latest.hostMemoryBytes)}` : '',
+    ];
+    return {
+        cores,
+        memory,
+        tip: `${cores}${of[0]} cores and ${memory}${of[1]} across ${total.machines === 1 ? 'the running machine' : `${total.machines} running machines`}, measured while this window shows`,
+    };
+});
+const cpuHistory = computed(() =>
+    series(usage.samples.value, (sample) => rollupTotal(sample).cpuCores),
+);
 
 const host = computed(() => machines.host.value);
 const checkedProviders = computed<MachineProvider[]>(() => {
@@ -123,6 +148,22 @@ const runnerChip = computed(() => controlPlaneChip(runner.state.status, runner.s
         </button>
 
         <div class="flex items-center gap-1.5">
+            <template v-if="usageReading">
+                <button
+                    type="button"
+                    class="flex h-7 items-center gap-2 rounded-md px-1 font-mono text-[11px] text-zinc-500 tabular-nums hover:text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-50 dark:focus-visible:outline-zinc-300"
+                    v-tip="usageReading.tip"
+                    @click="ui.navigate({ kind: 'home' })"
+                >
+                    <Sparkline :values="cpuHistory" :floor="1" />
+                    <span class="w-[4.75rem] shrink-0">{{ usageReading.cores }} cores</span>
+                    <span class="w-[3.75rem] shrink-0 text-right">{{ usageReading.memory }}</span>
+                </button>
+                <span
+                    aria-hidden="true"
+                    class="mx-0.5 h-4 w-px shrink-0 bg-zinc-200 dark:bg-zinc-800"
+                />
+            </template>
             <Chip
                 :dot="hostChip.dot"
                 :tip="host ? hostDetail : 'Checking the host'"
@@ -133,6 +174,7 @@ const runnerChip = computed(() => controlPlaneChip(runner.state.status, runner.s
                 </span>
             </Chip>
             <Chip
+                v-if="remoteBuilds"
                 :dot="runnerChip.dot"
                 tip="Remote builds"
                 @click="ui.navigate({ kind: 'runner' })"
@@ -150,27 +192,16 @@ const runnerChip = computed(() => controlPlaneChip(runner.state.status, runner.s
                 <Bug class="h-3.5 w-3.5" />
                 Inspector
             </Chip>
-            <div
-                class="ml-1 flex items-center gap-0.5 rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800"
+            <Button
+                variant="ghost"
+                size="iconSm"
+                class="ml-1"
+                title="Settings: appearance, browser, storage"
+                aria-label="Settings"
+                @click="ui.state.settingsOpen = true"
             >
-                <button
-                    v-for="option in themeOptions"
-                    :key="option.value"
-                    type="button"
-                    class="flex h-6 w-6 items-center justify-center rounded-[5px] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300"
-                    :class="
-                        theme === option.value
-                            ? 'bg-white text-zinc-900 shadow-[0_1px_2px_rgb(0_0_0/0.06)] dark:bg-zinc-700 dark:text-zinc-50'
-                            : 'text-zinc-500 hover:text-zinc-600 dark:text-zinc-400 dark:hover:text-zinc-300'
-                    "
-                    v-tip="option.label"
-                    :aria-label="option.label"
-                    :aria-pressed="theme === option.value"
-                    @click="setTheme(option.value)"
-                >
-                    <component :is="option.icon" class="h-3.5 w-3.5" />
-                </button>
-            </div>
+                <Settings class="h-3.5 w-3.5" />
+            </Button>
         </div>
     </header>
 </template>

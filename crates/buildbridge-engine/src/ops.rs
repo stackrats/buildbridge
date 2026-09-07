@@ -19,6 +19,8 @@ pub struct AppState {
     /// The phones each guest reported at its last listing. Probing `devicectl` costs seconds,
     /// so the view serves this and the listing command refreshes it.
     pub(crate) guest_devices: Mutex<HashMap<String, Vec<buildbridge_machines::GuestDevice>>>,
+    /// Whether anyone is watching what the machines cost, and the thread that measures it.
+    pub(crate) usage: Mutex<crate::usage::UsageSampler>,
 }
 
 /// Marks the host busy with a privileged USB change until dropped.
@@ -199,7 +201,7 @@ pub(crate) fn finish_operation<T>(
 pub(crate) const CANCELLED_MESSAGE: &str = "Stopped.";
 
 /// What holds the machine right now: an operation in this process, or one in another
-/// BuildBridge process that left its lock on disk and is still alive.
+/// buildbridge process that left its lock on disk and is still alive.
 pub(crate) fn busy_operation(app: &Engine, machine_id: &str) -> Result<Option<String>, String> {
     let state = app.state();
     let busy = state
@@ -215,7 +217,7 @@ pub(crate) fn busy_operation(app: &Engine, machine_id: &str) -> Result<Option<St
         .and_then(|path| foreign_operation(&path)))
 }
 
-/// What a running operation leaves on disk beside the machine, so a second BuildBridge
+/// What a running operation leaves on disk beside the machine, so a second buildbridge
 /// process — a command line beside the desktop — sees the machine busy and refuses, instead of
 /// running its own operation into the same guest. A dead owner's lock is replaced.
 #[derive(Debug, Serialize, Deserialize)]
@@ -267,7 +269,7 @@ fn acquire_operation_lock(path: &std::path::Path, label: &str) -> Result<(), Str
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 if let Some(held) = foreign_operation(path) {
                     return Err(format!(
-                        "Another BuildBridge process holds this machine ({}). Wait for it to finish.",
+                        "Another buildbridge process holds this machine ({}). Wait for it to finish.",
                         held.replace('_', " ")
                     ));
                 }
@@ -407,7 +409,7 @@ mod lock_tests {
         if cfg!(target_os = "linux") {
             assert_eq!(foreign_operation(&path), Some("archiving".to_string()));
             let refused = acquire_operation_lock(&path, "archiving").unwrap_err();
-            assert!(refused.contains("Another BuildBridge process holds this machine"));
+            assert!(refused.contains("Another buildbridge process holds this machine"));
         }
         let _ = fs::remove_dir_all(&dir);
     }

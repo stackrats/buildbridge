@@ -26,7 +26,7 @@ pub async fn import_mac_xcode_package(
         || !current.guest.diagnostics.authenticated
     {
         return Err(
-            "Trust the guest fingerprint and finish BuildBridge key authentication first."
+            "Trust the guest fingerprint and finish buildbridge key authentication first."
                 .to_string(),
         );
     }
@@ -92,7 +92,7 @@ pub async fn activate_mac_xcode(
         || !current.guest.diagnostics.authenticated
     {
         return Err(
-            "Trust the guest fingerprint and finish BuildBridge key authentication first."
+            "Trust the guest fingerprint and finish buildbridge key authentication first."
                 .to_string(),
         );
     }
@@ -179,11 +179,11 @@ pub(crate) async fn provision_with_kit(
         );
     }
     let development_team = workspace.development_team.clone().ok_or_else(|| {
-        "BuildBridge could not detect one development team. Re-approve the project after setting DEVELOPMENT_TEAM in Xcode."
+        "buildbridge could not detect one development team. Re-approve the project after setting DEVELOPMENT_TEAM in Xcode."
             .to_string()
     })?;
     let bundle_identifier = workspace.bundle_identifier.clone().ok_or_else(|| {
-        "BuildBridge could not detect one release bundle identifier. Re-approve the project after setting PRODUCT_BUNDLE_IDENTIFIER in Xcode."
+        "buildbridge could not detect one release bundle identifier. Re-approve the project after setting PRODUCT_BUNDLE_IDENTIFIER in Xcode."
             .to_string()
     })?;
     let current = build_machine_view(app, &paths).await?;
@@ -509,6 +509,7 @@ pub(crate) async fn sync_apple_workspace_with_env(
     workspace.last_snapshot_sha256 = Some(sync.snapshot_sha256.clone());
     workspace.last_sync_file_count = Some(sync.source_file_count);
     workspace.last_sync_bytes = Some(sync.source_bytes);
+    workspace.last_synced_at_epoch_seconds = Some(crate::machines::now_epoch_seconds());
     workspace.last_build_succeeded = false;
     workspace.last_xcode_version = None;
     workspace.last_native_lock_updated = false;
@@ -524,7 +525,7 @@ pub async fn run_apple_smoke_build(
     machine_id: String,
     input: Option<RunAppleSmokeBuildInput>,
 ) -> Result<RunAppleSmokeBuildResult, String> {
-    let target = input.unwrap_or_default().target;
+    let RunAppleSmokeBuildInput { target, version } = input.unwrap_or_default();
     let paths = MachinePaths::resolve(app, &machine_id)?;
     let profile = machines::load_registry(app)?
         .find(&machine_id)?
@@ -537,11 +538,19 @@ pub async fn run_apple_smoke_build(
     if workspace.last_snapshot_sha256.is_none() {
         return Err("Synchronize the approved project before running a test build.".to_string());
     }
+    let requested_version = resolve_apple_project_version(&workspace.local_path, version)?;
     let current = build_machine_view(app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let identity_path = paths.guest_identity();
     let known_hosts_path = paths.known_hosts();
     let guard = begin_machine_operation(app, &machine_id, "test_building")?;
+    // The project takes the version before the build does, so it is never behind an app.
+    if let Some(version) = &requested_version
+        && let Err(error) = write_apple_project_version(&workspace.local_path, version)
+    {
+        drop(guard);
+        return Err(error);
+    }
     workspace.last_build_succeeded = false;
     workspace.last_xcode_version = None;
     workspace.last_native_lock_updated = false;
@@ -563,6 +572,7 @@ pub async fn run_apple_smoke_build(
             &identity_path,
             &known_hosts_path,
             target,
+            requested_version.as_ref(),
             |progress: AppleProjectProgress| {
                 emit_machine_progress(
                     &event_app,
@@ -738,19 +748,7 @@ pub async fn reveal_apple_archive(app: &Engine, machine_id: String) -> Result<()
     let stored = load_apple_archive(&paths)?
         .ok_or_else(|| "No retained signed archive is available.".to_string())?;
     let directory = validated_apple_archive_directory(&paths, &stored.result)?;
-    let mut command = if cfg!(target_os = "macos") {
-        Command::new("open")
-    } else if cfg!(target_os = "windows") {
-        Command::new("explorer")
-    } else {
-        Command::new("xdg-open")
-    };
-    command
-        .arg(directory)
-        .spawn()
-        .map_err(|error| format!("Could not reveal the signed artifacts: {error}"))?;
-
-    Ok(())
+    reveal_directory(&directory, "the signed artifacts")
 }
 pub async fn clear_apple_archive(app: &Engine, machine_id: String) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;

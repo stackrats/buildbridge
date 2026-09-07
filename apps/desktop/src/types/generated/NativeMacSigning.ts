@@ -3,6 +3,6 @@ import type { NativeMacProfile } from "./NativeMacProfile";
 
 export type NativeMacSigning = { identitySha1: string, identityName: string, 
 /**
- * An owner-selected local profile, copied into BuildBridge's private configuration.
+ * An owner-selected local profile, copied into buildbridge's private configuration.
  */
 profilePath: string, profile: NativeMacProfile, };

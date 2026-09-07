@@ -1,4 +1,9 @@
-import type { AndroidArtifact, AndroidDeviceRunResult, AndroidMachineView } from '../types/backend';
+import type {
+    AndroidArtifact,
+    AndroidDevice,
+    AndroidDeviceRunResult,
+    AndroidMachineView,
+} from '../types/backend';
 
 export interface AndroidDeviceRun {
     kind: 'debug' | 'release';
@@ -51,4 +56,29 @@ export function androidInstallCommand(path: string, serial = ''): string {
     const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
     const target = serial.trim();
     return `adb${target ? ` -s ${quote(target)}` : ''} install -r ${quote(path)}`;
+}
+
+/**
+ * Why the selected phone would get no response from an API served on this computer, or null
+ * when it shares a network with it or was not asked: an emulator, or a device that is not
+ * ready. Said before a run, so the app's Network Error is not the first sign.
+ */
+export function androidNetworkWarning(
+    device: AndroidDevice | null | undefined,
+    hostNetworks: string[],
+): { title: string; message: string } | null {
+    const network = device?.network;
+    if (!network || network.onHostNetwork) return null;
+    const join = hostNetworks.length
+        ? `Join the Wi-Fi network this computer is on (${hostNetworks.join(', ')}), then refresh devices.`
+        : 'Join the Wi-Fi network this computer is on, then refresh devices.';
+    return network.address
+        ? {
+              title: 'The phone is on a different network',
+              message: `It is on ${network.address}, which does not reach this computer, so an app that calls an API served here gets no response. ${join}`,
+          }
+        : {
+              title: 'The phone is not on Wi-Fi',
+              message: `Mobile data is all it has, and that does not reach this computer, so an app that calls an API served here gets no response. ${join}`,
+          };
 }

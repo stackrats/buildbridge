@@ -1,4 +1,4 @@
-//! Transport and typed job execution for a BuildBridge runner.
+//! Transport and typed job execution for a buildbridge runner.
 //!
 //! This crate has no Tauri dependency. Desktop, headless, and future macOS
 //! guest agents can all use the same API and executor.
@@ -226,7 +226,7 @@ fn execute_diagnostics(mut sequence: u64) -> ExecutionResult {
         sequence,
         stream: LogStream::System,
         message: format!(
-            "BuildBridge runner {} on {platform}/{architecture}",
+            "buildbridge runner {} on {platform}/{architecture}",
             env!("CARGO_PKG_VERSION")
         ),
     }];

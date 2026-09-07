@@ -13,12 +13,14 @@ import { androidOutputLabel } from '../model/android-outputs';
 import { appleUploadBlocker, type AppleArchiveUpload } from '../model/apple-upload';
 import { androidDeviceApks, type AndroidDeviceRun } from '../model/android-device';
 import { googlePlayUploadBlocker, type GooglePlayUpload } from '../model/google-play-upload';
+import type { StoreBuildsState } from '../model/version';
 import { useMachineOrder } from './machine-order';
 import type {
     AdoptPodfileLockResult,
     AndroidBuildProgress,
     AndroidDevices,
     AndroidDeviceRunInput,
+    AndroidDeviceRunProgress,
     AndroidDeviceRunResult,
     AndroidReleaseProgress,
     AndroidReleaseOutputs,
@@ -95,10 +97,14 @@ export interface MachineSession {
     androidDeviceSerial: string;
     androidDeviceApk: 'debug' | 'release';
     androidDeviceRun: AndroidDeviceRun | null;
+    /** An Android device run's phases and its app log, the iPhone console's counterpart. */
+    androidDevice: AndroidDeviceRunProgress | null;
     googlePlayConnection: GooglePlayConnection | null;
     googlePlayConnectionLoading: boolean;
     googlePlayConnectionError: string | null;
     googlePlayUpload: GooglePlayUpload | null;
+    /** The store's answer about the builds it holds, once asked from a version field. */
+    storeBuilds: StoreBuildsState | null;
     usbMigration: DiskMigrationProgress | null;
     /** Rebuilding the container from its profile. */
     rebuild: ContainerRebuildProgress | null;
@@ -108,7 +114,7 @@ export interface MachineSession {
     device: AppleDeviceRunProgress | null;
     buildLog: LogLine[];
     archiveLog: LogLine[];
-    /** The app's own console while it runs on the phone. */
+    /** The app's own console while it runs on the phone; an Android machine's app log too. */
     deviceLog: LogLine[];
     /** The guest's Podfile.lock adopted into the project, until the next test build. */
     lockAdoption: AdoptPodfileLockResult | null;
@@ -135,9 +141,11 @@ const state = reactive({
 });
 
 let unlisteners: Unlisten[] = [];
+/** Host ADB listings in flight, by machine id, so a refresh can share a quiet probe's answer. */
+const androidListings = new Map<string, Promise<void>>();
 let listeningPromise: Promise<void> | null = null;
 let refreshTimers: Record<string, ReturnType<typeof setTimeout>> = {};
-/** Machines the list last showed saving a template from another BuildBridge process. */
+/** Machines the list last showed saving a template from another buildbridge process. */
 let foreignTemplateSaves = new Set<string>();
 
 function createSession(id: string): MachineSession {
@@ -169,10 +177,12 @@ function createSession(id: string): MachineSession {
         androidDeviceSerial: '',
         androidDeviceApk: 'debug',
         androidDeviceRun: null,
+        androidDevice: null,
         googlePlayConnection: null,
         googlePlayConnectionLoading: false,
         googlePlayConnectionError: null,
         googlePlayUpload: null,
+        storeBuilds: null,
         usbMigration: null,
         rebuild: null,
         usbAttach: null,
@@ -193,6 +203,21 @@ function createSession(id: string): MachineSession {
 function session(id: string): MachineSession {
     state.sessions[id] ??= createSession(id);
     return state.sessions[id];
+}
+
+/** One reading of host ADB's device list; a failure is kept as the step's diagnostic. */
+async function listAndroidDevices(target: MachineSession): Promise<void> {
+    target.androidDevicesError = null;
+    try {
+        target.androidDevices = await useBackend().listAndroidDevices(target.id);
+        const ready = target.androidDevices.devices.filter((device) => device.state === 'device');
+        if (!ready.some((device) => device.serial === target.androidDeviceSerial)) {
+            target.androidDeviceSerial = ready.length === 1 ? ready[0]!.serial : '';
+        }
+    } catch (error) {
+        target.androidDevices = null;
+        target.androidDevicesError = describeError(error);
+    }
 }
 
 function note(target: MachineSession, text: string, tone: LogLine['tone'] = 'system'): void {
@@ -259,7 +284,7 @@ async function loadTemplates(): Promise<void> {
 }
 
 /**
- * A save another BuildBridge process runs — the command line beside this window — is known
+ * A save another buildbridge process runs — the command line beside this window — is known
  * only by the lock it holds, since no event from that process reaches this one. When the lock
  * is gone the templates are read again, so the one it made appears.
  */
@@ -496,6 +521,22 @@ async function listenForEvents(): Promise<void> {
                     pushBounded(target.buildLog, { text: event.logLine }, LOG_LIMIT);
                 }
             }),
+            backend.onAndroidDeviceProgress((event) => {
+                const target = session(event.machineId);
+                const phaseChanged = target.androidDevice?.phase !== event.phase;
+                target.androidDevice = event;
+                if (phaseChanged) {
+                    pushBounded(
+                        target.deviceLog,
+                        { text: `— ${event.detail}`, tone: 'system' },
+                        LOG_LIMIT,
+                    );
+                }
+                // The app log is not throttled like build output: every line lands.
+                for (const line of event.logLines) {
+                    pushBounded(target.deviceLog, { text: line }, LOG_LIMIT);
+                }
+            }),
             backend.onAndroidReleaseProgress((event) => {
                 const target = session(event.machineId);
                 const phaseChanged = target.androidRelease?.phase !== event.phase;
@@ -612,12 +653,15 @@ function runningOperationFor(id: string): string | null {
 /** Whether the running operation has arrived at its live stage: the app is up on the phone. */
 function runningLiveFor(id: string): boolean {
     const target = state.sessions[id];
-    return runningStepFor(id) === 'run-device' && target?.device?.phase === 'running';
+    return (
+        runningStepFor(id) === 'run-device' &&
+        (target?.device?.phase === 'running' || target?.androidDevice?.phase === 'running')
+    );
 }
 
 /**
  * A template being saved from one machine: this client's, with its name and progress, or
- * another BuildBridge process's, known only by the lock it holds.
+ * another buildbridge process's, known only by the lock it holds.
  */
 export interface TemplateSaveActivity {
     machineId: string;
@@ -877,7 +921,7 @@ export function useMachinesStore() {
                         'Installing the access key over one password-authenticated SSH session',
                     finished: (view) =>
                         view.guest.diagnostics.authenticated
-                            ? 'Key installed. BuildBridge signs in with its own key from now on; the password was discarded.'
+                            ? 'Key installed. buildbridge signs in with its own key from now on; the password was discarded.'
                             : 'The key was written, but signing in with it still fails. See the step for the reason.',
                 },
             );
@@ -987,7 +1031,11 @@ export function useMachinesStore() {
             );
         },
         /** An Android machine's debug build: the counterpart of the unsigned test build. */
-        debugBuild: async (id: string, allowHttp = false) => {
+        debugBuild: async (
+            id: string,
+            allowHttp = false,
+            version: ProjectVersionInput | null = null,
+        ) => {
             const target = session(id);
             return runOperation(
                 id,
@@ -995,7 +1043,7 @@ export function useMachinesStore() {
                 () => {
                     target.androidBuild = null;
                     target.buildLog = [];
-                    return useBackend().runAndroidDebugBuild(id, allowHttp);
+                    return useBackend().runAndroidDebugBuild(id, allowHttp, version);
                 },
                 {
                     started: 'Running the debug build',
@@ -1046,25 +1094,35 @@ export function useMachinesStore() {
                 target.error = describeError(error);
             }
         },
-        refreshAndroidDevices: async (id: string) => {
+        /**
+         * Lists what host ADB sees. The device step asks quietly every few seconds while it is
+         * open, which leaves the controls alone and the Refresh button still; a refresh the
+         * person asks for shows the spinner. One listing runs per machine at a time: a refresh
+         * during a quiet probe waits for that probe's answer rather than racing it.
+         */
+        refreshAndroidDevices: async (id: string, options: { quiet?: boolean } = {}) => {
             const target = session(id);
             if (target.androidDevicesLoading || target.operation || target.view?.busyOperation)
                 return;
-            target.androidDevicesLoading = true;
-            target.androidDevicesError = null;
-            try {
-                target.androidDevices = await useBackend().listAndroidDevices(id);
-                const ready = target.androidDevices.devices.filter(
-                    (device) => device.state === 'device',
-                );
-                if (!ready.some((device) => device.serial === target.androidDeviceSerial)) {
-                    target.androidDeviceSerial = ready.length === 1 ? ready[0]!.serial : '';
+            const inFlight = androidListings.get(id);
+            if (inFlight) {
+                if (options.quiet) return;
+                target.androidDevicesLoading = true;
+                try {
+                    await inFlight;
+                } finally {
+                    target.androidDevicesLoading = false;
                 }
-            } catch (error) {
-                target.androidDevices = null;
-                target.androidDevicesError = describeError(error);
+                return;
+            }
+            if (!options.quiet) target.androidDevicesLoading = true;
+            const listing = listAndroidDevices(target);
+            androidListings.set(id, listing);
+            try {
+                await listing;
             } finally {
-                target.androidDevicesLoading = false;
+                androidListings.delete(id);
+                if (!options.quiet) target.androidDevicesLoading = false;
             }
         },
         runAndroidDevice: async (id: string, input: AndroidDeviceRunInput): Promise<boolean> => {
@@ -1097,17 +1155,20 @@ export function useMachinesStore() {
                 error: null,
             };
             target.androidDeviceRun = run;
+            // A fresh session: the phases and the app log belong to this run alone.
+            target.androidDevice = null;
+            target.deviceLog = [];
             const result = await runOperation(
                 id,
                 'android-run-device',
                 async () => {
                     const result = await useBackend().runAndroidDevice(id, input);
                     if (
-                        result.sha256.toLowerCase() !== input.expectedSha256.toLowerCase() ||
-                        result.serial !== input.serial ||
-                        result.applicationId !== apk!.applicationId ||
-                        !result.installed ||
-                        !result.launched
+                        result.run.sha256.toLowerCase() !== input.expectedSha256.toLowerCase() ||
+                        result.run.serial !== input.serial ||
+                        result.run.applicationId !== apk!.applicationId ||
+                        !result.run.installed ||
+                        !result.run.launched
                     )
                         throw new Error(
                             'The device did not confirm installation and launch. Check the phone before retrying.',
@@ -1116,11 +1177,26 @@ export function useMachinesStore() {
                 },
                 {
                     started: `Installing the retained ${input.kind} APK on ${input.serial}`,
-                    finished: 'APK installed and opened on the Android device.',
+                    finished: (result) =>
+                        `${result.run.applicationId} ran on ${result.run.serial}; the log session ${
+                            result.run.consoleEnd === 'stopped'
+                                ? 'was stopped from here'
+                                : result.run.consoleEnd === 'exited'
+                                  ? 'ended when the app exited'
+                                  : 'ended when the device disconnected'
+                        }. The app stays installed.`,
                     stopped:
                         'Device installation stopped. Check the device before retrying; the app may already be installed.',
                 },
             );
+            if (result) {
+                // Lines already streamed; the tail only fills a log that never saw them.
+                if (target.deviceLog.length === 0) {
+                    for (const line of result.run.consoleTail) {
+                        pushBounded(target.deviceLog, { text: line }, LOG_LIMIT);
+                    }
+                }
+            }
             if (
                 target.androidDeviceRun?.sha256 === input.expectedSha256 &&
                 target.androidDeviceRun.serial === input.serial &&
@@ -1130,13 +1206,29 @@ export function useMachinesStore() {
                 )
             ) {
                 target.androidDeviceRun.status = result ? 'complete' : 'failed';
-                target.androidDeviceRun.result = result;
+                target.androidDeviceRun.result = result?.run ?? null;
                 target.androidDeviceRun.error = result
                     ? null
                     : (target.error ?? target.notice ?? 'Installation did not finish.');
             }
             return result !== null;
         },
+        /** Removes the retained Android run and its diagnostic, as the iPhone's clear does. */
+        clearAndroidDeviceRun: (id: string) =>
+            runOperation(
+                id,
+                'clear-android-device-run',
+                () => useBackend().clearAndroidDeviceRun(id),
+                { finished: 'Last device run cleared.' },
+            ).then((view) => {
+                if (view) {
+                    const target = session(id);
+                    target.androidDeviceRun = null;
+                    target.androidDevice = null;
+                    target.deviceLog = [];
+                }
+                return view;
+            }),
         loadGooglePlayConnection: async (id: string) => {
             const target = session(id);
             if (target.googlePlayConnectionLoading) return;
@@ -1190,6 +1282,35 @@ export function useMachinesStore() {
                 target.googlePlayConnectionError = describeError(error);
             } finally {
                 target.googlePlayConnectionLoading = false;
+            }
+        },
+        /**
+         * Asks the store what it holds. Not an operation: no lock, no busy state, only the
+         * answer beside the build number.
+         */
+        checkStoreBuilds: async (id: string, version: string | null) => {
+            const target = session(id);
+            target.storeBuilds = {
+                version: version ?? '',
+                status: 'checking',
+                result: null,
+                error: null,
+            };
+            try {
+                const result = await useBackend().checkStoreBuilds(id, version);
+                target.storeBuilds = {
+                    version: result.version,
+                    status: 'done',
+                    result,
+                    error: null,
+                };
+            } catch (error) {
+                target.storeBuilds = {
+                    version: version ?? '',
+                    status: 'failed',
+                    result: null,
+                    error: describeError(error),
+                };
             }
         },
         uploadGooglePlay: async (id: string): Promise<boolean> => {
@@ -1252,14 +1373,18 @@ export function useMachinesStore() {
             runOperation(id, 'clear-release', () => useBackend().clearAndroidRelease(id), {
                 finished: 'Retained artifacts removed.',
             }),
-        testBuild: async (id: string, buildTarget: UnsignedBuildTarget = 'device_sdk') => {
+        testBuild: async (
+            id: string,
+            buildTarget: UnsignedBuildTarget = 'device_sdk',
+            version: ProjectVersionInput | null = null,
+        ) => {
             const target = session(id);
             target.project = null;
             target.lockAdoption = null;
             return runOperation(
                 id,
                 'test-build',
-                () => useBackend().runSmokeBuild(id, buildTarget),
+                () => useBackend().runSmokeBuild(id, buildTarget, version),
                 {
                     started: 'Running the unsigned test build',
                     finished: (result) =>
@@ -1536,14 +1661,19 @@ export function useMachinesStore() {
                 },
             );
         },
-        runOnDevice: async (id: string, udid: string) => {
+        runOnDevice: async (
+            id: string,
+            udid: string,
+            envSetId: string | null = null,
+            version: ProjectVersionInput | null = null,
+        ) => {
             const target = session(id);
             target.device = null;
             target.deviceLog = [];
             return runOperation(
                 id,
                 'run-device',
-                () => useBackend().runAppleDeviceBuild(id, udid),
+                () => useBackend().runAppleDeviceBuild(id, udid, envSetId, version),
                 {
                     started: 'Building the Debug configuration for the iPhone',
                     finished: (result) =>

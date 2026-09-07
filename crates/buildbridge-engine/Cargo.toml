@@ -1,7 +1,7 @@
 [package]
 name = "buildbridge-engine"
 version.workspace = true
-description = "Everything BuildBridge does, as a library any client can drive"
+description = "Everything buildbridge does, as a library any client can drive"
 edition.workspace = true
 license.workspace = true
 

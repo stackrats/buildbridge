@@ -8,7 +8,7 @@ import { computed, onMounted, ref } from 'vue';
 
 import { formatBytes, formatDate } from '../../lib/format';
 import { templateSavePhaseLabel } from '../../model/phases';
-import { providerPlatform } from '../../model/providers';
+import { providerLabel, providerPlatform } from '../../model/providers';
 import { useMachinesStore } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
 import type { MachineTemplateSummary } from '../../types/backend';
@@ -29,7 +29,7 @@ const ui = useUi();
 
 const templates = computed(() => machines.state.templates);
 // Saves under way sit ahead of the saved templates, this window's with their progress and a
-// Stop, another BuildBridge process's by the lock it holds; a failed one stays until its
+// Stop, another buildbridge process's by the lock it holds; a failed one stays until its
 // machine's next operation succeeds.
 const saves = computed(() => machines.templateSaves());
 const failures = computed(() => machines.templateSaveFailures());
@@ -66,12 +66,9 @@ async function remove(): Promise<void> {
 function detailsFor(template: MachineTemplateSummary) {
     return [
         { label: 'Saved from', value: template.sourceMachineName },
-        {
-            label: 'Provider',
-            value: template.provider === 'dockur_macos' ? 'dockur/macos' : 'Docker-OSX',
-        },
-        { label: 'macOS', value: template.macosVersion ?? 'not recorded' },
-        { label: 'Xcode', value: template.xcodeVersion ?? 'not recorded' },
+        { label: 'Provider', value: providerLabel[template.provider] },
+        { label: 'macOS', value: template.macosVersion ?? 'Not recorded' },
+        { label: 'Xcode', value: template.xcodeVersion ?? 'Not recorded' },
         { label: 'Size on disk', value: formatBytes(template.sizeBytes) },
         {
             label: 'Saved',
@@ -79,7 +76,7 @@ function detailsFor(template: MachineTemplateSummary) {
         },
         {
             label: 'Machines cloned from it',
-            value: template.machineNames.length ? template.machineNames.join(', ') : 'none',
+            value: template.machineNames.length ? template.machineNames.join(', ') : 'None',
         },
     ];
 }
@@ -89,12 +86,7 @@ function detailsFor(template: MachineTemplateSummary) {
     <div class="mx-auto max-w-4xl space-y-4 p-5">
         <header class="flex items-start justify-between gap-4">
             <div>
-                <h1
-                    class="flex items-center gap-2 text-lg font-bold text-zinc-900 dark:text-zinc-50"
-                >
-                    <PlatformIcon platform="ios" class="h-4 w-4" />
-                    macOS templates
-                </h1>
+                <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">Templates</h1>
                 <p class="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                     Start new macOS machines with macOS and Xcode already prepared. Save a template
                     from a ready machine's menu, then reuse it here to skip installation.
@@ -136,7 +128,7 @@ function detailsFor(template: MachineTemplateSummary) {
                 "
                 :detail="
                     save.progress?.detail ??
-                    (save.own ? null : 'run by another BuildBridge process, which has its progress')
+                    (save.own ? null : 'run by another buildbridge process, which has its progress')
                 "
                 :elapsed-seconds="save.progress?.elapsedSeconds ?? null"
                 :value="save.progress?.percent == null ? null : save.progress.percent / 100"
@@ -210,15 +202,11 @@ function detailsFor(template: MachineTemplateSummary) {
         <details
             class="rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-950"
         >
-            <DisclosureSummary
-                class="cursor-pointer text-xs font-medium text-zinc-700 dark:text-zinc-200"
-            >
-                How templates share storage and access
-            </DisclosureSummary>
+            <DisclosureSummary> How templates share storage and access </DisclosureSummary>
             <p class="mt-3 text-xs leading-5 text-zinc-600 dark:text-zinc-300">
                 A clone's disk is a copy-on-write overlay over the template, so it costs nothing
                 until it writes and the template can only be deleted once every clone is gone. A
-                clone boots with the template's SSH identity, which BuildBridge pins for it, and is
+                clone boots with the template's SSH identity, which buildbridge pins for it, and is
                 given its own access key through the template's, which is then retired from the
                 clone. Templates stay on this host: nothing of Apple's is redistributed.
             </p>

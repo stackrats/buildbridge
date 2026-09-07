@@ -130,7 +130,7 @@ class AndroidSigningCheck {
             }
         }
         if (!foundContent) throw new CheckFailure("JAR_CONTENT");
-        System.out.println("BuildBridge verified every app bundle entry and its signing certificate.");
+        System.out.println("buildbridge verified every app bundle entry and its signing certificate.");
     }
 
     public static void main(String[] args) {

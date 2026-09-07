@@ -2,8 +2,18 @@
 // The whole journey as one full-width timeline: a progress header, a section per phase, and a
 // row per step carrying its result. The selected step opens in place; its essential actions stay
 // visible while individual steps can disclose their technical reference separately.
-import { Check, ChevronDown, TriangleAlert, X } from '@lucide/vue';
-import { computed, nextTick, ref, watch } from 'vue';
+import {
+    ArrowRight,
+    Check,
+    ChevronDown,
+    Hammer,
+    Smartphone,
+    TriangleAlert,
+    Upload,
+    Wrench,
+    X,
+} from '@lucide/vue';
+import { computed, nextTick, ref, watch, type Component } from 'vue';
 
 import { formatElapsed } from '../../lib/format';
 import {
@@ -20,6 +30,7 @@ import {
 } from '../../model/steps';
 import { cn } from '../../lib/utils';
 import Badge from './Badge.vue';
+import Button from './Button.vue';
 import Meter from './Meter.vue';
 import Spinner from './Spinner.vue';
 
@@ -52,26 +63,41 @@ function yoursRemaining(phaseSteps: Step<Id>[]): number {
     ).length;
 }
 
+// Each phase keeps one glyph, tinted once the phase is complete, so a folded header still
+// says what it holds.
+const phaseIcon: Record<StepPhase, Component> = {
+    setup: Wrench,
+    build: Hammer,
+    device: Smartphone,
+    publish: Upload,
+};
+
 // A finished phase folds to its header so the timeline stays short; it reopens on click, and
-// whenever the step you are looking at is inside it.
-const expanded = ref<Record<StepPhase, boolean>>({
-    setup: true,
-    build: true,
-    device: true,
-    publish: true,
-});
+// whenever the step you are looking at is inside it. What a person chose is the model, so a
+// page comes back as it was left; a phase nobody has touched takes the default.
+const chosen = defineModel<Record<string, boolean>>('expanded', { default: () => ({}) });
 function phaseOf(id: Id | null): StepPhase | null {
     return steps.find((step) => step.id === id)?.phase ?? null;
 }
+function isExpanded(group: PhaseGroup<Id>): boolean {
+    return (
+        chosen.value[group.phase] ?? (!group.complete || group.phase === phaseOf(selected.value))
+    );
+}
+function setExpanded(phase: StepPhase, open: boolean): void {
+    chosen.value = { ...chosen.value, [phase]: open };
+}
+// A phase that completes folds, and the one holding the open step unfolds, whatever was chosen.
 watch(
     () => groups.value.map((group) => `${group.phase}:${group.complete}`).join(','),
     () => {
         const open = phaseOf(selected.value);
+        const next = { ...chosen.value };
         for (const group of groups.value) {
-            expanded.value[group.phase] = !group.complete || group.phase === open;
+            next[group.phase] = !group.complete || group.phase === open;
         }
+        chosen.value = next;
     },
-    { immediate: true },
 );
 
 const rows = ref<Record<string, HTMLElement | null>>({});
@@ -86,7 +112,7 @@ watch(selected, async (id) => {
     }
     const phase = phaseOf(id);
     if (phase) {
-        expanded.value[phase] = true;
+        setExpanded(phase, true);
     }
     await nextTick();
     rows.value[id]?.scrollIntoView({ block: 'nearest' });
@@ -94,11 +120,11 @@ watch(selected, async (id) => {
 
 /** The steps on screen: what the arrow keys walk, and what has to stay non-empty. */
 const visible = computed(() =>
-    groups.value.flatMap((group) => (expanded.value[group.phase] ? group.steps : [])),
+    groups.value.flatMap((group) => (isExpanded(group) ? group.steps : [])),
 );
 
 function togglePhase(group: PhaseGroup<Id>): void {
-    expanded.value[group.phase] = !expanded.value[group.phase];
+    setExpanded(group.phase, !isExpanded(group));
 }
 
 async function move(from: Id, offset: number): Promise<void> {
@@ -121,7 +147,7 @@ const nodeClass: Record<StepStatus, string> = {
     active: 'border-zinc-900 dark:border-zinc-100 bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-950',
     running:
         'border-zinc-900 dark:border-zinc-100 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100',
-    failed: 'border-red-500 bg-red-500 text-white',
+    failed: 'border-red-500 bg-red-500 text-white dark:text-zinc-950',
     pending:
         'border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-500 dark:text-zinc-400',
 };
@@ -176,9 +202,7 @@ function meta(step: Step<Id>): string {
             parts.push('needs attention');
             break;
         case 'active':
-            if (step.kind !== 'automatic') {
-                parts.push('you do this');
-            }
+            // Whose turn it is belongs to the phase header, said once; the row keeps the duration.
             if (step.expected) {
                 parts.push(`usually ${step.expected}`);
             }
@@ -208,14 +232,24 @@ function meta(step: Step<Id>): string {
                           : 'primary'
                 "
             />
-            <span
-                class="min-w-0 truncate text-xs"
-                :class="
-                    focus?.status === 'failed'
-                        ? 'text-red-700 dark:text-red-400'
-                        : 'text-zinc-500 dark:text-zinc-400'
-                "
+            <!-- Where the journey stands is a button while there is a step to go to. -->
+            <Button
+                v-if="focus"
+                variant="ghost"
+                size="sm"
+                class="-my-1 min-w-0"
+                :title="`Opens ${focus.title}`"
+                @click="selected = focus.id"
             >
+                <span
+                    class="flex min-w-0 items-center gap-1.5"
+                    :class="focus.status === 'failed' ? 'text-red-700 dark:text-red-400' : ''"
+                >
+                    <span class="truncate">{{ headline }}</span>
+                    <ArrowRight class="h-3.5 w-3.5 shrink-0" />
+                </span>
+            </Button>
+            <span v-else class="min-w-0 truncate text-xs text-zinc-500 dark:text-zinc-400">
                 {{ headline }}
             </span>
         </header>
@@ -225,13 +259,18 @@ function meta(step: Step<Id>): string {
                 <button
                     type="button"
                     class="flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left hover:bg-zinc-100/70 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-zinc-700 dark:hover:bg-zinc-800/40 dark:focus-visible:outline-zinc-300"
-                    :aria-expanded="expanded[group.phase]"
+                    :aria-expanded="isExpanded(group)"
                     @click="togglePhase(group)"
                 >
                     <span class="flex min-w-0 items-center gap-2">
-                        <Check
-                            v-if="group.complete"
-                            class="h-3.5 w-3.5 shrink-0 text-emerald-700 dark:text-emerald-400"
+                        <component
+                            :is="phaseIcon[group.phase]"
+                            class="h-3.5 w-3.5 shrink-0"
+                            :class="
+                                group.complete
+                                    ? 'text-emerald-700 dark:text-emerald-400'
+                                    : 'text-zinc-500 dark:text-zinc-400'
+                            "
                         />
                         <span
                             class="shrink-0 text-[13px] font-semibold text-zinc-700 dark:text-zinc-200"
@@ -239,7 +278,7 @@ function meta(step: Step<Id>): string {
                             {{ group.label }}
                         </span>
                         <span
-                            v-if="!expanded[group.phase] && summaries[group.phase]"
+                            v-if="!isExpanded(group) && summaries[group.phase]"
                             class="min-w-0 truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400"
                         >
                             {{ summaries[group.phase] }}
@@ -249,7 +288,7 @@ function meta(step: Step<Id>): string {
                         <span
                             v-if="yoursRemaining(group.steps)"
                             class="text-[11px] text-zinc-500 dark:text-zinc-400"
-                            v-tip="'Steps you do inside macOS'"
+                            v-tip="'Steps you do yourself; buildbridge checks the result'"
                         >
                             {{ yoursRemaining(group.steps) }} need you
                         </span>
@@ -259,7 +298,9 @@ function meta(step: Step<Id>): string {
                             aria-hidden="true"
                             >·</span
                         >
+                        <!-- A phase made only of optional steps is not measured. -->
                         <span
+                            v-if="group.steps.some((step) => !step.optional)"
                             class="text-[11px] tabular-nums"
                             :class="
                                 group.focus?.status === 'failed'
@@ -273,12 +314,12 @@ function meta(step: Step<Id>): string {
                         </span>
                         <ChevronDown
                             class="h-3.5 w-3.5 text-zinc-500 transition-transform duration-200 motion-reduce:transition-none dark:text-zinc-400"
-                            :class="expanded[group.phase] ? '' : '-rotate-90'"
+                            :class="isExpanded(group) ? '' : '-rotate-90'"
                         />
                     </span>
                 </button>
 
-                <ol v-if="expanded[group.phase]" class="mt-0.5">
+                <ol v-if="isExpanded(group)" class="mt-0.5">
                     <li
                         v-for="(step, index) in group.steps"
                         :key="step.id"
@@ -358,7 +399,7 @@ function meta(step: Step<Id>): string {
                             </span>
                             <span
                                 v-if="meta(step)"
-                                class="shrink-0 pt-0.5 text-[11px] whitespace-nowrap"
+                                class="shrink-0 pt-0.5 text-[11px] whitespace-nowrap tabular-nums"
                                 :class="
                                     step.live
                                         ? liveMetaClass

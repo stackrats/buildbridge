@@ -30,6 +30,14 @@ export interface SavePathRequest {
 }
 
 export interface Backend {
+    /** This host's preferences, shared with the command line. */
+    getHostSettings(): Promise<T.HostSettings>;
+    saveHostSettings(input: T.HostSettings): Promise<T.HostSettings>;
+    getStorageLocations(): Promise<T.StorageLocations>;
+    revealStorageDirectory(directory: T.StorageDirectory): Promise<void>;
+    /** Whether the engine keeps measuring what the machines cost; on while the window shows. */
+    setUsageSampling(enabled: boolean): Promise<void>;
+    onHostUsage(handler: (sample: T.UsageSample) => void): Promise<Unlisten>;
     getRunnerStatus(): Promise<T.DesktopStatus>;
     pairRunner(input: T.PairInput): Promise<T.DesktopStatus>;
     unpairRunner(): Promise<void>;
@@ -99,6 +107,7 @@ export interface Backend {
     runSmokeBuild(
         machineId: string,
         target: T.UnsignedBuildTarget,
+        version?: T.ProjectVersionInput | null,
     ): Promise<T.RunAppleSmokeBuildResult>;
     adoptGuestPodfileLock(machineId: string): Promise<T.AdoptPodfileLockResult>;
     /** The webview's inspector: console, network and elements of this desktop itself. */
@@ -111,7 +120,7 @@ export interface Backend {
     openAndroidInspector(): Promise<string>;
     /**
      * Opens Apple's downloads page, searched for `query`, in a window of this app. A `.xip`
-     * downloaded there lands in BuildBridge's folder and is reported as it grows; the desktop
+     * downloaded there lands in buildbridge's folder and is reported as it grows; the desktop
      * only (the browser preview simulates it).
      */
     downloadXcode(machineId: string, query: string): Promise<void>;
@@ -135,7 +144,11 @@ export interface Backend {
     clearAndroidWorkspace(machineId: string): Promise<T.MachineView>;
     syncAndroidWorkspace(machineId: string): Promise<T.SyncAndroidWorkspaceResult>;
     /** The debug APK; the first run also prepares the toolchain inside the container. */
-    runAndroidDebugBuild(machineId: string, allowHttp?: boolean): Promise<T.RunAndroidBuildResult>;
+    runAndroidDebugBuild(
+        machineId: string,
+        allowHttp?: boolean,
+        version?: T.ProjectVersionInput | null,
+    ): Promise<T.RunAndroidBuildResult>;
     /**
      * Selected signed release files, both by default, with the attached kit's key. `version`
      * sets the version name and code in the project and in this release.
@@ -152,16 +165,27 @@ export interface Backend {
     revealAndroidDebugApk(machineId: string): Promise<void>;
     /** Host ADB devices; the Android build container can be stopped. */
     listAndroidDevices(machineId: string): Promise<T.AndroidDevices>;
+    /**
+     * Installs and launches the retained APK, then streams the app's log until the session
+     * ends; a stop, the app exiting, and the device going away are all ends, not failures.
+     */
     runAndroidDevice(
         machineId: string,
         input: T.AndroidDeviceRunInput,
-    ): Promise<T.AndroidDeviceRunResult>;
+    ): Promise<T.RunAndroidDeviceResult>;
+    clearAndroidDeviceRun(machineId: string): Promise<T.MachineView>;
     googlePlayConnection(machineId: string): Promise<T.GooglePlayConnection>;
     /** The native layer reads the JSON file and stores the credentials in the OS vault. */
     configureGooglePlay(machineId: string, path: string): Promise<T.GooglePlayConnection>;
     exportGooglePlayCredential(machineId: string, path: string): Promise<void>;
     disconnectGooglePlay(machineId: string): Promise<void>;
     uploadGooglePlay(machineId: string, expectedSha256: string): Promise<T.GooglePlayUploadResult>;
+    /**
+     * Asks the machine's store which builds it already holds for the app, for `version` or the
+     * project's own: App Store Connect through the kit's Team key, Google Play through the
+     * connected service account. A read; nothing is locked or written.
+     */
+    checkStoreBuilds(machineId: string, version: string | null): Promise<T.StoreBuildsCheck>;
 
     /** Installs the host udev rule that keeps usbmuxd off iPhones; one authorization prompt. */
     installUsbReleaseRule(): Promise<T.HostUsbStatus>;
@@ -184,7 +208,16 @@ export interface Backend {
         deviceName: string,
     ): Promise<T.PrepareDeviceSigningResult>;
     /** Returns when the console session ends; a Stop while running is the normal end. */
-    runAppleDeviceBuild(machineId: string, udid: string): Promise<T.RunAppleDeviceResult>;
+    /**
+     * `envSetId` rebuilds the web assets with that environment for this run alone; `version`
+     * sets the version in the project and in this Debug build for the phone.
+     */
+    runAppleDeviceBuild(
+        machineId: string,
+        udid: string,
+        envSetId?: string | null,
+        version?: T.ProjectVersionInput | null,
+    ): Promise<T.RunAppleDeviceResult>;
     clearAppleDeviceRun(machineId: string): Promise<T.MachineView>;
 
     listSigningKits(): Promise<T.SigningKitSummary[]>;
@@ -268,6 +301,9 @@ export interface Backend {
     onAndroidReleaseProgress(
         handler: (event: T.MachineEvent<T.AndroidReleaseProgress>) => void,
     ): Promise<Unlisten>;
+    onAndroidDeviceProgress(
+        handler: (event: T.MachineEvent<T.AndroidDeviceRunProgress>) => void,
+    ): Promise<Unlisten>;
     onXcodeDownloadProgress(handler: (event: T.XcodeDownloadProgress) => void): Promise<Unlisten>;
     onDragDrop(handler: (event: DragDropEvent) => void): Promise<Unlisten>;
 
@@ -294,6 +330,12 @@ async function createTauriBackend(): Promise<Backend> {
             listen<P>(event, (message) => handler(message.payload));
 
     return {
+        getHostSettings: () => invoke('get_host_settings'),
+        saveHostSettings: (input) => invoke('save_host_settings', { input }),
+        getStorageLocations: () => invoke('get_storage_locations'),
+        revealStorageDirectory: (directory) => invoke('reveal_storage_directory', { directory }),
+        setUsageSampling: (enabled) => invoke('set_usage_sampling', { enabled }),
+        onHostUsage: subscribe<T.UsageSample>('host-usage'),
         getRunnerStatus: () => invoke('get_runner_status'),
         pairRunner: (input) => invoke('pair_runner', { input }),
         unpairRunner: () => invoke('unpair_runner'),
@@ -351,8 +393,8 @@ async function createTauriBackend(): Promise<Backend> {
             invoke('approve_apple_workspace', { machineId, input: { path } }),
         clearWorkspace: (machineId) => invoke('clear_apple_workspace', { machineId }),
         syncWorkspace: (machineId) => invoke('sync_apple_workspace', { machineId }),
-        runSmokeBuild: (machineId, target) =>
-            invoke('run_apple_smoke_build', { machineId, input: { target } }),
+        runSmokeBuild: (machineId, target, version = null) =>
+            invoke('run_apple_smoke_build', { machineId, input: { target, version } }),
         adoptGuestPodfileLock: (machineId) => invoke('adopt_guest_podfile_lock', { machineId }),
         openDeveloperTools: () => invoke('open_developer_tools'),
         openMachineScreen: (machineId, url, title) =>
@@ -370,20 +412,23 @@ async function createTauriBackend(): Promise<Backend> {
             invoke('approve_android_workspace', { machineId, input: { path } }),
         clearAndroidWorkspace: (machineId) => invoke('clear_android_workspace', { machineId }),
         syncAndroidWorkspace: (machineId) => invoke('sync_android_workspace', { machineId }),
-        runAndroidDebugBuild: (machineId, allowHttp = false) =>
-            invoke('run_android_debug_build', { machineId, allowHttp }),
+        runAndroidDebugBuild: (machineId, allowHttp = false, version = null) =>
+            invoke('run_android_debug_build', { machineId, allowHttp, version }),
         runAndroidRelease: (machineId, envSetId, outputs = 'both', version = null) =>
             invoke('run_android_signed_release', { machineId, envSetId, outputs, version }),
         revealAndroidRelease: (machineId) => invoke('reveal_android_release', { machineId }),
         revealAndroidDebugApk: (machineId) => invoke('reveal_android_debug_apk', { machineId }),
         listAndroidDevices: (machineId) => invoke('list_android_devices', { machineId }),
         runAndroidDevice: (machineId, input) => invoke('run_android_device', { machineId, input }),
+        clearAndroidDeviceRun: (machineId) => invoke('clear_android_device_run', { machineId }),
         googlePlayConnection: (machineId) => invoke('google_play_connection', { machineId }),
         exportGooglePlayCredential: (machineId, path) =>
             invoke('export_google_play_credential', { machineId, path }),
         configureGooglePlay: (machineId, path) =>
             invoke('configure_google_play', { machineId, path }),
         disconnectGooglePlay: (machineId) => invoke('disconnect_google_play', { machineId }),
+        checkStoreBuilds: (machineId, version) =>
+            invoke('check_store_builds', { machineId, input: { version } }),
         uploadGooglePlay: (machineId, expectedSha256) =>
             invoke('upload_google_play', { machineId, expectedSha256 }),
         clearAndroidRelease: (machineId) => invoke('clear_android_release', { machineId }),
@@ -406,8 +451,8 @@ async function createTauriBackend(): Promise<Backend> {
                 machineId,
                 input: { udid, deviceName, confirmed: true },
             }),
-        runAppleDeviceBuild: (machineId, udid) =>
-            invoke('run_apple_device_build', { machineId, input: { udid } }),
+        runAppleDeviceBuild: (machineId, udid, envSetId = null, version = null) =>
+            invoke('run_apple_device_build', { machineId, input: { udid, envSetId, version } }),
         clearAppleDeviceRun: (machineId) => invoke('clear_apple_device_run', { machineId }),
 
         listSigningKits: () => invoke('list_signing_kits'),
@@ -473,6 +518,7 @@ async function createTauriBackend(): Promise<Backend> {
         onDeviceProgress: subscribe('machine-device-progress'),
         onAndroidBuildProgress: subscribe('machine-android-build-progress'),
         onAndroidReleaseProgress: subscribe('machine-android-release-progress'),
+        onAndroidDeviceProgress: subscribe('machine-android-device-progress'),
         onXcodeDownloadProgress: subscribe('xcode-download-progress'),
         pickSavePath: (request) =>
             save({
@@ -518,7 +564,7 @@ export async function loadBackend(): Promise<Backend> {
         const { createMockBackend } = await import('./backend-mock');
         backend = createMockBackend();
     } else {
-        throw new Error('BuildBridge must run inside the desktop application.');
+        throw new Error('buildbridge must run inside the desktop application.');
     }
 
     return backend;

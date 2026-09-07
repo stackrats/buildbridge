@@ -160,6 +160,8 @@ interface MockMachine {
         release: T.AndroidReleaseResult | null;
         releaseError: string | null;
         releaseEnvSet: string | null;
+        deviceRun: T.StoredAndroidDeviceRun | null;
+        deviceRunError: string | null;
     } | null;
     busy: string | null;
     logs: string[];
@@ -220,6 +222,7 @@ function readyMachine(): MockMachine {
             },
             lastSyncFileCount: 1_842,
             lastSyncBytes: 48_213_770,
+            lastSyncedAtEpochSeconds: Math.floor(Date.now() / 1000) - 2 * 3600,
             lastBuildSucceeded: true,
             lastXcodeVersion: '26.6',
             lastNativeLockUpdated: lockDrift,
@@ -265,12 +268,12 @@ function readyMachine(): MockMachine {
             buildNumber: '15',
             provisioningProfileUuid: '11111111-2222-3333-4444-555555555555',
             ipa: {
-                path: '/home/you/.local/share/dev.buildbridge.desktop/macos-builder/artifacts/archive-1756800000000-4242/App-AppStore.ipa',
+                path: '/home/you/.local/share/dev.buildbridge.desktop/macos-builder/artifacts/archive-1756800000000-4242/App-AppStore-3.2.0-15.ipa',
                 bytes: 7_096_076,
                 sha256: 'AAAA1111BBBB2222CCCC3333DDDD4444EEEE5555FFFF6666AAAA7777BBBB8888',
             },
             archive: {
-                path: '/home/you/.local/share/dev.buildbridge.desktop/macos-builder/artifacts/archive-1756800000000-4242/App.xcarchive.zip',
+                path: '/home/you/.local/share/dev.buildbridge.desktop/macos-builder/artifacts/archive-1756800000000-4242/App-3.2.0-15.xcarchive.zip',
                 bytes: 28_268_787,
                 sha256: '9999CCCC8888DDDD7777EEEE6666FFFF5555AAAA4444BBBB3333CCCC2222DDDD',
             },
@@ -373,6 +376,7 @@ function androidMachine(): MockMachine {
                     '6c22009fda0b9467709394b5ae1c442af1da4544d63b5ac01b8778c03d7fcd7b',
                 lastSyncFileCount: 1_397,
                 lastSyncBytes: 28_278_463,
+                lastSyncedAtEpochSeconds: Math.floor(Date.now() / 1000) - 2 * 3600,
                 lastBuildSucceeded: true,
                 lastBuild: {
                     allowHttp: false,
@@ -384,7 +388,7 @@ function androidMachine(): MockMachine {
                         buildToolsVersion: '35.0.0',
                     },
                     apk: {
-                        path: '/home/you/.local/share/dev.buildbridge.desktop/machines/pixel-builder/artifacts/debug-1756890000000-4242/app-debug.apk',
+                        path: '/home/you/.local/share/dev.buildbridge.desktop/machines/pixel-builder/artifacts/debug-1756890000000-4242/app-debug-3.2.0-12.apk',
                         bytes: 33_410_772,
                         sha256: '5555aaaa6666bbbb7777cccc8888dddd9999eeee0000ffff1111222233334444',
                     },
@@ -400,12 +404,12 @@ function androidMachine(): MockMachine {
                 certificateSha256:
                     '2f7c1e9a4b3d5c6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6',
                 aab: {
-                    path: '/home/you/.local/share/dev.buildbridge.desktop/machines/pixel-builder/artifacts/release-1756900000000-4242/app-release.aab',
+                    path: '/home/you/.local/share/dev.buildbridge.desktop/machines/pixel-builder/artifacts/release-1756900000000-4242/app-release-3.2.0-12.aab',
                     bytes: 6_412_090,
                     sha256: '1111aaaa2222bbbb3333cccc4444dddd5555eeee6666ffff7777000088881111',
                 },
                 apk: {
-                    path: '/home/you/.local/share/dev.buildbridge.desktop/machines/pixel-builder/artifacts/release-1756900000000-4242/app-release.apk',
+                    path: '/home/you/.local/share/dev.buildbridge.desktop/machines/pixel-builder/artifacts/release-1756900000000-4242/app-release-3.2.0-12.apk',
                     bytes: 9_803_211,
                     sha256: '9999aaaa8888bbbb7777cccc6666dddd5555eeee4444ffff3333000022221111',
                 },
@@ -413,6 +417,8 @@ function androidMachine(): MockMachine {
             },
             releaseError: null,
             releaseEnvSet: null,
+            deviceRun: null,
+            deviceRunError: null,
         },
         logs: [],
     };
@@ -698,7 +704,7 @@ export function createMockBackend(): Backend {
                             : null,
                     issue:
                         trust === 'trusted' && machine.username && !machine.authenticated
-                            ? 'SSH authentication failed; add the BuildBridge public key to the guest user'
+                            ? 'SSH authentication failed; add the buildbridge public key to the guest user'
                             : null,
                 },
                 devices: running ? machine.guestDevices.map((device) => ({ ...device })) : [],
@@ -732,7 +738,7 @@ export function createMockBackend(): Backend {
                     issues: usbRuleInstalled
                         ? []
                         : [
-                              'Install the BuildBridge iPhone rule so usbmuxd releases phones to the machine.',
+                              'Install the buildbridge iPhone rule so usbmuxd releases phones to the machine.',
                           ],
                 },
                 diskOnHost: machine.usbContainer,
@@ -756,6 +762,10 @@ export function createMockBackend(): Backend {
                       release: machine.android.release ? { ...machine.android.release } : null,
                       releaseEnvSet: machine.android.releaseEnvSet,
                       releaseError: machine.android.releaseError,
+                      deviceRun: machine.android.deviceRun
+                          ? { ...machine.android.deviceRun }
+                          : null,
+                      deviceRunError: machine.android.deviceRunError,
                   }
                 : null,
         };
@@ -772,7 +782,7 @@ export function createMockBackend(): Backend {
         const build = input.build?.trim() || machine.projectVersion?.build;
         if (!version || !build)
             throw new Error(
-                'BuildBridge could not read one version and build number from the project, so give both to set them.',
+                'buildbridge could not read one version and build number from the project, so give both to set them.',
             );
         machine.projectVersion = { version, build };
         return machine.projectVersion;
@@ -819,8 +829,75 @@ export function createMockBackend(): Backend {
         'completed',
     ];
 
+    // Host settings and what the machines cost, for the settings dialog and the top bar. The
+    // numbers are invented around each running machine's profile; a build makes them climb.
+    // Remote builds are on in the preview even though a real host starts with them off: the
+    // preview exists to show the interface, and this is the only way to see that part of it.
+    let hostSettings: T.HostSettings = { browser: null, remoteBuilds: true };
+    let usageTimer: ReturnType<typeof setInterval> | null = null;
+    let usageTick = 0;
+    const GIB = 1024 ** 3;
+    const usageSample = (): T.UsageSample => {
+        usageTick += 1;
+        return {
+            atUnixMs: Date.now(),
+            hostCores: 16,
+            hostMemoryBytes: 32 * GIB,
+            machines: machines
+                .filter((machine) => machine.state === 'running')
+                .map((machine) => {
+                    const busy = machine.busy !== null;
+                    const wave = Math.sin(usageTick / 3) * 0.05 + Math.random() * 0.04;
+                    const limited = isAndroid(machine.config.provider);
+                    return {
+                        machineId: machine.id,
+                        cpuCores: Math.max(0.01, (busy ? 3.2 : 0.08) + wave * (busy ? 8 : 1)),
+                        memoryBytes: Math.round(
+                            machine.config.memoryGib * GIB * (busy ? 0.72 : 0.4) + wave * 0.5 * GIB,
+                        ),
+                        memoryLimitBytes: limited ? machine.config.memoryGib * GIB : 32 * GIB,
+                        memoryLimited: limited,
+                    };
+                }),
+        };
+    };
+
     return {
         ...createSharingPreview(emitter, query),
+        async getHostSettings() {
+            await sleep(60);
+            return { ...hostSettings };
+        },
+        async saveHostSettings(input) {
+            await sleep(150);
+            const browser = input.browser?.trim() || null;
+            if (browser && browser.startsWith('missing')) {
+                throw new Error(
+                    `No browser named ${browser} was found on this computer. Give its command name or full path, or leave the browser blank for the default one.`,
+                );
+            }
+            hostSettings = { browser, remoteBuilds: input.remoteBuilds };
+            return { ...hostSettings };
+        },
+        async getStorageLocations() {
+            return {
+                configDir: '/home/you/.config/dev.buildbridge.desktop',
+                dataDir: '/home/you/.local/share/dev.buildbridge.desktop',
+            };
+        },
+        async revealStorageDirectory() {
+            // The browser preview has no file manager to show.
+        },
+        async setUsageSampling(enabled) {
+            if (enabled && usageTimer === null) {
+                emitter.emit('host-usage', usageSample());
+                usageTimer = setInterval(() => emitter.emit('host-usage', usageSample()), 2000);
+            } else if (!enabled && usageTimer !== null) {
+                clearInterval(usageTimer);
+                usageTimer = null;
+            }
+        },
+        onHostUsage: async (handler) => emitter.on('host-usage', handler),
         async getRunnerStatus() {
             await sleep(150);
             return {
@@ -1252,6 +1329,7 @@ export function createMockBackend(): Backend {
                 lastSource: null,
                 lastSyncFileCount: null,
                 lastSyncBytes: null,
+                lastSyncedAtEpochSeconds: null,
                 lastBuildSucceeded: false,
                 lastXcodeVersion: null,
             };
@@ -1292,6 +1370,7 @@ export function createMockBackend(): Backend {
                         '9999cccc8888dddd7777eeee6666ffff5555aaaa4444bbbb3333cccc2222dddd';
                     machine.workspace.lastSyncFileCount = 1842;
                     machine.workspace.lastSyncBytes = total;
+                    machine.workspace.lastSyncedAtEpochSeconds = Math.floor(Date.now() / 1000);
                     machine.workspace.lastBuildSucceeded = false;
                 }
                 return {
@@ -1307,8 +1386,9 @@ export function createMockBackend(): Backend {
                 };
             });
         },
-        async runSmokeBuild(machineId, target) {
+        async runSmokeBuild(machineId, target, version = null) {
             const machine = find(machineId);
+            applyVersion(machine, version);
             // The Simulator target downloads Apple's platform once; the device SDK never does.
             const downloadsPlatform =
                 target === 'simulator' && machine.iosSimulatorRuntime === null;
@@ -1348,6 +1428,7 @@ export function createMockBackend(): Backend {
                         target,
                         xcodeVersion: machine.xcodeVersion ?? '26.6',
                         nativeLockfileUpdated: false,
+                        version: machine.projectVersion && { ...machine.projectVersion },
                         outputTail: ['** BUILD SUCCEEDED **'],
                     },
                 };
@@ -1427,6 +1508,11 @@ export function createMockBackend(): Backend {
                     archive.marketingVersion = requested.version;
                     archive.buildNumber = requested.build;
                 }
+                // The retained files are named after the version the archive reports.
+                const directory = archive.ipa.path.slice(0, archive.ipa.path.lastIndexOf('/'));
+                const tag = `${archive.marketingVersion}-${archive.buildNumber}`;
+                archive.ipa.path = `${directory}/App-AppStore-${tag}.ipa`;
+                archive.archive.path = `${directory}/App-${tag}.xcarchive.zip`;
                 machine.archive = archive;
                 machine.archiveError = null;
                 return { view: view(machine), archive };
@@ -1479,6 +1565,8 @@ export function createMockBackend(): Backend {
                 release: null,
                 releaseError: null,
                 releaseEnvSet: null,
+                deviceRun: null,
+                deviceRunError: null,
             };
             machine.android.workspace = {
                 localPath: path,
@@ -1487,6 +1575,7 @@ export function createMockBackend(): Backend {
                 lastSnapshotSha256: null,
                 lastSyncFileCount: null,
                 lastSyncBytes: null,
+                lastSyncedAtEpochSeconds: null,
                 lastBuildSucceeded: false,
                 lastBuild: null,
                 lastSource: null,
@@ -1531,6 +1620,7 @@ export function createMockBackend(): Backend {
                         '6c22009fda0b9467709394b5ae1c442af1da4544d63b5ac01b8778c03d7fcd7b';
                     workspace.lastSyncFileCount = 1397;
                     workspace.lastSyncBytes = total;
+                    workspace.lastSyncedAtEpochSeconds = Math.floor(Date.now() / 1000);
                     workspace.lastBuildSucceeded = false;
                     workspace.lastBuild = null;
                 }
@@ -1547,8 +1637,10 @@ export function createMockBackend(): Backend {
                 };
             });
         },
-        async runAndroidDebugBuild(machineId, allowHttp = false) {
+        async runAndroidDebugBuild(machineId, allowHttp = false, version = null) {
             const machine = find(machineId);
+            applyVersion(machine, version);
+            const built = machine.projectVersion ?? { version: '3.2.0', build: '12' };
             return busy(machine, 'Running the debug build', async () => {
                 const phases: T.AndroidBuildPhase[] = [
                     'preparing_tools',
@@ -1577,14 +1669,14 @@ export function createMockBackend(): Backend {
                 const build: T.AndroidBuildResult = {
                     allowHttp,
                     applicationId: 'com.example.app.debug',
-                    versionName: '3.2.0',
-                    versionCode: '12',
+                    versionName: built.version,
+                    versionCode: built.build,
                     toolchain: {
                         jdkVersion: 'openjdk version "21.0.12.1" 2026-08-18 LTS',
                         buildToolsVersion: '35.0.0',
                     },
                     apk: {
-                        path: `/home/you/.local/share/dev.buildbridge.desktop/machines/${machineId}/artifacts/debug-${Date.now()}-4242/app-debug.apk`,
+                        path: `/home/you/.local/share/dev.buildbridge.desktop/machines/${machineId}/artifacts/debug-${Date.now()}-4242/app-debug-${built.version}-${built.build}.apk`,
                         bytes: 33_410_772,
                         sha256: '5555aaaa6666bbbb7777cccc8888dddd9999eeee0000ffff1111222233334444',
                     },
@@ -1631,6 +1723,17 @@ export function createMockBackend(): Backend {
                     release.versionName = requested.version;
                     release.versionCode = requested.build;
                 }
+                // The retained files are named after the version the signed APK reports.
+                const tag = `${release.versionName}-${release.versionCode}`;
+                for (const [artifact, extension] of [
+                    [release.aab, 'aab'],
+                    [release.apk, 'apk'],
+                ] as const) {
+                    if (artifact) {
+                        const directory = artifact.path.slice(0, artifact.path.lastIndexOf('/'));
+                        artifact.path = `${directory}/app-release-${tag}.${extension}`;
+                    }
+                }
                 if (outputs === 'aab') release.apk = null;
                 if (outputs === 'apk') release.aab = null;
                 if (machine.android) {
@@ -1651,9 +1754,17 @@ export function createMockBackend(): Backend {
                 available: true,
                 issue: null,
                 devices: [
-                    { serial: 'emulator-5554', state: 'device', model: 'Pixel 9' },
-                    { serial: 'USB-PHONE', state: 'unauthorized', model: null },
+                    { serial: 'emulator-5554', state: 'device', model: 'Pixel 9', network: null },
+                    { serial: 'USB-PHONE', state: 'unauthorized', model: null, network: null },
+                    // A phone with Wi-Fi off: the step warns that it does not reach this computer.
+                    {
+                        serial: 'R5CX1234ABC',
+                        state: 'device',
+                        model: 'Galaxy S24',
+                        network: { address: null, onHostNetwork: false },
+                    },
                 ],
+                hostNetworks: ['192.168.1.0/24'],
             };
         },
         async runAndroidDevice(machineId, input) {
@@ -1666,16 +1777,79 @@ export function createMockBackend(): Backend {
                 throw new Error('The retained APK changed. Review it before installing.');
             if (input.serial !== 'emulator-5554')
                 throw new Error('Authorize the device and refresh devices before installing.');
+            machine.cancelRequested = false;
             return busy(machine, 'running_android_device', async () => {
-                await sleep(1000);
-                return {
+                const started = Date.now();
+                const emit = (
+                    phase: T.AndroidDeviceRunPhase,
+                    detail: string,
+                    logLines: string[] = [],
+                ) =>
+                    emitter.emit<T.MachineEvent<T.AndroidDeviceRunProgress>>(
+                        'machine-android-device-progress',
+                        {
+                            machineId,
+                            phase,
+                            elapsedSeconds: Math.floor((Date.now() - started) / 1000),
+                            detail,
+                            logLines,
+                        },
+                    );
+                emit('checking', 'Checking the device over ADB.');
+                await sleep(400);
+                emit('staging', 'Verifying and staging the APK.');
+                await sleep(400);
+                emit('installing', 'Installing the app on the device.');
+                await sleep(900);
+                emit('launching', 'Launching the app.');
+                await sleep(500);
+                const logLines = [
+                    'I/Capacitor( 4242): Starting BridgeActivity',
+                    'D/Capacitor/Console( 4242): [log] app ready',
+                    'I/chromium( 4242): [INFO:CONSOLE(1)] GET /v1/session 200',
+                ];
+                let tick = 0;
+                emit('running', 'The app is running; its log streams here (process 4242).');
+                while (!machine.cancelRequested && Date.now() - started < 5 * 60_000) {
+                    emit('running', 'The app is running; its log streams here (process 4242).', [
+                        logLines[tick % logLines.length]!,
+                    ]);
+                    tick += 1;
+                    await sleep(700);
+                }
+                emit('completed', 'The log session ended.');
+                const run: T.AndroidDeviceRunResult = {
                     serial: input.serial,
+                    model: 'Pixel 9',
                     applicationId: build.applicationId,
                     sha256: build.apk!.sha256,
                     installed: true,
                     launched: true,
+                    pid: 4242,
+                    installedAtEpochSeconds: Math.floor(started / 1000),
+                    consoleEnd: 'stopped',
+                    consoleTail: logLines,
                 };
+                if (machine.android) {
+                    machine.android.deviceRun = {
+                        kind: input.kind,
+                        versionName: build.versionName,
+                        versionCode: build.versionCode,
+                        result: run,
+                        finishedAtEpochSeconds: Math.floor(Date.now() / 1000),
+                    };
+                    machine.android.deviceRunError = null;
+                }
+                return { view: view(machine), run };
             });
+        },
+        async clearAndroidDeviceRun(machineId) {
+            const machine = find(machineId);
+            if (machine.android) {
+                machine.android.deviceRun = null;
+                machine.android.deviceRunError = null;
+            }
+            return view(machine);
         },
         async googlePlayConnection(machineId) {
             find(machineId);
@@ -1722,6 +1896,43 @@ export function createMockBackend(): Backend {
                     sha256: expectedSha256,
                 };
             });
+        },
+        async checkStoreBuilds(machineId, version) {
+            const machine = find(machineId);
+            await sleep(700);
+            const project = machine.projectVersion ?? { version: '3.2.0', build: '15' };
+            const asked = version?.trim() || project.version;
+            const checkedAtEpochSeconds = Math.floor(Date.now() / 1000);
+            if (machine.android) {
+                // Google Play compares against every version code it has ever received.
+                const held = { version: '12 (3.2.0)', build: '12', uploadedAt: null, state: null };
+                return {
+                    store: 'google_play',
+                    version: asked,
+                    mustExceed: held,
+                    latest: held,
+                    nextBuild: '13',
+                    buildsSeen: 4,
+                    checkedAtEpochSeconds,
+                };
+            }
+            // TestFlight compares within a marketing version: 3.2.0 has builds, a new one has none.
+            const held = {
+                version: '3.2.0',
+                build: '15',
+                uploadedAt: '2026-09-02T10:14:00Z',
+                state: 'VALID',
+            };
+            const binds = asked === '3.2.0';
+            return {
+                store: 'app_store_connect',
+                version: asked,
+                mustExceed: binds ? held : null,
+                latest: held,
+                nextBuild: binds ? '16' : null,
+                buildsSeen: 15,
+                checkedAtEpochSeconds,
+            };
         },
         async downloadXcode(machineId, query) {
             // The preview has no Apple to talk to: the archive arrives over a few seconds.
@@ -1963,9 +2174,11 @@ export function createMockBackend(): Backend {
                 };
             });
         },
-        async runAppleDeviceBuild(machineId, udid) {
+        async runAppleDeviceBuild(machineId, udid, _envSetId = null, version = null) {
             const machine = find(machineId);
             machine.cancelRequested = false;
+            const built = applyVersion(machine, version) ??
+                machine.projectVersion ?? { version: '3.2.0', build: '15' };
             return busy(machine, 'Running on the device', async () => {
                 const device =
                     machine.guestDevices.find((candidate) => candidate.udid === udid) ??
@@ -2029,8 +2242,8 @@ export function createMockBackend(): Backend {
                     bundleIdentifier: 'com.example.app',
                     appPath:
                         '/Users/builder/BuildBridge/workspaces/active/.buildbridge/DerivedData/Build/Products/Debug-iphoneos/App.app',
-                    marketingVersion: '3.2.0',
-                    buildNumber: '15',
+                    marketingVersion: built.version,
+                    buildNumber: built.build,
                     provisioningProfileUuid: '22222222-3333-4444-5555-666666666666',
                     installedAtEpochSeconds: Math.floor(Date.now() / 1000),
                     consoleEnd: 'stopped',
@@ -2240,7 +2453,7 @@ export function createMockBackend(): Backend {
                 profiles: [
                     {
                         id: 'prof-1',
-                        name: 'BuildBridge App Store profile',
+                        name: 'buildbridge App Store profile',
                         platform: 'IOS',
                         profileType: 'IOS_APP_STORE',
                         profileState: 'ACTIVE',
@@ -2252,7 +2465,7 @@ export function createMockBackend(): Backend {
                     },
                     {
                         id: 'prof-3',
-                        name: 'BuildBridge Development 1756900000',
+                        name: 'buildbridge Development 1756900000',
                         platform: 'IOS',
                         profileType: 'IOS_APP_DEVELOPMENT',
                         profileState: 'ACTIVE',
@@ -2486,6 +2699,8 @@ export function createMockBackend(): Backend {
         onDeviceProgress: async (handler) => emitter.on('machine-device-progress', handler),
         onAndroidBuildProgress: async (handler) =>
             emitter.on('machine-android-build-progress', handler),
+        onAndroidDeviceProgress: async (handler) =>
+            emitter.on('machine-android-device-progress', handler),
         onAndroidReleaseProgress: async (handler) =>
             emitter.on('machine-android-release-progress', handler),
         onXcodeDownloadProgress: async (handler) => emitter.on('xcode-download-progress', handler),

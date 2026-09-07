@@ -25,7 +25,7 @@ pub async fn configure_mac_guest_access(
     build_machine_view(app, &paths).await
 }
 
-/// Installs the BuildBridge key into the guest user's `authorized_keys` through one
+/// Installs the buildbridge key into the guest user's `authorized_keys` through one
 /// password-authenticated SSH session on the pinned host key — the `ssh-copy-id` route. The
 /// password exists in this request and in the environment of that single `ssh` process; it is
 /// not stored, logged, or reused. Everything after this step signs in with the key. The

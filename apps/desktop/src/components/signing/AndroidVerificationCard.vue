@@ -90,9 +90,7 @@ const details = computed(() =>
         </p>
         <Callout v-if="error" tone="danger">{{ error }}</Callout>
         <details v-if="result">
-            <DisclosureSummary class="text-xs font-medium text-zinc-700 dark:text-zinc-200">
-                Certificate details and comparison
-            </DisclosureSummary>
+            <DisclosureSummary> Certificate details and comparison </DisclosureSummary>
             <div class="mt-3 space-y-3">
                 <KeyValue :items="details" :columns="2" />
                 <Field

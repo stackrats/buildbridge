@@ -26,7 +26,7 @@ pub async fn save_signing_kit(
         None => {
             if kits.kits.len() >= MAX_SIGNING_KITS {
                 return Err(format!(
-                    "BuildBridge stores at most {MAX_SIGNING_KITS} signing credentials."
+                    "buildbridge stores at most {MAX_SIGNING_KITS} signing credentials."
                 ));
             }
             let existing_ids = kits
@@ -403,15 +403,15 @@ pub async fn verify_android_signing_kit(
     })
 }
 
-/// Where kits keep the upload keys BuildBridge created for them, one directory per key.
+/// Where kits keep the upload keys buildbridge created for them, one directory per key.
 pub(crate) fn managed_android_keystores_dir(app: &Engine) -> Result<PathBuf, String> {
     Ok(app.config_dir().join("android-builder").join("keystores"))
 }
 
 /// Creates an upload key for a kit in a throwaway container of the toolchain image: the
-/// keystore lands owner-only under BuildBridge's managed directory, and its path, alias and
+/// keystore lands owner-only under buildbridge's managed directory, and its path, alias and
 /// password go into the kit. The person chooses the password and must keep it; Google Play
-/// cannot recover an upload key whose password is lost, and neither can BuildBridge.
+/// cannot recover an upload key whose password is lost, and neither can buildbridge.
 pub async fn create_android_keystore(
     app: &Engine,
     kit_id: String,
@@ -486,7 +486,7 @@ pub async fn create_android_keystore(
     })
 }
 
-/// Removes the upload key BuildBridge created for a kit, if the kit's keystore is one of
+/// Removes the upload key buildbridge created for a kit, if the kit's keystore is one of
 /// those; a keystore the person pointed the kit at is theirs and stays.
 pub(crate) fn remove_managed_keystore_for(
     app: &Engine,
@@ -506,7 +506,7 @@ pub(crate) fn remove_managed_keystore_for(
     Ok(())
 }
 
-/// The guest keychain password is BuildBridge's to invent: it locks a keychain BuildBridge
+/// The guest keychain password is buildbridge's to invent: it locks a keychain buildbridge
 /// creates inside a machine, and nothing else ever asks for it. A kit saved without one gets
 /// one, so the simplest kit is a name and a Team key; a password someone typed is kept as is.
 pub(crate) fn invent_keychain_password(kit: &mut StoredSigningKit) -> Result<(), String> {
@@ -711,7 +711,7 @@ pub(crate) fn resolve_signing_kit<'a>(
 /// Whether a kit holds everything provisioning needs.
 ///
 /// Three things make a kit usable, any one of them with the guest keychain password: a Team
-/// key, from which BuildBridge creates certificates and profiles at Apple when a machine first
+/// key, from which buildbridge creates certificates and profiles at Apple when a machine first
 /// needs them; the distribution set — identity, passphrase and at least one profile — which is
 /// what an archive needs; or a development identity with its passphrase, enough to run on a
 /// phone and nothing more.

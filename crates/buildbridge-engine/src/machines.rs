@@ -1,6 +1,6 @@
 //! Registry of the managed macOS machines this desktop owns, plus their per-machine storage.
 //!
-//! The first BuildBridge release managed exactly one builder whose files lived directly under
+//! The first buildbridge release managed exactly one builder whose files lived directly under
 //! `macos-builder/` with a hard-coded container name. That machine is migrated into the
 //! registry as [`DEFAULT_MACHINE_ID`] and keeps its original directory and container so an
 //! existing installation keeps working. Every newer machine gets its own directory under
@@ -175,7 +175,7 @@ impl MachinePaths {
         self.config_dir.join("identity.env")
     }
 
-    /// Held by the process running an operation on this machine, so another BuildBridge
+    /// Held by the process running an operation on this machine, so another buildbridge
     /// process sees it busy.
     pub fn operation_lock(&self) -> PathBuf {
         self.data_dir.join("operation.lock")
@@ -250,6 +250,14 @@ impl MachinePaths {
         self.config_dir.join("device-run-error.txt")
     }
 
+    pub fn android_device_run_record(&self) -> PathBuf {
+        self.config_dir.join("android-device-run.json")
+    }
+
+    pub fn android_device_run_error(&self) -> PathBuf {
+        self.config_dir.join("android-device-run-error.txt")
+    }
+
     /// The host project's Podfile.lock as it was before the guest's copy was adopted.
     pub fn podfile_lock_backup(&self) -> PathBuf {
         self.config_dir.join("Podfile.lock.previous")
@@ -295,6 +303,8 @@ impl MachinePaths {
             self.android_workspace(),
             self.android_release_record(),
             self.android_release_error(),
+            self.android_device_run_record(),
+            self.android_device_run_error(),
             self.operation_lock(),
         ] {
             remove_file_if_present(&path)?;

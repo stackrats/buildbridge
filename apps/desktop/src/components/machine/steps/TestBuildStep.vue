@@ -1,28 +1,44 @@
 <script setup lang="ts">
+// The test build and its choices in one place: which source, which environment, which SDK,
+// which version. The latest source is copied into the guest first, through the guided flow;
+// the saved snapshot is compiled as it is.
 import { FileCheck, Hammer, ScrollText } from '@lucide/vue';
-import { computed, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 
 import { percent } from '../../../lib/format';
+import type { BuildRequest } from '../../../model/build-flow';
+import { describeEnvSetSize } from '../../../model/envs';
 import { projectPhaseLabel } from '../../../model/phases';
+import { describeSnapshot } from '../../../model/snapshot';
 import { unsignedBuildTargetOptions, type JourneyStep } from '../../../model/steps';
+import { useBuildFlowStore } from '../../../stores/build-flow';
+import { useEnvSetsStore } from '../../../stores/envs';
 import { activityLabel, useMachinesStore, type MachineSession } from '../../../stores/machines';
 import { useUi } from '../../../stores/ui';
 import type { UnsignedBuildTarget } from '../../../types/backend';
 import Button from '../../ui/Button.vue';
 import Callout from '../../ui/Callout.vue';
 import FailureBlock from '../../ui/FailureBlock.vue';
+import Field from '../../ui/Field.vue';
 import ProgressRow from '../../ui/ProgressRow.vue';
 import Select from '../../ui/Select.vue';
 import Spinner from '../../ui/Spinner.vue';
 import StepPanel from '../../ui/StepPanel.vue';
+import VersionFields from '../VersionFields.vue';
 
 const { session, step } = defineProps<{ session: MachineSession; step: JourneyStep }>();
 const machines = useMachinesStore();
 const ui = useUi();
 
-const workspace = computed(() => session.view!.appleWorkspace);
+const view = computed(() => session.view!);
+const workspace = computed(() => view.value.appleWorkspace);
+// The choices live in the machine's build draft, shared with the other build steps.
+const flows = useBuildFlowStore();
+const draft = flows.draft(session.id);
+const envs = useEnvSetsStore();
+onMounted(() => void envs.load());
 const simulatorRuntime = computed(() => session.view!.guest.diagnostics.iosSimulatorRuntime);
-const busy = computed(() => session.operation !== null);
+const busy = computed(() => session.operation !== null || flows.active(session.id));
 const running = computed(() => step.status === 'running');
 const lastLine = computed(() => session.buildLog.at(-1)?.text ?? null);
 
@@ -74,41 +90,68 @@ const downloadsSimulator = computed(
     () => target.value === 'simulator' && simulatorRuntime.value === null,
 );
 const targetOptions = computed(() => unsignedBuildTargetOptions(simulatorRuntime.value));
+
+// Latest source copies the folder again before compiling; the saved snapshot compiles what
+// was copied last time. The environment travels with the copy, so it is chosen only then.
+const source = computed<BuildRequest['source']>({
+    get: () => draft.source,
+    set: (value) => {
+        draft.source = value;
+    },
+});
+const snapshot = computed(() => workspace.value?.lastSnapshotSha256 ?? null);
+const snapshotSummary = computed(() => describeSnapshot(view.value));
+const envSetId = ref(view.value.envSet?.id ?? '');
+const envOptions = computed(() => [
+    { value: '', label: 'No environment', description: 'The project configuration alone' },
+    ...envs.sets.value.map((set) => ({
+        value: set.id,
+        label: set.name,
+        description: describeEnvSetSize(set),
+    })),
+]);
+function build(): void {
+    if (busy.value) return;
+    void flows.start(
+        session.id,
+        {
+            source: source.value,
+            outcome: 'test',
+            target: target.value,
+            envSetId: source.value === 'latest' ? envSetId.value || null : null,
+            androidOutputs: draft.androidOutputs,
+            androidAllowHttp: draft.androidAllowHttp,
+            version: draft.version ?? null,
+        },
+        source.value === 'latest' ? (envs.setById(envSetId.value)?.name ?? null) : null,
+    );
+}
 </script>
 
 <template>
     <StepPanel :step="step">
         <template #action>
-            <span class="w-48 max-w-full">
-                <Select
-                    v-model="target"
-                    :options="targetOptions"
-                    size="sm"
-                    :disabled="busy || step.status === 'pending'"
-                />
-            </span>
             <Button
                 size="sm"
-                :disabled="busy || step.status === 'pending'"
-                :title="
-                    downloadsSimulator
-                        ? 'Downloads Apple\'s iOS Simulator platform into the guest first, then builds'
-                        : 'Compiles the App scheme with signing disabled; installs the iOS platform first only if Xcode refuses to build without it'
+                :disabled="
+                    busy || step.status === 'pending' || (source === 'snapshot' && !snapshot)
                 "
-                @click="machines.testBuild(session.id, target)"
+                :title="
+                    (source === 'latest'
+                        ? 'Copies the latest local source into the guest, then compiles the App scheme with signing disabled'
+                        : 'Compiles the saved snapshot with signing disabled') +
+                    (downloadsSimulator
+                        ? '; downloads the iOS Simulator platform from Apple into the guest first'
+                        : '; installs the iOS platform first only if Xcode refuses to build without it')
+                "
+                @click="build"
             >
                 <Spinner
-                    v-if="session.operation === 'test-build'"
+                    v-if="session.operation === 'test-build' || flows.active(session.id)"
                     tone="text-white dark:text-zinc-950"
                 />
                 <Hammer v-else class="h-3.5 w-3.5" />
-                {{
-                    downloadsSimulator
-                        ? 'Download and build'
-                        : workspace?.lastBuildSucceeded
-                          ? 'Run the test build again'
-                          : 'Run the test build'
-                }}
+                {{ source === 'latest' ? 'Build latest source' : 'Rebuild saved snapshot' }}
             </Button>
             <Button
                 v-if="session.buildLog.length"
@@ -223,11 +266,63 @@ const targetOptions = computed(() => unsignedBuildTargetOptions(simulatorRuntime
             </Callout>
         </template>
 
-        <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-            Checks that your synchronized project compiles without signing credentials. This step
-            does not launch the app, including when Simulator is selected. Synchronize again first
-            to include changes from your project folder.
-        </p>
+        <div class="space-y-3">
+            <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
+                Checks that your project compiles without signing credentials. This step does not
+                launch the app, including when Simulator is selected. The latest local source is
+                copied into the guest first; the saved snapshot compiles what was copied last time.
+            </p>
+            <div class="grid gap-4 sm:grid-cols-2">
+                <Field
+                    label="Source"
+                    :hint="
+                        source === 'latest'
+                            ? 'Copies the current files from the approved folder, including local edits, and replaces the snapshot.'
+                            : `The saved snapshot is compiled as it is: ${snapshotSummary}. New local edits are not included.`
+                    "
+                >
+                    <Select
+                        v-model="source"
+                        :disabled="busy"
+                        :options="[
+                            { value: 'latest', label: 'Latest local source' },
+                            {
+                                value: 'snapshot',
+                                label: 'Saved snapshot',
+                                description: snapshotSummary ?? undefined,
+                                disabled: !snapshot,
+                            },
+                        ]"
+                    />
+                </Field>
+                <Field
+                    v-if="source === 'latest'"
+                    label="Environment"
+                    hint="Written into the guest with the snapshot and applied to the web build. The next build starts from the same choice."
+                >
+                    <Select v-model="envSetId" :options="envOptions" :disabled="busy" />
+                </Field>
+                <p v-else class="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                    The saved snapshot keeps the environment it was copied with. Choose the latest
+                    local source to change it.
+                </p>
+                <Field
+                    label="Compile target"
+                    :hint="
+                        target === 'simulator'
+                            ? 'Compiles for the Simulator; this does not open or run one. A missing runtime is a large download.'
+                            : 'Compiles against the device SDK inside Xcode, the target signed archives and phone builds use.'
+                    "
+                >
+                    <Select
+                        v-model="target"
+                        :options="targetOptions"
+                        :disabled="busy || step.status === 'pending'"
+                    />
+                </Field>
+            </div>
+            <VersionFields :session="session" :disabled="busy" />
+        </div>
 
         <template #details>
             Compiles the App scheme with signing disabled. The device SDK is also used by signed

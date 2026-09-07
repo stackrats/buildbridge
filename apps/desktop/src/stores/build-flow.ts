@@ -67,7 +67,7 @@ async function proceed(id: string, resume: boolean): Promise<void> {
                 stopped: () => build.status === 'stopping',
                 stage: (stage) => {
                     build.stage = stage;
-                    failureStep = stage === 'attach-env' ? 'sync' : stage;
+                    failureStep = stage === 'attach-env' || stage === 'sync' ? 'project' : stage;
                 },
                 prepared: (snapshot) => {
                     build.preparedSnapshot = snapshot;
@@ -95,6 +95,7 @@ async function proceed(id: string, resume: boolean): Promise<void> {
                                               id,
                                               request.outcome === 'test' &&
                                                   request.androidAllowHttp,
+                                              requestedVersion(session.view!, request),
                                           )
                                           .then((result) => {
                                               if (build.androidDeviceSerial)
@@ -107,6 +108,7 @@ async function proceed(id: string, resume: boolean): Promise<void> {
                                           request.outcome === 'release'
                                               ? 'device_sdk'
                                               : request.target,
+                                          requestedVersion(session.view!, request),
                                       );
                             case 'archive':
                                 return machines.signedArchive(
@@ -185,7 +187,7 @@ export function useBuildFlowStore() {
         draft(id: string): BuildRequest {
             const view = machines.session(id).view;
             const projectPath = view ? (projectWorkspace(view)?.localPath ?? null) : null;
-            const draft = (drafts[id] ??= {
+            drafts[id] ??= {
                 source: 'latest',
                 outcome: view?.archive || view?.android?.release ? 'release' : 'test',
                 target: 'device_sdk',
@@ -193,7 +195,12 @@ export function useBuildFlowStore() {
                 androidAllowHttp: false,
                 envSetId: view?.envSet?.id ?? null,
                 version: null,
-            });
+            };
+            // Read it back out of the record rather than taking what `??=` returned: that
+            // operator evaluates to the raw object it assigned, not the reactive one the store
+            // keeps, and a step that captured the raw object would write to something nothing
+            // is watching — its own choice would never reach the screen.
+            const draft = drafts[id];
             if (draftProjects.get(id) !== projectPath) {
                 draft.androidAllowHttp = false;
                 draft.version = null;
@@ -234,7 +241,12 @@ export function useBuildFlowStore() {
             };
             await proceed(id, false);
         },
-        async startAndroidPreview(id: string, serial: string): Promise<void> {
+        async startAndroidPreview(
+            id: string,
+            serial: string,
+            envSetId?: string | null,
+            environmentName?: string | null,
+        ): Promise<void> {
             const session = machines.session(id);
             if (
                 !session.view ||
@@ -256,9 +268,12 @@ export function useBuildFlowStore() {
                     target: 'device_sdk',
                     androidOutputs: 'both',
                     androidAllowHttp: this.draft(id).androidAllowHttp,
-                    envSetId: session.view.envSet?.id ?? null,
+                    envSetId: envSetId === undefined ? (session.view.envSet?.id ?? null) : envSetId,
+                    version: this.draft(id).version ?? null,
                 },
-                session.view.envSet?.name ?? null,
+                envSetId === undefined
+                    ? (session.view.envSet?.name ?? null)
+                    : (environmentName ?? null),
                 serial,
             );
         },

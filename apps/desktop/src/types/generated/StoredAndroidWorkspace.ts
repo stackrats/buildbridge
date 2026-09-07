@@ -12,7 +12,12 @@ export type StoredAndroidWorkspace = { localPath: string, name: string,
  * The `applicationId` of the app module, read from its Gradle script; `None` when the
  * script computes it.
  */
-applicationId: string | null, lastSnapshotSha256: string | null, lastSyncFileCount: number | null, lastSyncBytes: number | null, lastBuildSucceeded: boolean, 
+applicationId: string | null, lastSnapshotSha256: string | null, lastSyncFileCount: number | null, lastSyncBytes: number | null, 
+/**
+ * When the snapshot was copied, so a saved snapshot can be told from the folder as it is
+ * now; `None` on records from before it was kept.
+ */
+lastSyncedAtEpochSeconds: number | null, lastBuildSucceeded: boolean, 
 /**
  * What the last debug build produced and built with; `None` until one succeeds.
  */

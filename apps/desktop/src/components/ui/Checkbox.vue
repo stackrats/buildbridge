@@ -11,8 +11,10 @@ const { block = false, disabled = false } = defineProps<{
 </script>
 
 <template>
+    <!-- Positioned so the hidden input stays beside the label: left to an unpositioned ancestor it
+         would sit at the pane's unscrolled position, and focusing it would scroll the window. -->
     <label
-        class="cursor-pointer items-start gap-2 align-top text-xs leading-5 text-zinc-600 select-none dark:text-zinc-300"
+        class="relative cursor-pointer items-start gap-2 align-top text-xs leading-5 text-zinc-600 select-none dark:text-zinc-300"
         :class="[
             block ? 'flex w-full' : 'inline-flex',
             disabled && 'cursor-not-allowed opacity-50',

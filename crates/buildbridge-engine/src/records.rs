@@ -64,7 +64,7 @@ pub(crate) fn validated_android_artifact_directory(
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with(prefix));
     if directory.parent() != Some(root.as_path()) || !named {
-        return Err("The artifact record is outside BuildBridge's managed directory.".to_string());
+        return Err("The artifact record is outside buildbridge's managed directory.".to_string());
     }
 
     Ok(directory.to_path_buf())
@@ -354,7 +354,7 @@ pub(crate) fn validated_android_release_directory(
                 .is_some_and(|directory| directory != parent)
         {
             return Err(
-                "The signed artifact record is outside BuildBridge's managed directory."
+                "The signed artifact record is outside buildbridge's managed directory."
                     .to_string(),
             );
         }
@@ -431,6 +431,7 @@ pub(crate) fn inspect_android_workspace(path: &str) -> Result<StoredAndroidWorks
         last_snapshot_sha256: None,
         last_sync_file_count: None,
         last_sync_bytes: None,
+        last_synced_at_epoch_seconds: None,
         last_build_succeeded: false,
         last_build: None,
         last_source: None,
@@ -561,7 +562,7 @@ pub(crate) fn validated_apple_archive_directory(
         .ok_or_else(|| "The retained IPA has no parent directory.".to_string())?;
     if archive.parent() != Some(directory) || directory.parent() != Some(root.as_path()) {
         return Err(
-            "The signed artifact record is outside BuildBridge's managed directory.".to_string(),
+            "The signed artifact record is outside buildbridge's managed directory.".to_string(),
         );
     }
 
@@ -685,6 +686,7 @@ pub(crate) fn inspect_apple_workspace(path: &str) -> Result<StoredAppleWorkspace
         last_snapshot_sha256: None,
         last_sync_file_count: None,
         last_sync_bytes: None,
+        last_synced_at_epoch_seconds: None,
         last_build_succeeded: false,
         last_xcode_version: None,
         last_native_lock_updated: false,
@@ -774,7 +776,7 @@ pub(crate) fn ensure_mac_guest_keypair(identity_path: &std::path::Path) -> Resul
         (true, true) => return read_mac_guest_public_key(&public_key_path),
         (true, false) | (false, true) => {
             return Err(
-                "The BuildBridge guest SSH keypair is incomplete. Restore the missing key before continuing."
+                "The buildbridge guest SSH keypair is incomplete. Restore the missing key before continuing."
                     .to_string(),
             );
         }
@@ -823,7 +825,7 @@ pub(crate) fn read_mac_guest_public_key(path: &std::path::Path) -> Result<String
         || fields.len() > 3
         || fields.first() != Some(&"ssh-ed25519")
     {
-        return Err("The BuildBridge guest SSH public key is invalid.".to_string());
+        return Err("The buildbridge guest SSH public key is invalid.".to_string());
     }
 
     Ok(public_key.to_string())
@@ -1051,7 +1053,7 @@ mod source_record_tests {
             fs::write(&path, bad).unwrap();
             assert_eq!(
                 read_mac_guest_public_key(&path).unwrap_err(),
-                "The BuildBridge guest SSH public key is invalid.",
+                "The buildbridge guest SSH public key is invalid.",
                 "{bad:?}"
             );
         }

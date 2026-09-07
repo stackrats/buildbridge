@@ -275,6 +275,7 @@ function provisionedView(): MachineView {
         lastSnapshotSha256: 'abcdef1234567890',
         lastSyncFileCount: 12,
         lastSyncBytes: 2048,
+        lastSyncedAtEpochSeconds: null,
         lastBuildSucceeded: true,
         lastXcodeVersion: '26.6',
         lastNativeLockUpdated: false,
@@ -313,7 +314,7 @@ describe('deriveBuildSteps', () => {
             'Importing the identity into a dedicated guest keychain',
         );
         expect(at('test-build', 'adopt-lock')?.summary).toBe(
-            'Adopting the guest’s Podfile.lock into the project',
+            "Adopting the guest's Podfile.lock into the project",
         );
         expect(at('test-build', 'test_building')?.summary).toBe(
             'Preparing tools, dependencies, and the unsigned build',
@@ -327,7 +328,7 @@ describe('deriveBuildSteps', () => {
         expect(steps[0]?.summary).toBe('after the machine setup is complete');
     });
 
-    it('walks approve, sync, build, kit, provision, archive in order', () => {
+    it('walks project, build, kit, provision, archive in order', () => {
         const view = readyView();
         view.appleWorkspace = {
             localPath: '/home/you/projects/example-app',
@@ -339,6 +340,7 @@ describe('deriveBuildSteps', () => {
             lastSnapshotSha256: 'abcdef1234567890',
             lastSyncFileCount: 12,
             lastSyncBytes: 2048,
+            lastSyncedAtEpochSeconds: null,
             lastBuildSucceeded: true,
             lastXcodeVersion: '26.6',
             lastNativeLockUpdated: false,
@@ -350,8 +352,7 @@ describe('deriveBuildSteps', () => {
         const steps = deriveBuildSteps(view, { runningStep: null });
 
         expect(steps.map((step) => [step.id, step.status])).toEqual([
-            ['approve', 'done'],
-            ['sync', 'done'],
+            ['project', 'done'],
             ['test-build', 'done'],
             ['signing-kit', 'active'],
             ['provision', 'pending'],
@@ -376,6 +377,7 @@ describe('deriveBuildSteps', () => {
             lastSnapshotSha256: 'abcdef1234567890',
             lastSyncFileCount: 12,
             lastSyncBytes: 2048,
+            lastSyncedAtEpochSeconds: null,
             lastBuildSucceeded: true,
             lastXcodeVersion: '26.6',
             lastNativeLockUpdated: true,
@@ -639,13 +641,13 @@ describe('deriveJourney', () => {
     it('keeps device preview and publishing optional after setup and build', () => {
         const steps = deriveJourney(baseView(), { runningStep: null });
 
-        expect(steps).toHaveLength(15);
+        expect(steps).toHaveLength(14);
         expect(steps.slice(0, 7).every((step) => step.phase === 'setup')).toBe(true);
-        expect(steps.slice(7, 13).every((step) => step.phase === 'build')).toBe(true);
-        expect(steps[13]?.phase).toBe('device');
-        expect(steps[14]?.phase).toBe('publish');
+        expect(steps.slice(7, 12).every((step) => step.phase === 'build')).toBe(true);
+        expect(steps[12]?.phase).toBe('device');
+        expect(steps[13]?.phase).toBe('publish');
         // The count a machine is measured by leaves the optional step out.
-        expect(requiredSteps(steps)).toHaveLength(13);
+        expect(requiredSteps(steps)).toHaveLength(12);
     });
 
     it('focuses a setup failure before anything in the build phase', () => {
@@ -668,7 +670,7 @@ describe('deriveJourney', () => {
             ['publish', 0, false],
         ]);
         expect(groups[0]?.focus).toBeNull();
-        expect(groups[1]?.focus?.id).toBe('approve');
+        expect(groups[1]?.focus?.id).toBe('project');
     });
 });
 
@@ -707,7 +709,7 @@ describe('summarizeJourney', () => {
     it('reads a fresh machine as ready to start', () => {
         const steps = summarizeJourney(summary(), readyHost);
 
-        expect(steps).toHaveLength(15);
+        expect(steps).toHaveLength(14);
         expect(focusStep(steps)?.id).toBe('launch');
         expect(steps.filter((step) => step.status === 'done').map((step) => step.id)).toEqual([
             'host',
@@ -736,7 +738,10 @@ describe('summarizeJourney', () => {
 
         expect(requiredSteps(steps).every((step) => step.status === 'done')).toBe(true);
         expect(steps.find((step) => step.id === 'publish')?.status).toBe('active');
-        expect(steps.find((step) => step.id === 'approve')?.summary).toBe('example-app');
+        expect(steps.find((step) => step.id === 'project')?.summary).toBe('example-app');
+        const device = steps.find((step) => step.id === 'run-device')!;
+        expect(device.status).toBe('active');
+        expect(device.summary).toContain('Ran on the iPhone');
         expect(journeyHeadline(steps)).toBe('signed IPA retained');
     });
 
@@ -923,7 +928,7 @@ describe('run on the device', () => {
         expect(others.every((candidate) => candidate.live === undefined)).toBe(true);
     });
 
-    it('is done with the last run and failed when the last run failed', () => {
+    it('keeps the last run on the row without calling the step done, and fails when the run failed', () => {
         const view = provisionedView();
         view.deviceRun = {
             device: {
@@ -952,9 +957,9 @@ describe('run on the device', () => {
             consoleTail: [],
             projectBundleIdentifier: null,
         };
-        const done = at(view);
-        expect(done.status).toBe('done');
-        expect(done.summary).toContain('Matt’s iPhone · 3.2.0 (15)');
+        const kept = at(view);
+        expect(kept.status).toBe('active');
+        expect(kept.summary).toContain('Matt’s iPhone · 3.2.0 (15)');
 
         view.deviceRunError = 'devicectl: install failed';
         const steps = deriveJourney(view, { runningStep: null });
@@ -977,11 +982,11 @@ describe('run on the device', () => {
         expect(fresh.status).toBe('pending');
         expect(fresh.summary).toBe('after signing is provisioned');
 
+        // A retained run is a fact, never a state: the row is available once the machine is.
         const retained = summarizeJourney(summary({ deviceRunRetained: true }), readyHost).find(
             (step) => step.id === 'run-device',
         )!;
-        expect(retained.status).toBe('done');
-        expect(retained.summary).toBe('Ran on the iPhone');
+        expect(retained.status).toBe('pending');
     });
 });
 
@@ -994,7 +999,7 @@ describe('a machine cloned from a template', () => {
         return view;
     }
 
-    it('turns the install, trust and access steps into BuildBridge’s own', () => {
+    it('turns the install, trust and access steps into buildbridge’s own', () => {
         const steps = deriveSetupSteps(cloneView(), { runningStep: null });
         const byId = (id: string) => steps.find((step) => step.id === id)!;
 
@@ -1039,9 +1044,50 @@ function androidView(overrides: Partial<MachineView> = {}): MachineView {
             containerId: 'abc',
             startedAt: null,
         },
-        android: { workspace: null, release: null, releaseEnvSet: null, releaseError: null },
+        android: {
+            workspace: null,
+            release: null,
+            releaseEnvSet: null,
+            releaseError: null,
+            deviceRun: null,
+            deviceRunError: null,
+        },
         ...overrides,
     });
+}
+
+/** An Android machine holding a retained release APK, and a run of it kept beside the machine. */
+function androidRunView(sha256 = 'c'.repeat(64)): MachineView {
+    const view = androidView();
+    view.android!.release = {
+        applicationId: 'com.example.app',
+        versionName: '2.0',
+        versionCode: '20',
+        keyAlias: 'upload',
+        certificateSha256: 'a'.repeat(64),
+        outputTail: [],
+        aab: null,
+        apk: { path: '/tmp/app.apk', bytes: 200, sha256: 'c'.repeat(64) },
+    };
+    view.android!.deviceRun = {
+        kind: 'release',
+        versionName: '2.0',
+        versionCode: '20',
+        result: {
+            serial: 'emulator-5554',
+            model: 'Pixel 9',
+            applicationId: 'com.example.app',
+            sha256,
+            installed: true,
+            launched: true,
+            pid: 4242,
+            installedAtEpochSeconds: 1_756_900_000,
+            consoleEnd: 'stopped',
+            consoleTail: ['I/Capacitor( 4242): Starting BridgeActivity'],
+        },
+        finishedAtEpochSeconds: 1_756_900_100,
+    };
+    return view;
 }
 
 function androidKit(complete = true): NonNullable<MachineView['signingKit']> {
@@ -1069,14 +1115,13 @@ function androidKit(complete = true): NonNullable<MachineView['signingKit']> {
 }
 
 describe('an Android machine', () => {
-    it('has seven required steps followed by optional device preview and publishing', () => {
+    it('has six required steps followed by optional device preview and publishing', () => {
         const steps = deriveJourney(androidView(), { runningStep: null });
 
         expect(steps.map((step) => step.id)).toEqual([
             'host',
             'launch',
-            'approve',
-            'sync',
+            'project',
             'test-build',
             'signing-kit',
             'release',
@@ -1084,8 +1129,8 @@ describe('an Android machine', () => {
             'publish',
         ]);
         expect(steps.slice(0, 2).every((step) => step.phase === 'setup')).toBe(true);
-        expect(steps.slice(2, 7).every((step) => step.phase === 'build')).toBe(true);
-        expect(requiredSteps(steps)).toHaveLength(7);
+        expect(steps.slice(2, 6).every((step) => step.phase === 'build')).toBe(true);
+        expect(requiredSteps(steps)).toHaveLength(6);
         expect(groupByPhase(steps).map((group) => group.phase)).toEqual([
             'setup',
             'build',
@@ -1118,6 +1163,68 @@ describe('an Android machine', () => {
         expect(completedCount([device()])).toBe(0);
     });
 
+    it('is live, not merely running, once the app is up on the Android device', () => {
+        const view = androidRunView();
+        const device = (context: Parameters<typeof deriveJourney>[1]) =>
+            deriveJourney(view, context).find((step) => step.id === 'run-device')!;
+        const working = device({
+            runningStep: 'run-device',
+            androidDeviceRun: {
+                kind: 'release',
+                serial: 'emulator-5554',
+                sha256: 'c'.repeat(64),
+                status: 'installing',
+                result: null,
+                error: null,
+            },
+        });
+        expect(working.status).toBe('running');
+        expect(working.live).toBeUndefined();
+        expect(working.summary).toContain('Installing and opening');
+
+        const live = device({
+            runningStep: 'run-device',
+            runningLive: true,
+            androidDeviceRun: {
+                kind: 'release',
+                serial: 'emulator-5554',
+                sha256: 'c'.repeat(64),
+                status: 'installing',
+                result: null,
+                error: null,
+            },
+        });
+        expect(live.status).toBe('running');
+        expect(live.live).toBe(true);
+        expect(live.summary).toBe('Live on emulator-5554; log streaming');
+        // Live belongs to the device run alone; nothing else in the journey picks it up.
+        expect(device({ runningStep: 'release', runningLive: true }).live).toBeUndefined();
+    });
+
+    it('keeps the last Android run until its APK is replaced, and keeps a failure too', () => {
+        const kept = deriveJourney(androidRunView(), { runningStep: null }).find(
+            (step) => step.id === 'run-device',
+        )!;
+        expect(kept.status).toBe('active');
+        expect(kept.summary).toContain('com.example.app · 2.0 (20) · on Pixel 9');
+
+        // A new build replaces the APK the run installed: the record no longer describes
+        // anything the machine holds, so the step is available again rather than done.
+        const replaced = deriveJourney(androidRunView('d'.repeat(64)), { runningStep: null }).find(
+            (step) => step.id === 'run-device',
+        )!;
+        expect(replaced.status).toBe('active');
+
+        const failed = androidRunView();
+        failed.android!.deviceRun = null;
+        failed.android!.deviceRunError = 'INSTALL_FAILED_UPDATE_INCOMPATIBLE';
+        const step = deriveJourney(failed, { runningStep: null }).find(
+            (candidate) => candidate.id === 'run-device',
+        )!;
+        expect(step.status).toBe('failed');
+        expect(step.summary).toContain('diagnostic is kept below');
+    });
+
     it('does not infer a device APK from the coarse retained-release flag', () => {
         const row = summary({ archiveRetained: true });
         row.config.provider = 'android_toolchain';
@@ -1136,7 +1243,7 @@ describe('an Android machine', () => {
         expect(steps[2]?.status).toBe('active');
     });
 
-    it('walks approve, sync, debug build, kit, release in order', () => {
+    it('walks project, debug build, kit, release in order', () => {
         const view = androidView();
         view.android!.workspace = {
             localPath: '/home/you/app',
@@ -1145,6 +1252,7 @@ describe('an Android machine', () => {
             lastSnapshotSha256: 'abc123def456',
             lastSyncFileCount: 10,
             lastSyncBytes: 1000,
+            lastSyncedAtEpochSeconds: null,
             lastBuildSucceeded: true,
             lastBuild: {
                 allowHttp: false,
@@ -1168,14 +1276,13 @@ describe('an Android machine', () => {
         expect(steps.map((step) => [step.id, step.status])).toEqual([
             ['host', 'done'],
             ['launch', 'done'],
-            ['approve', 'done'],
-            ['sync', 'done'],
+            ['project', 'done'],
             ['test-build', 'done'],
             ['signing-kit', 'done'],
             ['release', 'active'],
         ]);
-        expect(steps[4]?.summary).toContain('JDK 17.0.20');
-        expect(steps[5]?.summary).toContain('upload.keystore');
+        expect(steps[3]?.summary).toContain('JDK 17.0.20');
+        expect(steps[4]?.summary).toContain('upload.keystore');
     });
 
     it('keeps the release locked while the kit has no upload key', () => {
@@ -1187,6 +1294,7 @@ describe('an Android machine', () => {
             lastSnapshotSha256: 'abc',
             lastSyncFileCount: 10,
             lastSyncBytes: 1000,
+            lastSyncedAtEpochSeconds: null,
             lastBuildSucceeded: true,
             lastBuild: null,
             lastSource: null,
@@ -1212,6 +1320,7 @@ describe('an Android machine', () => {
             lastSnapshotSha256: 'abc',
             lastSyncFileCount: 10,
             lastSyncBytes: 1000,
+            lastSyncedAtEpochSeconds: null,
             lastBuildSucceeded: true,
             lastBuild: null,
             lastSource: null,
@@ -1256,9 +1365,8 @@ describe('an Android machine', () => {
             readyHost,
         );
 
-        expect(steps).toHaveLength(9);
+        expect(steps).toHaveLength(8);
         expect(steps.map((step) => step.status)).toEqual([
-            'done',
             'done',
             'done',
             'done',

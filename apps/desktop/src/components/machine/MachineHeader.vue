@@ -21,10 +21,12 @@ import { activityLabel, useMachinesStore, type MachineSession } from '../../stor
 import { useUi } from '../../stores/ui';
 import Badge from '../ui/Badge.vue';
 import Button from '../ui/Button.vue';
+import Field from '../ui/Field.vue';
 import Input from '../ui/Input.vue';
 import Spinner from '../ui/Spinner.vue';
 import ConfirmDialog from '../dialogs/ConfirmDialog.vue';
 import EditMachineDialog from '../dialogs/EditMachineDialog.vue';
+import MachineUsage from './MachineUsage.vue';
 
 const { session, now } = defineProps<{ session: MachineSession; now: number }>();
 const machines = useMachinesStore();
@@ -32,7 +34,7 @@ const ui = useUi();
 
 const view = computed(() => session.view!);
 const busy = computed(() => session.operation !== null || view.value.busyOperation !== null);
-// A template save, this client's or one another BuildBridge process holds the machine for; its
+// A template save, this client's or one another buildbridge process holds the machine for; its
 // percentage joins the busy badge, since the save's dialog is gone while it runs.
 const savingTemplate = computed(
     () => session.operation === 'save-template' || view.value.busyOperation === 'saving_template',
@@ -67,7 +69,6 @@ const facts = computed(() => {
             providerLabel[view.value.profile.provider],
             `${view.value.profile.memoryGib} GiB limit`,
             `${view.value.profile.cpuCores} cores`,
-            uptime === null ? null : `up ${formatElapsed(uptime)}`,
             lastBuild
                 ? lastBuild.toolchain.jdkVersion
                       .replace(/^openjdk version /, 'JDK ')
@@ -77,6 +78,8 @@ const facts = computed(() => {
                       .join(' ')
                 : null,
             lastBuild ? `build tools ${lastBuild.toolchain.buildToolsVersion}` : null,
+            // Last, so a figure that changes every minute reflows nothing before it.
+            uptime === null ? null : `up ${formatElapsed(uptime)}`,
         ]
             .filter(Boolean)
             .join(' · ');
@@ -89,9 +92,9 @@ const facts = computed(() => {
         view.value.displayUrl
             ? `screen ${view.value.displayUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')}`
             : null,
-        uptime === null ? null : `up ${formatElapsed(uptime)}`,
         diagnostics.macosVersion ? `macOS ${diagnostics.macosVersion}` : null,
         diagnostics.xcodeVersion ? `Xcode ${diagnostics.xcodeVersion}` : null,
+        uptime === null ? null : `up ${formatElapsed(uptime)}`,
     ]
         .filter(Boolean)
         .join(' · ');
@@ -115,7 +118,7 @@ const templateBlocker = computed(() => {
         return 'Pin the guest identity first';
     }
     if (!view.value.guest.username) {
-        return 'Authorize the BuildBridge key first';
+        return 'Authorize the buildbridge key first';
     }
     if (!view.value.usb.diskOnHost) {
         return 'Enable USB on this machine first; that moves its disk to this host';
@@ -187,8 +190,8 @@ const menuItemClass =
                 <h1 class="truncate text-lg font-bold text-zinc-900 dark:text-zinc-50">
                     {{ view.profile.name }}
                 </h1>
-                <Badge v-if="busyLabel" tone="warn">
-                    <Spinner size="h-3 w-3" tone="text-amber-700 dark:text-amber-400" />
+                <Badge v-if="busyLabel" tone="warn" class="tabular-nums">
+                    <Spinner size="h-3 w-3" />
                     {{ busyLabel }}
                 </Badge>
                 <Badge v-if="!busyLabel" :tone="machineStateBadge[view.runtime.state]">
@@ -196,6 +199,7 @@ const menuItemClass =
                 </Badge>
             </div>
             <p class="mt-1 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">{{ facts }}</p>
+            <MachineUsage :machine-id="session.id" :running="view.runtime.state === 'running'" />
         </div>
         <div class="flex shrink-0 items-center gap-1.5">
             <Button
@@ -216,7 +220,7 @@ const menuItemClass =
                 @click="machines.stop(session.id)"
             >
                 <Spinner v-if="session.operation === 'stop'" />
-                <Square v-else class="h-3.5 w-3.5 text-red-700 dark:text-red-400" />
+                <Square v-else class="h-3.5 w-3.5" />
                 Stop
             </Button>
             <Button v-else size="sm" :disabled="!canStart" @click="machines.launch(session.id)">
@@ -229,8 +233,8 @@ const menuItemClass =
             </Button>
             <Button
                 variant="ghost"
-                size="icon"
-                title="Refresh"
+                size="iconSm"
+                title="Reads the machine's state again"
                 :disabled="session.operation !== null || session.refreshing"
                 @click="machines.refreshMachine(session.id)"
             >
@@ -238,7 +242,13 @@ const menuItemClass =
                 <RefreshCw v-else class="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
             </Button>
             <div class="relative">
-                <Button variant="ghost" size="icon" title="More" @click="toggleMenu">
+                <Button
+                    variant="ghost"
+                    size="iconSm"
+                    title="More actions: profile, template, discard, delete"
+                    aria-label="More actions"
+                    @click="toggleMenu"
+                >
                     <EllipsisVertical class="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
                 </Button>
                 <div
@@ -276,13 +286,15 @@ const menuItemClass =
                         <Spinner v-if="savingTemplate" size="h-3.5 w-3.5" />
                         <Layers v-else class="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
                         <template v-if="savingTemplate">
-                            Saving template{{
-                                templateSavePercent !== null ? ` · ${templateSavePercent}%` : ''
-                            }}
+                            <span class="tabular-nums"
+                                >Saving template{{
+                                    templateSavePercent !== null ? ` · ${templateSavePercent}%` : ''
+                                }}</span
+                            >
                         </template>
                         <template v-else>Save as template</template>
                     </button>
-                    <div class="my-1 h-px bg-zinc-200 dark:bg-zinc-700" />
+                    <div class="my-1 h-px bg-zinc-200 dark:bg-zinc-800" />
                     <button
                         type="button"
                         :class="menuItemClass"
@@ -355,7 +367,13 @@ const menuItemClass =
                 The save runs in the background: this dialog closes, and the progress shows on the
                 Launch step, on the Templates page and in the sidebar, where it can be stopped.
             </p>
-            <Input v-model="templateName" placeholder="Template name" :maxlength="60" />
+            <Field label="Template name" required>
+                <Input
+                    v-model="templateName"
+                    placeholder="A name for this template"
+                    :maxlength="60"
+                />
+            </Field>
         </ConfirmDialog>
 
         <ConfirmDialog
@@ -417,12 +435,12 @@ const menuItemClass =
             @confirm="remove"
         >
             <p v-if="android">
-                <b>{{ view.profile.name }}</b> is removed from BuildBridge: its container and the
+                <b>{{ view.profile.name }}</b> is removed from buildbridge: its container and the
                 home with the SDK and caches, the approved project record, and any retained bundle
                 or APK on this host.
             </p>
             <p v-else>
-                <b>{{ view.profile.name }}</b> is removed from BuildBridge: its container and macOS
+                <b>{{ view.profile.name }}</b> is removed from buildbridge: its container and macOS
                 disk, its SSH access key and identity pin, the approved project record, and any
                 retained IPA or archive on this host.
             </p>

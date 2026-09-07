@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // Read-only App Store Connect verification of the stored Team key against one machine's
-// approved project, plus the single confirmed mutation BuildBridge performs at Apple: creating
+// approved project, plus the single confirmed mutation buildbridge performs at Apple: creating
 // a replacement App Store profile when none is active.
 import { BadgeCheck, Download } from '@lucide/vue';
 import { computed, onMounted, ref } from 'vue';
@@ -13,9 +13,11 @@ import Badge from '../ui/Badge.vue';
 import Button from '../ui/Button.vue';
 import Callout from '../ui/Callout.vue';
 import Card from '../ui/Card.vue';
+import CopyButton from '../ui/CopyButton.vue';
 import ConfirmDialog from '../dialogs/ConfirmDialog.vue';
 import Field from '../ui/Field.vue';
 import KeyValue from '../ui/KeyValue.vue';
+import SectionHeading from '../ui/SectionHeading.vue';
 import Select from '../ui/Select.vue';
 import Spinner from '../ui/Spinner.vue';
 
@@ -219,9 +221,7 @@ async function createProfile(): Promise<void> {
                 }}</Callout>
 
                 <div v-if="verification.profilesAccessible" class="mt-3">
-                    <p class="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
-                        Provisioning profiles
-                    </p>
+                    <SectionHeading>Provisioning profiles</SectionHeading>
                     <ul
                         class="mt-1 divide-y divide-zinc-200 rounded-md border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800"
                     >
@@ -242,6 +242,11 @@ async function createProfile(): Promise<void> {
                                     ></span
                                 >
                             </span>
+                            <CopyButton
+                                :text="profile.uuid"
+                                what="Copy the profile UUID"
+                                size="iconXs"
+                            />
                             <span class="shrink-0 text-[11px] text-zinc-500 dark:text-zinc-400"
                                 >until {{ formatDate(profile.expirationDate) }}</span
                             >
@@ -285,9 +290,7 @@ async function createProfile(): Promise<void> {
                 </div>
 
                 <div class="mt-3">
-                    <p class="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
-                        Registered iPhones
-                    </p>
+                    <SectionHeading>Registered iPhones</SectionHeading>
                     <ul
                         v-if="verification.devicesAccessible"
                         class="mt-1 divide-y divide-zinc-200 rounded-md border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800"
@@ -309,6 +312,7 @@ async function createProfile(): Promise<void> {
                                     >{{ device.udid }}</span
                                 >
                             </span>
+                            <CopyButton :text="device.udid" what="Copy the UDID" size="iconXs" />
                             <Badge :tone="device.status === 'ENABLED' ? 'ok' : 'warn'">{{
                                 sentenceCase(device.status)
                             }}</Badge>
@@ -349,7 +353,7 @@ async function createProfile(): Promise<void> {
                     <Callout tone="warn" class="mt-3" title="No active App Store profile remains">
                         <p>
                             Choose an unexpired distribution certificate whose private key is inside
-                            your stored .p12. BuildBridge creates exactly one new App Store profile
+                            your stored .p12. buildbridge creates exactly one new App Store profile
                             for the exact bundle identifier and never revokes existing profiles.
                             This needs an Admin Team key.
                         </p>

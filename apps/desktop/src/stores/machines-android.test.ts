@@ -3,8 +3,10 @@ import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { createMockBackend } from '../lib/backend-mock';
 import type {
     AndroidDeviceRunResult,
+    AndroidDevices,
     GooglePlayUploadResult,
     RunAndroidBuildResult,
+    RunAndroidDeviceResult,
 } from '../types/backend';
 
 const backend = vi.hoisted(() => ({
@@ -38,7 +40,8 @@ async function fixture() {
     backend.listAndroidDevices.mockResolvedValue({
         available: true,
         issue: null,
-        devices: [{ serial: 'phone', state: 'device', model: 'Pixel' }],
+        devices: [{ serial: 'phone', state: 'device', model: 'Pixel', network: null }],
+        hostNetworks: [],
     });
     backend.googlePlayConnection.mockResolvedValue({
         configured: true,
@@ -58,11 +61,18 @@ async function fixture() {
     };
     const deviceResult: AndroidDeviceRunResult = {
         serial: 'phone',
+        model: 'Pixel',
         sha256: input.expectedSha256,
         applicationId: view.android!.workspace!.lastBuild!.applicationId,
         installed: true,
         launched: true,
+        pid: 4242,
+        installedAtEpochSeconds: 1_756_900_000,
+        consoleEnd: 'stopped',
+        consoleTail: ['I/Capacitor( 4242): Starting BridgeActivity'],
     };
+    // The run ends with the machine's fresh view, as every operation that changes it does.
+    const deviceRun: RunAndroidDeviceResult = { view, run: deviceResult };
     const uploadResult: GooglePlayUploadResult = {
         packageName: view.android!.release!.applicationId,
         versionCode: view.android!.release!.versionCode,
@@ -70,7 +80,7 @@ async function fixture() {
         status: 'draft',
         sha256: view.android!.release!.aab!.sha256,
     };
-    return { store, session, view, input, deviceResult, uploadResult };
+    return { store, session, view, input, deviceResult, deviceRun, uploadResult };
 }
 
 beforeEach(() => {
@@ -87,7 +97,7 @@ describe('Android host device automation', () => {
             backend.runAndroidDebugBuild.mockResolvedValue({ view, build });
             if (allowHttp) await store.debugBuild(session.id, true);
             else await store.debugBuild(session.id);
-            expect(backend.runAndroidDebugBuild).toHaveBeenCalledWith(session.id, allowHttp);
+            expect(backend.runAndroidDebugBuild).toHaveBeenCalledWith(session.id, allowHttp, null);
         },
     );
 
@@ -128,20 +138,25 @@ describe('Android host device automation', () => {
     });
 
     it('installs the reviewed APK with the container stopped and survives navigation', async () => {
-        const { store, session, input, deviceResult } = await fixture();
-        const request = deferred<AndroidDeviceRunResult>();
+        const { store, session, input, deviceRun } = await fixture();
+        const request = deferred<RunAndroidDeviceResult>();
         backend.runAndroidDevice.mockReturnValue(request.promise);
         const installing = store.runAndroidDevice(session.id, input);
         expect(backend.runAndroidDevice).toHaveBeenCalledWith(session.id, input);
         expect(store.session(session.id).androidDeviceRun?.status).toBe('installing');
         expect(await store.runAndroidDevice(session.id, input)).toBe(false);
         expect(backend.runAndroidDevice).toHaveBeenCalledTimes(1);
-        request.resolve(deviceResult);
+        request.resolve(deviceRun);
         expect(await installing).toBe(true);
         expect(store.session(session.id).androidDeviceRun?.status).toBe('complete');
+        // A run is an activity, not an achievement: the step is available again, not done.
         expect(store.journey(session.id).find((step) => step.id === 'run-device')?.status).toBe(
-            'done',
+            'active',
         );
+        // The log the run streamed is kept; a session that saw no events takes the tail.
+        expect(store.session(session.id).deviceLog).toEqual([
+            { text: 'I/Capacitor( 4242): Starting BridgeActivity' },
+        ]);
     });
     it.each(['missing ADB', 'unauthorized device', 'changed APK', 'busy backend'])(
         'does not install with %s',
@@ -159,8 +174,11 @@ describe('Android host device automation', () => {
         },
     );
     it('requires launch confirmation before marking a run successful', async () => {
-        const { store, session, input, deviceResult } = await fixture();
-        backend.runAndroidDevice.mockResolvedValue({ ...deviceResult, launched: false });
+        const { store, session, input, deviceRun } = await fixture();
+        backend.runAndroidDevice.mockResolvedValue({
+            ...deviceRun,
+            run: { ...deviceRun.run, launched: false },
+        });
         expect(await store.runAndroidDevice(session.id, input)).toBe(false);
         expect(session.androidDeviceRun?.status).toBe('failed');
         expect(store.journey(session.id).find((step) => step.id === 'run-device')?.status).toBe(
@@ -168,8 +186,8 @@ describe('Android host device automation', () => {
         );
     });
     it('invalidates completion when the retained APK changes', async () => {
-        const { store, session, input, deviceResult } = await fixture();
-        backend.runAndroidDevice.mockResolvedValue(deviceResult);
+        const { store, session, input, deviceRun } = await fixture();
+        backend.runAndroidDevice.mockResolvedValue(deviceRun);
         await store.runAndroidDevice(session.id, input);
         const changed = await createMockBackend().getMachine(session.id);
         changed.android!.workspace!.lastBuild!.apk!.sha256 = 'replacement';
@@ -186,10 +204,42 @@ describe('Android host device automation', () => {
         backend.listAndroidDevices.mockResolvedValue({
             available: true,
             issue: null,
-            devices: [{ serial: 'phone', state: 'unauthorized', model: null }],
+            devices: [{ serial: 'phone', state: 'unauthorized', model: null, network: null }],
+            hostNetworks: [],
         });
         await store.refreshAndroidDevices(session.id);
         expect(session.androidDeviceSerial).toBe('');
+    });
+    it('probes quietly, and a refresh asked during the probe shares its answer', async () => {
+        const { store, session } = await fixture();
+        const listing = deferred<AndroidDevices>();
+        backend.listAndroidDevices.mockClear();
+        backend.listAndroidDevices.mockReturnValue(listing.promise);
+        const probe = store.refreshAndroidDevices(session.id, { quiet: true });
+        expect(session.androidDevicesLoading).toBe(false);
+        const refresh = store.refreshAndroidDevices(session.id);
+        expect(session.androidDevicesLoading).toBe(true);
+        expect(backend.listAndroidDevices).toHaveBeenCalledTimes(1);
+        listing.resolve({
+            available: true,
+            issue: null,
+            devices: [{ serial: 'second', state: 'device', model: 'Pixel', network: null }],
+            hostNetworks: [],
+        });
+        await Promise.all([probe, refresh]);
+        expect(session.androidDevicesLoading).toBe(false);
+        expect(session.androidDevices?.devices.map((device) => device.serial)).toEqual(['second']);
+        expect(session.androidDeviceSerial).toBe('second');
+    });
+    it('keeps a failed listing as the diagnostic until a refresh succeeds', async () => {
+        const { store, session } = await fixture();
+        backend.listAndroidDevices.mockRejectedValueOnce(new Error('adb hung'));
+        await store.refreshAndroidDevices(session.id, { quiet: true });
+        expect(session.androidDevices).toBeNull();
+        expect(session.androidDevicesError).toContain('adb hung');
+        await store.refreshAndroidDevices(session.id);
+        expect(session.androidDevicesError).toBeNull();
+        expect(session.androidDevices?.devices).toHaveLength(1);
     });
 });
 

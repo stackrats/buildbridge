@@ -85,7 +85,7 @@ const XCODE_DOWNLOADS_DIRECTORY: &str = "xcode";
 const XCODE_DOWNLOAD_PROGRESS_EVENT: &str = "xcode-download-progress";
 const APPLE_DOWNLOADS_URL: &str = "https://developer.apple.com/download/all/";
 
-/// One Xcode archive on its way from Apple into BuildBridge's folder. `total_bytes` is unknown
+/// One Xcode archive on its way from Apple into buildbridge's folder. `total_bytes` is unknown
 /// while the download runs: the webview reports a request and an end, and the file's size in
 /// between is what there is to show.
 #[derive(Debug, Clone, Serialize)]
@@ -129,9 +129,9 @@ fn emit_xcode_download(
 }
 
 /// Opens Apple's downloads page in a window of this app, so the person signs in with Apple
-/// directly and the Xcode `.xip` they download lands in BuildBridge's folder with its progress
+/// directly and the Xcode `.xip` they download lands in buildbridge's folder with its progress
 /// shown in the step, ready to import the moment it is complete. Only `.xip` downloads are
-/// captured; the page gets no access to this app. BuildBridge sees no Apple credential: the
+/// captured; the page gets no access to this app. buildbridge sees no Apple credential: the
 /// sign-in happens on Apple's page, as it would in any browser.
 #[tauri::command]
 fn download_xcode(
@@ -254,50 +254,48 @@ fn download_xcode(
     Ok(())
 }
 
-/// Opens a page in this host's browser rather than in a window of this app: a provider's
-/// repository is someone else's page, read best where the person's browser already is.
-/// HTTPS and loopback HTTP dashboards are accepted. The address is one fixed argument to
-/// the platform's opener; other schemes and embedded credentials are rejected.
+/// Opens a page in this host's browser, the one chosen in Settings; the engine validates the
+/// address and starts the browser detached.
 #[tauri::command]
-fn open_url(url: String) -> Result<(), String> {
-    let parsed =
-        tauri::Url::parse(&url).map_err(|error| format!("The address is invalid: {error}"))?;
-    let loopback = parsed.host_str().is_some_and(|host| {
-        host.eq_ignore_ascii_case("localhost")
-            || host
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|address| address.is_loopback())
-    });
-    if parsed.host_str().is_none()
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || !(parsed.scheme() == "https" || (parsed.scheme() == "http" && loopback))
-    {
-        return Err(
-            "Use an HTTPS address, or HTTP on localhost, without embedded credentials.".to_string(),
-        );
-    }
-    let mut command = if cfg!(target_os = "macos") {
-        std::process::Command::new("open")
-    } else if cfg!(target_os = "windows") {
-        std::process::Command::new("explorer")
-    } else {
-        std::process::Command::new("xdg-open")
-    };
-    command
-        .arg(parsed.as_str())
-        .spawn()
-        .map_err(|error| format!("Could not open the browser: {error}"))?;
-    Ok(())
+async fn open_url(desktop: State<'_, Desktop>, url: String) -> Result<(), String> {
+    buildbridge_engine::open_url(&desktop.engine, url).await
 }
 
 #[tauri::command]
-async fn open_android_web_inspector() -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(buildbridge_engine::open_android_inspector)
-        .await
-        .map_err(|error| format!("Could not open the Android inspector: {error}"))?
+async fn open_android_web_inspector(desktop: State<'_, Desktop>) -> Result<String, String> {
+    buildbridge_engine::open_android_inspector(&desktop.engine).await
+}
+
+#[tauri::command]
+async fn get_host_settings(desktop: State<'_, Desktop>) -> Result<HostSettings, String> {
+    buildbridge_engine::get_host_settings(&desktop.engine).await
+}
+
+#[tauri::command]
+async fn save_host_settings(
+    desktop: State<'_, Desktop>,
+    input: HostSettings,
+) -> Result<HostSettings, String> {
+    buildbridge_engine::save_host_settings(&desktop.engine, input).await
+}
+
+#[tauri::command]
+async fn get_storage_locations(desktop: State<'_, Desktop>) -> Result<StorageLocations, String> {
+    buildbridge_engine::get_storage_locations(&desktop.engine).await
+}
+
+#[tauri::command]
+async fn reveal_storage_directory(
+    desktop: State<'_, Desktop>,
+    directory: StorageDirectory,
+) -> Result<(), String> {
+    buildbridge_engine::reveal_storage_directory(&desktop.engine, directory).await
+}
+
+/// The window says whether it is visible; the engine samples only while it is.
+#[tauri::command]
+async fn set_usage_sampling(desktop: State<'_, Desktop>, enabled: bool) -> Result<(), String> {
+    buildbridge_engine::set_usage_sampling(&desktop.engine, enabled).await
 }
 
 #[tauri::command]
@@ -310,7 +308,7 @@ fn open_developer_tools(window: tauri::WebviewWindow) -> Result<(), String> {
     #[cfg(not(debug_assertions))]
     {
         let _ = window;
-        Err("The web inspector is only built into development builds of BuildBridge.".to_string())
+        Err("The web inspector is only built into development builds of buildbridge.".to_string())
     }
 }
 
@@ -657,7 +655,7 @@ async fn list_signing_kits(desktop: State<'_, Desktop>) -> Result<Vec<SigningKit
 /// Credential recovery is available only to the local main UI, never the guest screen or
 /// the external pages opened in additional webviews.
 fn require_credential_window(window: &tauri::WebviewWindow) -> Result<(), String> {
-    let denied = || "Open saved credentials from the main BuildBridge window.".to_string();
+    let denied = || "Open saved credentials from the main buildbridge window.".to_string();
     let url = window.url().map_err(|_| denied())?;
     let config = window.app_handle().config();
     let dev_url = if cfg!(debug_assertions) {
@@ -1019,8 +1017,16 @@ async fn run_android_device(
     desktop: State<'_, Desktop>,
     machine_id: String,
     input: AndroidDeviceRunInput,
-) -> Result<AndroidDeviceRunResult, String> {
+) -> Result<RunAndroidDeviceResult, String> {
     buildbridge_engine::run_android_device(&desktop.engine, machine_id, input).await
+}
+
+#[tauri::command]
+async fn clear_android_device_run(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+) -> Result<MachineView, String> {
+    buildbridge_engine::clear_android_device_run(&desktop.engine, machine_id).await
 }
 
 #[tauri::command]
@@ -1069,6 +1075,15 @@ async fn upload_google_play(
 }
 
 #[tauri::command]
+async fn check_store_builds(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+    input: Option<CheckStoreBuildsInput>,
+) -> Result<StoreBuildsCheck, String> {
+    buildbridge_engine::check_store_builds(&desktop.engine, machine_id, input).await
+}
+
+#[tauri::command]
 async fn clear_android_workspace(
     desktop: State<'_, Desktop>,
     machine_id: String,
@@ -1089,11 +1104,13 @@ async fn run_android_debug_build(
     desktop: State<'_, Desktop>,
     machine_id: String,
     allow_http: Option<bool>,
+    version: Option<ProjectVersionInput>,
 ) -> Result<RunAndroidBuildResult, String> {
     buildbridge_engine::run_android_debug_build(
         &desktop.engine,
         machine_id,
         allow_http.unwrap_or(false),
+        version,
     )
     .await
 }
@@ -1156,7 +1173,7 @@ async fn verify_android_signing_kit(kit_id: String) -> Result<AndroidSigningVeri
 
 pub fn run() {
     tauri::Builder::default()
-        // Native file pickers for the paths BuildBridge asks for: signing files, a project
+        // Native file pickers for the paths buildbridge asks for: signing files, a project
         // folder, and the Xcode archive.
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -1188,6 +1205,11 @@ pub fn run() {
             open_machine_screen,
             open_url,
             open_android_web_inspector,
+            get_host_settings,
+            save_host_settings,
+            get_storage_locations,
+            reveal_storage_directory,
+            set_usage_sampling,
             open_safari_web_inspector,
             list_machine_templates,
             save_machine_template,
@@ -1248,11 +1270,13 @@ pub fn run() {
             approve_android_workspace,
             list_android_devices,
             run_android_device,
+            clear_android_device_run,
             google_play_connection,
             configure_google_play,
             export_google_play_credential,
             disconnect_google_play,
             upload_google_play,
+            check_store_builds,
             clear_android_workspace,
             sync_android_workspace,
             run_android_debug_build,
@@ -1268,6 +1292,16 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let _ = window.hide();
                 api.prevent_close();
+            }
+        })
+        // The main window is configured hidden: until the webview has a document to draw, the
+        // window is an unpainted hole showing whatever is behind it, which reads as a freeze.
+        // It appears once the page has loaded, so the first thing on screen is the splash.
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && payload.event() == tauri::webview::PageLoadEvent::Finished
+            {
+                let _ = webview.window().show();
             }
         })
         .setup(|app| {

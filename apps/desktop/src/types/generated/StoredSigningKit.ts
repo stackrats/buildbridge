@@ -12,7 +12,7 @@ export type StoredSigningKit = { id: string, name: string, appStoreConnectKeyId:
  */
 developmentCertificatePath: string | null, developmentCertificatePassword: string | null, 
 /**
- * Apple's serial for the development `.p12` BuildBridge created; derived with OpenSSL for
+ * Apple's serial for the development `.p12` buildbridge created; derived with OpenSSL for
  * a hand-supplied file and cached here.
  */
 developmentCertificateSerialNumber: string | null, 

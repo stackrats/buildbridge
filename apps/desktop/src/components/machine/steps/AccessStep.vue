@@ -89,7 +89,7 @@ const installCommand = computed(() =>
 
         <form class="space-y-3" @submit.prevent="authorize">
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                BuildBridge signs in to the guest with a dedicated Ed25519 key it generates on this
+                buildbridge signs in to the guest with a dedicated Ed25519 key it generates on this
                 host. Installing that key takes the macOS login password once: it is sent over a
                 single SSH session to the pinned guest identity, then discarded. It is not stored or
                 logged, and nothing after this step asks for it. If you would rather not type it
@@ -103,7 +103,7 @@ const installCommand = computed(() =>
                 <Input
                     v-model="username"
                     mono
-                    placeholder="builder"
+                    placeholder="short name"
                     autocomplete="off"
                     :maxlength="32"
                 />
@@ -145,9 +145,7 @@ const installCommand = computed(() =>
             </Field>
 
             <details v-if="!done">
-                <DisclosureSummary class="text-xs font-medium text-zinc-600 dark:text-zinc-300">
-                    Add the key from the guest Terminal instead
-                </DisclosureSummary>
+                <DisclosureSummary> Add the key from the guest Terminal instead </DisclosureSummary>
                 <div
                     v-if="guest.publicKey"
                     class="mt-2 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950"
@@ -163,7 +161,11 @@ const installCommand = computed(() =>
                                 what="Copy the public key on its own"
                                 size="iconSm"
                             />
-                            <CopyButton :text="installCommand" label="Copy commands" />
+                            <CopyButton
+                                :text="installCommand"
+                                what="Copy the commands"
+                                size="iconSm"
+                            />
                         </div>
                     </div>
                     <pre

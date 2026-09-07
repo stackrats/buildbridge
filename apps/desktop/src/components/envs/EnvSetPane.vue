@@ -15,7 +15,6 @@ import Card from '../ui/Card.vue';
 import Chip from '../ui/Chip.vue';
 import DisclosureSummary from '../ui/DisclosureSummary.vue';
 import EmptyState from '../ui/EmptyState.vue';
-import PlatformIcon from '../ui/PlatformIcon.vue';
 import SecretValue from '../ui/SecretValue.vue';
 import EnvSetDialog from './EnvSetDialog.vue';
 
@@ -87,16 +86,11 @@ async function remove(): Promise<void> {
         <header class="flex items-start justify-between gap-4">
             <div>
                 <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">Environments</h1>
-                <p class="mt-1 flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-300">
-                    <PlatformIcon platform="ios" class="h-3.5 w-3.5" />
-                    <PlatformIcon platform="android" class="h-3.5 w-3.5" />
-                    Shared across platforms
-                </p>
-                <p class="mt-0.5 max-w-2xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                <p class="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                     Reuse build settings for production, staging, or another environment. Store them
-                    in this host's vault, choose a machine default, or select an environment for a
-                    release. Every environment works with iOS and Android. Values compiled into the
-                    app are visible to its users.
+                    in this host's vault and choose one on a build, release or device step. Every
+                    environment works with iOS and Android. Values compiled into the app are visible
+                    to its users.
                 </p>
             </div>
             <Button size="sm" @click="createSet">
@@ -137,11 +131,7 @@ async function remove(): Promise<void> {
                 Empty. A build attached to this environment gets no variables from it.
             </p>
             <details v-else>
-                <DisclosureSummary
-                    class="cursor-pointer text-xs font-medium text-zinc-700 dark:text-zinc-200"
-                >
-                    Variables and secrets
-                </DisclosureSummary>
+                <DisclosureSummary> Variables and secrets </DisclosureSummary>
                 <p class="mt-3 text-[11px] text-zinc-500 dark:text-zinc-400">Variables</p>
                 <dl
                     v-if="set.variables.length"
@@ -151,7 +141,7 @@ async function remove(): Promise<void> {
                         <dt class="text-zinc-700 dark:text-zinc-200">{{ variable.key }}</dt>
                         <dd
                             class="truncate text-zinc-500 dark:text-zinc-400"
-                            :title="variable.value"
+                            v-tip="variable.value"
                         >
                             {{ variable.value }}
                         </dd>
@@ -177,23 +167,25 @@ async function remove(): Promise<void> {
                 <p v-else class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">None.</p>
             </details>
 
-            <p class="mt-3 text-[11px] text-zinc-500 dark:text-zinc-400">Attached machines</p>
-            <div v-if="set.attachedMachines.length" class="mt-1 flex flex-wrap gap-1.5">
-                <Chip
-                    v-for="name in set.attachedMachines"
-                    :key="name"
-                    :interactive="false"
-                    dot="bg-emerald-500"
-                    tip="Uses this environment as its default"
-                >
-                    {{ name }}
-                    <span class="sr-only">, uses this environment as its default</span>
-                </Chip>
+            <div class="mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+                <p class="text-[11px] text-zinc-500 dark:text-zinc-400">Attached machines</p>
+                <div v-if="set.attachedMachines.length" class="mt-1.5 flex flex-wrap gap-1.5">
+                    <Chip
+                        v-for="name in set.attachedMachines"
+                        :key="name"
+                        :interactive="false"
+                        dot="bg-emerald-500"
+                        tip="Uses this environment as its default"
+                    >
+                        {{ name }}
+                        <span class="sr-only">, uses this environment as its default</span>
+                    </Chip>
+                </div>
+                <p v-else class="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+                    Choose this environment on a build, release or device step; it applies to that
+                    build.
+                </p>
             </div>
-            <p v-else class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                Choose this environment when building, or save it as a machine's default in the
-                Synchronize source step.
-            </p>
         </Card>
 
         <EmptyState

@@ -33,16 +33,29 @@ const detail = computed(() => {
             return session.archive?.detail;
         case 'release':
             return session.androidRelease?.detail;
+        case 'android-run-device':
+            return session.androidDevice?.detail ?? null;
         default:
             return null;
     }
 });
+// The last stage of a build and run is the app itself, up on the device with its log
+// streaming. It has arrived rather than being on its way, so this row goes live too: the
+// guided flow and the step panel say the same thing about the same run.
+const streaming = computed(
+    () => session.operation === 'android-run-device' && session.androidDevice?.phase === 'running',
+);
+const lastLine = computed(() =>
+    streaming.value ? (session.deviceLog.at(-1)?.text ?? null) : null,
+);
 const label = computed(() =>
-    build.value?.androidDeviceSerial
-        ? 'Building and running on Android'
-        : build.value?.request.outcome === 'release'
-          ? 'Creating a release'
-          : 'Building for testing',
+    streaming.value
+        ? `Live on ${build.value?.androidDeviceSerial ?? 'the device'}`
+        : build.value?.androidDeviceSerial
+          ? 'Building and running on Android'
+          : build.value?.request.outcome === 'release'
+            ? 'Creating a release'
+            : 'Building for testing',
 );
 </script>
 
@@ -50,18 +63,24 @@ const label = computed(() =>
     <div v-if="build" class="space-y-3" aria-live="polite">
         <ProgressRow
             v-if="active"
-            :label="activityLabel(session.operation) ?? label"
+            :label="streaming ? label : (activityLabel(session.operation) ?? label)"
             :detail="detail"
             :elapsed-seconds="Math.floor((now - build.startedAt) / 1000)"
+            :last-line="lastLine"
+            :state="streaming ? 'live' : 'running'"
             stoppable
             :stopping="build.status === 'stopping' || session.cancelling"
-            stop-title="Stop the current operation and the remaining build stages."
+            :stop-title="
+                streaming
+                    ? 'Ends the log session. The app stays installed and running on the device.'
+                    : 'Stop the current operation and the remaining build stages.'
+            "
             @stop="flows.stop(session.id)"
         />
         <Callout
             v-else-if="build.status === 'paused' && build.blocker"
             :tone="readyToContinue ? 'ok' : 'warn'"
-            :title="readyToContinue ? 'Ready to continue' : 'Your build needs a decision'"
+            :title="readyToContinue ? 'Ready to continue' : 'The build needs a decision'"
         >
             <p>
                 {{
@@ -158,8 +177,8 @@ const label = computed(() =>
                         emit(
                             'review',
                             build.failure?.step ??
-                                (build.stage === 'attach-env'
-                                    ? 'sync'
+                                (build.stage === 'attach-env' || build.stage === 'sync'
+                                    ? 'project'
                                     : (build.stage ?? 'test-build')),
                         )
                     "

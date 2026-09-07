@@ -16,7 +16,7 @@ fn ensure_shareable_target(machine_id: &str) -> Result<(), String> {
     }
 }
 
-/// How long a writer waits for another BuildBridge process to finish with the policy file.
+/// How long a writer waits for another buildbridge process to finish with the policy file.
 /// A holder rewrites one small JSON file, so contention lasts milliseconds; waiting this long
 /// lets a window refresh, the command line and the runner's tick pass each other instead of
 /// one of them failing.
@@ -46,7 +46,7 @@ fn policy_file_lock_within(app: &Engine, wait: std::time::Duration) -> Result<fs
             }
             Err(_) => {
                 return Err(
-                    "Another BuildBridge process is updating sharing permissions. Try again shortly."
+                    "Another buildbridge process is updating sharing permissions. Try again shortly."
                         .to_string(),
                 );
             }
@@ -217,6 +217,7 @@ pub async fn create_sharing_invitation(
     app: &Engine,
     input: ShareMachineInput,
 ) -> Result<SharingInvitation, String> {
+    crate::settings::require_remote_builds(app)?;
     ensure_shareable_target(&input.machine_id)?;
     if !(1..=720).contains(&input.access_hours)
         || input.env_sets.is_empty()
@@ -836,7 +837,7 @@ mod tests {
         // The lock is held through a separate file description, as another process holds it.
         let error =
             policy_file_lock_within(&app, std::time::Duration::from_millis(60)).unwrap_err();
-        assert!(error.contains("Another BuildBridge process"), "{error}");
+        assert!(error.contains("Another buildbridge process"), "{error}");
         let release = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(120));
             drop(held);

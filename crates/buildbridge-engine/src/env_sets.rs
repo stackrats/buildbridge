@@ -31,7 +31,7 @@ pub async fn save_env_set(app: &Engine, input: EnvSetInput) -> Result<Vec<EnvSet
         None => {
             if sets.sets.len() >= MAX_ENV_SETS {
                 return Err(format!(
-                    "BuildBridge stores at most {MAX_ENV_SETS} environments."
+                    "buildbridge stores at most {MAX_ENV_SETS} environments."
                 ));
             }
             let variables = merge_env_variables(None, &input)?;
@@ -337,7 +337,7 @@ pub(crate) fn merge_env_variables(
 /// single quotes when the value itself holds a double quote, which dotenv takes verbatim.
 pub(crate) fn render_dotenv(variables: &[StoredEnvVariable]) -> String {
     let mut out = String::from(
-        "# Written by BuildBridge from the attached environment. Not part of the project.\n",
+        "# Written by buildbridge from the attached environment. Not part of the project.\n",
     );
     for variable in variables {
         out.push_str(&variable.key);
@@ -367,7 +367,7 @@ pub(crate) fn render_dotenv(variables: &[StoredEnvVariable]) -> String {
 /// The same set as a POSIX shell sources it: single-quoted, which is exact for anything but a
 /// single quote, and that is spelled `'\''`.
 pub(crate) fn render_shell_env(variables: &[StoredEnvVariable]) -> String {
-    let mut out = String::from("# Written by BuildBridge from the attached environment.\n");
+    let mut out = String::from("# Written by buildbridge from the attached environment.\n");
     for variable in variables {
         out.push_str("export ");
         out.push_str(&variable.key);

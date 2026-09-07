@@ -28,7 +28,7 @@ export interface DeviceReadiness {
     /** The phone as the host reports it, while it is plugged in. */
     hostDevice: HostUsbDevice | null;
     signingReady: boolean;
-    /** The attached kit holds a Team key, so BuildBridge can register the phone at Apple. */
+    /** The attached kit holds a Team key, so buildbridge can register the phone at Apple. */
     canPrepareSigning: boolean;
     /** What to call the phone in copy, before and after the guest names it. */
     name: string;

@@ -685,7 +685,7 @@ where
                 if oversized {
                     oversized = false;
                     if sender
-                        .send("[BuildBridge omitted an oversized log line]".to_string())
+                        .send("[buildbridge omitted an oversized log line]".to_string())
                         .is_err()
                     {
                         break;
@@ -1392,7 +1392,7 @@ mod tests {
             &mut |line| lines.push(line),
         )
         .unwrap();
-        assert_eq!(lines, ["[BuildBridge omitted an oversized log line]"]);
+        assert_eq!(lines, ["[buildbridge omitted an oversized log line]"]);
     }
 
     #[test]

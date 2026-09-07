@@ -1,10 +1,31 @@
-//! Install a retained APK on one explicitly selected host ADB device and launch its activity.
+//! Install a retained APK on one explicitly selected host ADB device, launch its activity, and
+//! stream the app's log until the session is stopped, the app exits, or the device leaves.
 
 use super::*;
+use std::sync::mpsc;
 
 const ADB_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const ADB_INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
 const ADB_OUTPUT_LIMIT: u64 = 256 * 1024;
+/// `am start -W` returns once the activity is drawn, so the process is there by then; a few
+/// more looks cover a device that registers it a moment later.
+const PROCESS_LOOKUPS_AFTER_LAUNCH: usize = 4;
+const PROCESS_LOOKUP_INTERVAL: Duration = Duration::from_millis(500);
+/// While the log streams, the app's process is looked for at this rate; gone means it exited.
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const PROCESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONSOLE_TAIL_LINES: usize = 400;
+const CONSOLE_BATCH_LINES: usize = 200;
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+/// What the device log is narrowed to when the app's process id cannot be read: Capacitor,
+/// the web view, and crashes, with everything else silent.
+const FALLBACK_LOG_FILTERS: [&str; 5] = [
+    "Capacitor:*",
+    "Capacitor/Console:*",
+    "chromium:*",
+    "AndroidRuntime:E",
+    "*:S",
+];
 const MISSING_ADB: &str = "Install Android SDK Platform-Tools on this computer and add adb to PATH, or set ANDROID_HOME to the Android SDK directory, then refresh devices.";
 static RUNNING_DEVICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
@@ -15,6 +36,23 @@ pub struct AndroidDevice {
     pub serial: String,
     pub state: String,
     pub model: Option<String>,
+    /// Where a ready phone sits beside this computer's networks, read when listing; `None`
+    /// when it was not asked: a device that is not ready, or an emulator, which reaches this
+    /// host through its own gateway whatever its address says.
+    pub network: Option<AndroidDeviceNetwork>,
+}
+
+/// An app that calls an API served on this computer reaches it only from the same network.
+/// The device step says so before a run rather than the app after one, as a Network Error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidDeviceNetwork {
+    /// The phone's Wi-Fi or Ethernet IPv4 address with its prefix length, when it has one;
+    /// `None` with Wi-Fi off, when mobile data is all the phone has.
+    pub address: Option<String>,
+    /// Whether that address shares a network with one of this computer's.
+    pub on_host_network: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -24,6 +62,34 @@ pub struct AndroidDevices {
     pub available: bool,
     pub devices: Vec<AndroidDevice>,
     pub issue: Option<String>,
+    /// This computer's own networks in CIDR form, the ones a phone joins to reach it, with
+    /// loopback, link-local and container, VM and tunnel networks left out.
+    pub host_networks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum AndroidDeviceRunPhase {
+    Checking,
+    Staging,
+    Installing,
+    Launching,
+    Running,
+    Completed,
+}
+
+/// Progress carries every log line since the last event rather than the latest one, as the
+/// iPhone run's console does: an app log must not drop lines between ticks.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidDeviceRunProgress {
+    pub phase: AndroidDeviceRunPhase,
+    #[ts(type = "number")]
+    pub elapsed_seconds: u64,
+    pub detail: String,
+    pub log_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -31,34 +97,84 @@ pub struct AndroidDevices {
 #[serde(rename_all = "camelCase")]
 pub struct AndroidDeviceRunResult {
     pub serial: String,
+    /// The device's model as ADB lists it, when it says.
+    pub model: Option<String>,
     pub application_id: String,
     pub sha256: String,
     pub installed: bool,
     pub launched: bool,
+    /// The app's process on the device, when it could be read; the log was filtered to it.
+    #[ts(type = "number | null")]
+    pub pid: Option<u32>,
+    #[ts(type = "number")]
+    pub installed_at_epoch_seconds: u64,
+    /// How the log session ended. Each of these is a run that happened, not a failure.
+    pub console_end: ConsoleEnd,
+    pub console_tail: Vec<String>,
+}
+
+fn android_progress(
+    phase: AndroidDeviceRunPhase,
+    started_at: Instant,
+    detail: &str,
+    log_lines: Vec<String>,
+) -> AndroidDeviceRunProgress {
+    AndroidDeviceRunProgress {
+        phase,
+        elapsed_seconds: started_at.elapsed().as_secs(),
+        detail: detail.to_string(),
+        log_lines,
+    }
+}
+
+fn android_phase_detail(phase: AndroidDeviceRunPhase) -> &'static str {
+    match phase {
+        AndroidDeviceRunPhase::Checking => "Checking the device over ADB.",
+        AndroidDeviceRunPhase::Staging => "Verifying and staging the APK.",
+        AndroidDeviceRunPhase::Installing => "Installing the app on the device.",
+        AndroidDeviceRunPhase::Launching => "Launching the app.",
+        AndroidDeviceRunPhase::Running => "The app is running; its log streams here.",
+        AndroidDeviceRunPhase::Completed => "The log session ended.",
+    }
 }
 
 /// Host ADB sees USB phones and already-running emulators without a toolchain container.
+/// Each ready phone is also asked where it sits beside this computer's networks.
 pub fn list_host_android_devices() -> Result<AndroidDevices, String> {
     let Some(adb) = find_adb() else {
         return Ok(AndroidDevices {
             available: false,
             devices: vec![],
             issue: Some(MISSING_ADB.into()),
+            host_networks: vec![],
         });
     };
-    list_devices_with(&adb)
+    list_devices_with_networks(&adb, &host_ipv4_interfaces())
 }
 
 /// The engine verifies the managed artifact's size and checksum before entering this call.
 /// Every device command targets the selected serial; install preserves existing app data.
-pub fn run_host_android_device(
+/// Once the app is up, its log streams through `on_progress` until the operation is stopped,
+/// the app's process is gone, or ADB loses the device; each of those ends the run, not fails it.
+pub fn run_host_android_device<F>(
     serial: &str,
     application_id: &str,
     apk: &Path,
     expected_sha256: &str,
-) -> Result<AndroidDeviceRunResult, String> {
+    on_progress: F,
+) -> Result<AndroidDeviceRunResult, String>
+where
+    F: FnMut(AndroidDeviceRunProgress),
+{
     let adb = find_adb().ok_or_else(|| MISSING_ADB.to_string())?;
-    run_device_with(&adb, serial, application_id, apk, expected_sha256)
+    run_device_with(
+        &adb,
+        serial,
+        application_id,
+        apk,
+        expected_sha256,
+        on_progress,
+    )
 }
 
 fn find_adb() -> Option<PathBuf> {
@@ -115,13 +231,42 @@ fn list_devices_with(adb: &Path) -> Result<AndroidDevices, String> {
                 "ADB could not list devices: {}",
                 output.text.trim()
             )),
+            host_networks: vec![],
         });
     }
     Ok(AndroidDevices {
         available: true,
         devices: parse_devices(&output.text),
         issue: None,
+        host_networks: vec![],
     })
+}
+
+/// The listing the desktop and the command line show. The run's own check, above, stays
+/// this probe free: it wants the device's state, not its address.
+fn list_devices_with_networks(
+    adb: &Path,
+    host: &[Ipv4Interface],
+) -> Result<AndroidDevices, String> {
+    let mut listing = list_devices_with(adb)?;
+    let mut networks = host.iter().map(Ipv4Interface::cidr).collect::<Vec<_>>();
+    networks.sort();
+    networks.dedup();
+    listing.host_networks = networks;
+    for device in &mut listing.devices {
+        if device.state != "device" || device.serial.starts_with("emulator-") {
+            continue;
+        }
+        // A phone that cannot say is left unmarked rather than warned about.
+        device.network = adb_output(
+            Command::new(adb).args(["-s", &device.serial, "shell", "ip", "-4", "-o", "addr"]),
+            PROCESS_PROBE_TIMEOUT,
+        )
+        .ok()
+        .filter(|output| output.success)
+        .map(|output| device_network(&parse_ip_addresses(&output.text), host));
+    }
+    Ok(listing)
 }
 
 fn parse_devices(output: &str) -> Vec<AndroidDevice> {
@@ -178,9 +323,204 @@ fn parse_devices(output: &str) -> Vec<AndroidDevice> {
             serial: serial.into(),
             state: state.into(),
             model,
+            network: None,
         });
     }
     devices
+}
+
+/// One IPv4 address with its prefix length, as `ip -4 -o addr` and `ifconfig` list them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ipv4Interface {
+    name: String,
+    address: Ipv4Addr,
+    prefix: u8,
+}
+
+impl Ipv4Interface {
+    fn mask(&self) -> u32 {
+        if self.prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - u32::from(self.prefix))
+        }
+    }
+
+    fn contains(&self, other: Ipv4Addr) -> bool {
+        u32::from(other) & self.mask() == u32::from(self.address) & self.mask()
+    }
+
+    /// The network alone, `192.168.110.0/24`, as the desktop names it to join.
+    fn cidr(&self) -> String {
+        format!(
+            "{}/{}",
+            Ipv4Addr::from(u32::from(self.address) & self.mask()),
+            self.prefix
+        )
+    }
+
+    fn with_prefix(&self) -> String {
+        format!("{}/{}", self.address, self.prefix)
+    }
+}
+
+/// `ip -4 -o addr` on Linux and Android: one interface per line, `N: name    inet A/P ...`.
+fn parse_ip_addresses(output: &str) -> Vec<Ipv4Interface> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let _index = words.next()?;
+            let name = words.next()?;
+            if words.next()? != "inet" {
+                return None;
+            }
+            let (address, prefix) = words.next()?.split_once('/')?;
+            Some(Ipv4Interface {
+                name: name.to_string(),
+                address: address.parse().ok()?,
+                prefix: prefix.parse().ok().filter(|prefix| *prefix <= 32)?,
+            })
+        })
+        .collect()
+}
+
+/// `ifconfig` on macOS: an unindented `name: flags=...` line opens each interface, and its
+/// `inet A netmask 0xHHHHHHHH` lines follow indented.
+fn parse_ifconfig_addresses(output: &str) -> Vec<Ipv4Interface> {
+    let mut interfaces = Vec::new();
+    let mut name: Option<String> = None;
+    for line in output.lines() {
+        if !line.starts_with(char::is_whitespace) {
+            name = line
+                .split_once(':')
+                .map(|(name, _)| name.trim().to_string());
+            continue;
+        }
+        let mut words = line.split_whitespace();
+        if words.next() != Some("inet") {
+            continue;
+        }
+        let (Some(current), Some(address), Some("netmask"), Some(mask)) =
+            (name.as_ref(), words.next(), words.next(), words.next())
+        else {
+            continue;
+        };
+        let (Ok(address), Some(mask)) = (
+            address.parse::<Ipv4Addr>(),
+            mask.strip_prefix("0x")
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok()),
+        ) else {
+            continue;
+        };
+        // Only a contiguous mask is a prefix.
+        if (!mask).count_ones() != (!mask).trailing_ones() {
+            continue;
+        }
+        interfaces.push(Ipv4Interface {
+            name: current.clone(),
+            address,
+            prefix: mask.count_ones() as u8,
+        });
+    }
+    interfaces
+}
+
+/// Interface names a phone never shares a network with: loopback and this computer's own
+/// container, VM and tunnel networks, which its Wi-Fi never reaches.
+const HOST_VIRTUAL_INTERFACES: [&str; 24] = [
+    "lo",
+    "docker",
+    "br-",
+    "veth",
+    "virbr",
+    "vboxnet",
+    "vmnet",
+    "tun",
+    "tap",
+    "wg",
+    "utun",
+    "bridge",
+    "lxc",
+    "lxd",
+    "zt",
+    "tailscale",
+    "cni",
+    "flannel",
+    "podman",
+    "awdl",
+    "llw",
+    "anpi",
+    "gif",
+    "stf",
+];
+
+fn host_lan_interface(interface: &Ipv4Interface) -> bool {
+    !interface.address.is_loopback()
+        && !interface.address.is_link_local()
+        && interface.prefix <= 30
+        && !HOST_VIRTUAL_INTERFACES
+            .iter()
+            .any(|prefix| interface.name.starts_with(prefix))
+}
+
+/// This computer's networks a phone could be on. Elsewhere, and where neither tool answers,
+/// the list is empty and no phone is warned about.
+fn host_ipv4_interfaces() -> Vec<Ipv4Interface> {
+    let interfaces = if cfg!(target_os = "macos") {
+        host_command_output(&["/sbin/ifconfig", "ifconfig"], &["-a"])
+            .map(|output| parse_ifconfig_addresses(&output))
+    } else {
+        host_command_output(
+            &["ip", "/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip"],
+            &["-4", "-o", "addr"],
+        )
+        .map(|output| parse_ip_addresses(&output))
+    };
+    interfaces
+        .unwrap_or_default()
+        .into_iter()
+        .filter(host_lan_interface)
+        .collect()
+}
+
+/// A desktop opened from a launcher may not carry a login shell's PATH; the tool's usual
+/// locations follow the PATH lookup.
+fn host_command_output(candidates: &[&str], arguments: &[&str]) -> Option<String> {
+    candidates.iter().find_map(|program| {
+        let output = Command::new(program)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .tracked_output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    })
+}
+
+/// The phone's Wi-Fi and Ethernet interfaces alone count: mobile data and VPN tunnels never
+/// share a network with this computer, whatever their addresses look like.
+fn phone_lan_interface(interface: &Ipv4Interface) -> bool {
+    interface.prefix <= 30
+        && ["wlan", "eth", "swlan", "wifi"]
+            .iter()
+            .any(|prefix| interface.name.starts_with(prefix))
+}
+
+fn device_network(interfaces: &[Ipv4Interface], host: &[Ipv4Interface]) -> AndroidDeviceNetwork {
+    let lan = interfaces
+        .iter()
+        .filter(|interface| phone_lan_interface(interface))
+        .collect::<Vec<_>>();
+    AndroidDeviceNetwork {
+        address: lan.first().map(|interface| interface.with_prefix()),
+        on_host_network: lan.iter().any(|phone| {
+            host.iter()
+                .any(|host| host.contains(phone.address) || phone.contains(host.address))
+        }),
+    }
 }
 
 fn valid_serial(serial: &str) -> bool {
@@ -215,13 +555,17 @@ fn launcher_component(output: &str, application_id: &str) -> Option<String> {
     })
 }
 
-fn run_device_with(
+fn run_device_with<F>(
     adb: &Path,
     serial: &str,
     application_id: &str,
     apk: &Path,
     expected_sha256: &str,
-) -> Result<AndroidDeviceRunResult, String> {
+    mut on_progress: F,
+) -> Result<AndroidDeviceRunResult, String>
+where
+    F: FnMut(AndroidDeviceRunProgress),
+{
     if !valid_serial(serial) {
         return Err("Select a valid Android device serial from the device list.".into());
     }
@@ -238,13 +582,24 @@ fn run_device_with(
     {
         return Err("The retained APK is unavailable. Build it again before installing.".into());
     }
+    let started_at = Instant::now();
+    let mut report = |phase: AndroidDeviceRunPhase| {
+        on_progress(android_progress(
+            phase,
+            started_at,
+            android_phase_detail(phase),
+            Vec::new(),
+        ));
+    };
     let _device = AndroidDeviceGuard::claim(serial)?;
+    report(AndroidDeviceRunPhase::Checking);
     let listing = list_devices_with(adb)?;
     if let Some(issue) = listing.issue {
         return Err(issue);
     }
     let device = listing.devices.iter().find(|device| device.serial == serial)
         .ok_or_else(|| "The selected Android device is no longer connected. Refresh devices and select it again.".to_string())?;
+    let model = device.model.clone();
     match device.state.as_str() {
         "device" => {}
         "unauthorized" | "authorizing" => return Err("Unlock the selected Android device and accept its USB debugging authorization prompt, then refresh devices.".into()),
@@ -259,9 +614,11 @@ fn run_device_with(
     if !booted.success || booted.text.trim() != "1" {
         return Err("The selected Android device has not finished booting. Unlock it and try again once Android is ready.".into());
     }
-    // The source may be edited outside BuildBridge while ADB probes the phone. Install a
+    // The source may be edited outside buildbridge while ADB probes the phone. Install a
     // private copy whose bytes we verify now, rather than reopening that mutable source.
+    report(AndroidDeviceRunPhase::Staging);
     let snapshot = AndroidApkSnapshot::create(apk, expected_sha256)?;
+    report(AndroidDeviceRunPhase::Installing);
     let installed = adb_output(
         Command::new(adb)
             .args(["-s", serial, "install", "-r"])
@@ -271,6 +628,7 @@ fn run_device_with(
     if !installed.success || !installed.text.lines().any(|line| line.trim() == "Success") {
         return Err(install_error(&installed.text, application_id, serial));
     }
+    report(AndroidDeviceRunPhase::Launching);
     let resolved = adb_output(
         Command::new(adb).args([
             "-s",
@@ -334,13 +692,231 @@ fn run_device_with(
             launched.text.trim()
         ));
     }
+    let installed_at_epoch_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    let pid = process_id(adb, serial, application_id, PROCESS_LOOKUPS_AFTER_LAUNCH)?;
+    let (console_end, console_tail) = stream_app_log(
+        adb,
+        serial,
+        application_id,
+        pid,
+        started_at,
+        &mut on_progress,
+    )?;
+    on_progress(android_progress(
+        AndroidDeviceRunPhase::Completed,
+        started_at,
+        android_phase_detail(AndroidDeviceRunPhase::Completed),
+        Vec::new(),
+    ));
     Ok(AndroidDeviceRunResult {
         serial: serial.into(),
+        model,
         application_id: application_id.into(),
         sha256: expected_sha256.to_ascii_lowercase(),
         installed: true,
         launched: true,
+        pid,
+        installed_at_epoch_seconds,
+        console_end,
+        console_tail,
     })
+}
+
+/// What `pidof` says about the app's process: present with its id, gone, or unreadable when
+/// ADB itself answered with an error rather than the device.
+enum AppProcess {
+    Present(u32),
+    Gone,
+    Unknown,
+}
+
+fn app_process(output: &AdbOutput) -> AppProcess {
+    let text = output.text.trim();
+    if let Some(pid) = text
+        .split_whitespace()
+        .next()
+        .and_then(|word| word.parse::<u32>().ok())
+        .filter(|pid| *pid > 0)
+    {
+        return AppProcess::Present(pid);
+    }
+    // toybox's pidof exits 1 with nothing printed when no process matches; an ADB failure
+    // exits 1 too, but says so.
+    if text.is_empty() || (!output.success && !text.contains("error")) {
+        AppProcess::Gone
+    } else {
+        AppProcess::Unknown
+    }
+}
+
+/// The app's process on the device, tried `attempts` times. `None` means the device did not
+/// name one — a process still registering, or a build without `pidof` — and the log is then
+/// narrowed by tag instead. Only a Stop turns into an error.
+fn process_id(
+    adb: &Path,
+    serial: &str,
+    application_id: &str,
+    attempts: usize,
+) -> Result<Option<u32>, String> {
+    for attempt in 0..attempts {
+        if attempt > 0 {
+            thread::sleep(PROCESS_LOOKUP_INTERVAL);
+        }
+        match adb_output(
+            Command::new(adb).args(["-s", serial, "shell", "pidof", application_id]),
+            PROCESS_PROBE_TIMEOUT,
+        ) {
+            Ok(output) => {
+                if let AppProcess::Present(pid) = app_process(&output) {
+                    return Ok(Some(pid));
+                }
+            }
+            Err(error) => {
+                if current_scope().is_some_and(|scope| scope.is_cancelled()) {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Streams the app's log to `on_progress` until the operation is stopped, the app's process
+/// is gone, or the log client loses the device. A stop kills the log client alone: the app
+/// stays installed and running on the device.
+fn stream_app_log<F>(
+    adb: &Path,
+    serial: &str,
+    application_id: &str,
+    pid: Option<u32>,
+    started_at: Instant,
+    on_progress: &mut F,
+) -> Result<(ConsoleEnd, Vec<String>), String>
+where
+    F: FnMut(AndroidDeviceRunProgress),
+{
+    let mut command = Command::new(adb);
+    command.args(["-s", serial, "logcat", "-v", "time"]);
+    match pid {
+        Some(pid) => {
+            command.arg(format!("--pid={pid}"));
+        }
+        None => {
+            command.arg("-s").args(FALLBACK_LOG_FILTERS);
+        }
+    }
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .tracked_spawn()
+        .map_err(|error| format!("The app launched, but its log could not be opened: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "The app launched, but its log output could not be captured.".to_string())?;
+    let (sender, receiver) = mpsc::channel::<String>();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let detail = match pid {
+        Some(pid) => format!("The app is running; its log streams here (process {pid})."),
+        None => "The app is running; the device log streams here, narrowed to Capacitor, the web view and crashes: the process id could not be read.".to_string(),
+    };
+    on_progress(android_progress(
+        AndroidDeviceRunPhase::Running,
+        started_at,
+        &detail,
+        Vec::new(),
+    ));
+
+    let mut console_tail = Vec::new();
+    let mut pending = Vec::new();
+    let mut last_event = Instant::now();
+    let mut last_probe = Instant::now();
+    let cancelled = || current_scope().is_some_and(|scope| scope.is_cancelled());
+    let take_line = |line: String, console_tail: &mut Vec<String>, pending: &mut Vec<String>| {
+        let line = sanitize_build_log_line(&line);
+        if !line.is_empty() {
+            push_bounded(console_tail, line.clone(), CONSOLE_TAIL_LINES);
+            pending.push(line);
+        }
+    };
+    let console_end = loop {
+        if cancelled() {
+            break ConsoleEnd::Stopped;
+        }
+        match receiver.recv_timeout(PROGRESS_INTERVAL) {
+            Ok(line) => take_line(line, &mut console_tail, &mut pending),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break if cancelled() {
+                    ConsoleEnd::Stopped
+                } else {
+                    ConsoleEnd::Disconnected
+                };
+            }
+        }
+        if !pending.is_empty()
+            && (last_event.elapsed() >= PROGRESS_INTERVAL || pending.len() >= CONSOLE_BATCH_LINES)
+        {
+            on_progress(android_progress(
+                AndroidDeviceRunPhase::Running,
+                started_at,
+                &detail,
+                std::mem::take(&mut pending),
+            ));
+            last_event = Instant::now();
+        }
+        if let Some(pid) = pid
+            && last_probe.elapsed() >= PROCESS_POLL_INTERVAL
+        {
+            last_probe = Instant::now();
+            let probe = adb_output(
+                Command::new(adb).args(["-s", serial, "shell", "pidof", application_id]),
+                PROCESS_PROBE_TIMEOUT,
+            );
+            match probe.as_ref().map(app_process) {
+                Ok(AppProcess::Present(current)) if current == pid => {}
+                Ok(AppProcess::Present(_) | AppProcess::Gone) => break ConsoleEnd::Exited,
+                // A probe that ADB could not answer, or that a Stop interrupted: the next turn
+                // of the loop reads the stop; the log itself says when the device is gone.
+                Ok(AppProcess::Unknown) | Err(_) => {}
+            }
+        }
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = reader.join();
+    for line in receiver.try_iter() {
+        take_line(line, &mut console_tail, &mut pending);
+    }
+    if !pending.is_empty() {
+        on_progress(android_progress(
+            AndroidDeviceRunPhase::Running,
+            started_at,
+            &detail,
+            pending,
+        ));
+    }
+    Ok((console_end, console_tail))
+}
+
+fn push_bounded(lines: &mut Vec<String>, line: String, limit: usize) {
+    lines.push(line);
+    if lines.len() > limit {
+        lines.remove(0);
+    }
 }
 
 struct AndroidApkSnapshot(PathBuf);
@@ -436,7 +1012,7 @@ impl AndroidDeviceGuard {
             .lock()
             .map_err(|_| "The Android device operation registry is unavailable.".to_string())?;
         if devices.iter().any(|device| device == serial) {
-            return Err("Another BuildBridge operation is installing on this Android device. Wait for it to finish.".into());
+            return Err("Another buildbridge operation is installing on this Android device. Wait for it to finish.".into());
         }
         devices.push(serial.into());
         Ok(Self(serial.into()))
@@ -457,7 +1033,7 @@ fn install_error(output: &str, application_id: &str, serial: &str) -> String {
     {
         "The installed app uses a different signing key. The existing app and its data are unchanged.\n\nTo preserve its data, rebuild with the original signing key. To keep both apps, use a different application ID and rebuild. For a disposable test installation, manually remove the existing app from the phone, then retry this retained APK with Install and open. Removing the app deletes its local data. Rebuilding with the current signing key alone will not fix this mismatch."
     } else if output.contains("INSTALL_FAILED_VERSION_DOWNGRADE") {
-        "This APK has an older version code than the installed app. Build a newer version; BuildBridge kept the existing app and its data."
+        "This APK has an older version code than the installed app. Build a newer version; buildbridge kept the existing app and its data."
     } else if output.contains("INSTALL_FAILED_USER_RESTRICTED") {
         "Unlock the device and allow USB app installation in its developer settings, then retry."
     } else if output.contains("INSTALL_FAILED_INSUFFICIENT_STORAGE") {
@@ -622,6 +1198,25 @@ elif [ "$4" = am ]; then
     else
         printf '%s\n' 'Starting: Intent { act=android.intent.action.MAIN }' 'Status: ok' 'Complete'
     fi
+elif [ "$4" = ip ]; then
+    printf '%s\n' '1: lo    inet 127.0.0.1/8 scope host lo\       valid_lft forever preferred_lft forever'
+    if [ "$scenario" = mobile_data ]; then
+        printf '%s\n' '12: ccmni2    inet 10.183.239.119/8 scope global ccmni2\       valid_lft forever preferred_lft forever' '47: vgate0    inet 172.30.205.219/32 scope global vgate0\       valid_lft forever preferred_lft forever'
+    else
+        printf '%s\n' '40: wlan0    inet 192.168.110.252/24 brd 192.168.110.255 scope global dynamic wlan0\       valid_lft 1037sec preferred_lft 1037sec'
+    fi
+elif [ "$4" = pidof ]; then
+    lookups=$(( $(cat "$0.pidof" 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "$lookups" > "$0.pidof"
+    case "$scenario" in
+        no_pid) exit 1;;
+        app_exits) if [ "$lookups" -gt 1 ]; then exit 1; fi; printf '%s\n' 4242;;
+        *) printf '%s\n' 4242;;
+    esac
+elif [ "$3" = logcat ]; then
+    printf '%s\n' '09-07 10:00:00.000 I/Capacitor( 4242): Starting BridgeActivity' '09-07 10:00:00.100 D/Capacitor/Console( 4242): [log] app ready'
+    if [ "$scenario" = logcat_ends ]; then exit 0; fi
+    exec /bin/sleep 30
 else
     printf '%s\n' 'unexpected command' >&2
     exit 2
@@ -641,7 +1236,42 @@ fi
         }
 
         fn run(&self) -> Result<AndroidDeviceRunResult, String> {
-            run_device_with(&self.adb, "phone-123", "com.example.app", &self.apk, SHA256)
+            self.run_with(|_| {})
+        }
+
+        fn run_with<F: FnMut(AndroidDeviceRunProgress)>(
+            &self,
+            on_progress: F,
+        ) -> Result<AndroidDeviceRunResult, String> {
+            run_device_with(
+                &self.adb,
+                "phone-123",
+                "com.example.app",
+                &self.apk,
+                SHA256,
+                on_progress,
+            )
+        }
+
+        /// Runs under a scope that is cancelled after `after`, as a Stop from the desktop is.
+        fn run_then_stop(
+            &self,
+            after: Duration,
+        ) -> (
+            Result<AndroidDeviceRunResult, String>,
+            Vec<AndroidDeviceRunProgress>,
+        ) {
+            let scope = OperationScope::new();
+            let cancellation = Arc::clone(&scope);
+            let _entered = enter_operation(scope);
+            let cancel = thread::spawn(move || {
+                thread::sleep(after);
+                cancellation.cancel();
+            });
+            let mut events = Vec::new();
+            let result = self.run_with(|progress| events.push(progress));
+            cancel.join().unwrap();
+            (result, events)
         }
 
         fn calls(&self) -> Vec<Vec<String>> {
@@ -676,15 +1306,198 @@ fi
         assert!(parse_devices("daemon startup noise").is_empty());
     }
 
+    fn interface(name: &str, address: &str, prefix: u8) -> Ipv4Interface {
+        Ipv4Interface {
+            name: name.into(),
+            address: address.parse().unwrap(),
+            prefix,
+        }
+    }
+
+    #[test]
+    fn reads_addresses_as_ip_and_ifconfig_list_them() {
+        let phone = parse_ip_addresses(
+            "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever\n40: wlan0    inet 192.168.110.252/24 brd 192.168.110.255 scope global dynamic wlan0\\       valid_lft 1037sec preferred_lft 1037sec\n47: vgate0    inet 172.30.205.219/32 scope global vgate0\\       valid_lft forever preferred_lft forever\nnoise\n5: bad    inet 300.1.1.1/24\n6: wide    inet 10.0.0.1/33\n",
+        );
+        assert_eq!(
+            phone,
+            [
+                interface("lo", "127.0.0.1", 8),
+                interface("wlan0", "192.168.110.252", 24),
+                interface("vgate0", "172.30.205.219", 32),
+            ]
+        );
+        let mac = parse_ifconfig_addresses(
+            "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384\n\tinet 127.0.0.1 netmask 0xff000000\nen0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\tether 3c:22:fb:00:00:00\n\tinet6 fe80::1%en0 prefixlen 64\n\tinet 192.168.1.10 netmask 0xffffff00 broadcast 192.168.1.255\nutun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1400\n\tinet 10.8.0.2 --> 10.8.0.1 netmask 0xffffffff\nodd0: flags=0 mtu 0\n\tinet 10.9.0.2 netmask 0xffff00ff\n",
+        );
+        assert_eq!(
+            mac,
+            [
+                interface("lo0", "127.0.0.1", 8),
+                interface("en0", "192.168.1.10", 24),
+            ]
+        );
+        assert_eq!(
+            interface("en0", "192.168.1.10", 24).cidr(),
+            "192.168.1.0/24"
+        );
+        assert_eq!(interface("any", "10.1.2.3", 0).cidr(), "0.0.0.0/0");
+    }
+
+    #[test]
+    fn a_phone_is_on_this_computers_network_by_its_wifi_or_ethernet_address_alone() {
+        let host = [interface("wlp0s20f3", "192.168.110.238", 24)];
+        let wifi = device_network(
+            &[
+                interface("lo", "127.0.0.1", 8),
+                interface("wlan0", "192.168.110.252", 24),
+                interface("vgate0", "172.30.205.219", 32),
+            ],
+            &host,
+        );
+        assert_eq!(
+            wifi,
+            AndroidDeviceNetwork {
+                address: Some("192.168.110.252/24".into()),
+                on_host_network: true,
+            }
+        );
+        // Mobile data's /8 would swallow a 10.x computer; it is not a network the phone shares.
+        let mobile = device_network(
+            &[
+                interface("ccmni2", "10.183.239.119", 8),
+                interface("vgate0", "172.30.205.219", 32),
+            ],
+            &[interface("eth0", "10.0.1.5", 24)],
+        );
+        assert_eq!(
+            mobile,
+            AndroidDeviceNetwork {
+                address: None,
+                on_host_network: false,
+            }
+        );
+        let elsewhere = device_network(&[interface("wlan0", "10.1.2.3", 24)], &host);
+        assert_eq!(elsewhere.address.as_deref(), Some("10.1.2.3/24"));
+        assert!(!elsewhere.on_host_network);
+        // Either side's prefix may be the wider one.
+        assert!(
+            device_network(
+                &[interface("eth0", "192.168.1.9", 16)],
+                &[interface("en0", "192.168.7.7", 24)]
+            )
+            .on_host_network
+        );
+        assert!(!device_network(&[interface("wlan0", "192.168.110.252", 24)], &[]).on_host_network);
+    }
+
+    #[test]
+    fn this_computers_networks_leave_out_loopback_and_its_container_and_tunnel_networks() {
+        let kept = [
+            interface("wlp0s20f3", "192.168.110.238", 24),
+            interface("en0", "10.0.1.5", 24),
+            interface("enp3s0", "172.16.4.9", 22),
+        ];
+        for interface in &kept {
+            assert!(host_lan_interface(interface), "{interface:?}");
+        }
+        let dropped = [
+            interface("lo", "127.0.0.1", 8),
+            interface("lo0", "127.0.0.1", 8),
+            interface("docker0", "172.17.0.1", 16),
+            interface("br-9574cee6088a", "172.27.0.1", 16),
+            interface("virbr0", "192.168.122.1", 24),
+            interface("utun3", "10.8.0.2", 32),
+            interface("wg0", "10.200.0.2", 24),
+            interface("tailscale0", "100.64.0.3", 32),
+            interface("en5", "169.254.10.4", 16),
+            interface("ppp0", "10.64.64.64", 32),
+        ];
+        for interface in &dropped {
+            assert!(!host_lan_interface(interface), "{interface:?}");
+        }
+    }
+
+    #[test]
+    fn the_listing_asks_each_ready_phone_where_it_is_and_nothing_else() {
+        let host = [
+            interface("wlp0s20f3", "192.168.110.238", 24),
+            interface("wlp0s20f3", "192.168.110.239", 24),
+        ];
+        let fixture = Fixture::new("success");
+        let listing = list_devices_with_networks(&fixture.adb, &host).unwrap();
+        assert_eq!(listing.host_networks, ["192.168.110.0/24"]);
+        let phone = listing
+            .devices
+            .iter()
+            .find(|device| device.serial == "phone-123")
+            .unwrap();
+        assert_eq!(
+            phone.network,
+            Some(AndroidDeviceNetwork {
+                address: Some("192.168.110.252/24".into()),
+                on_host_network: true,
+            })
+        );
+        let emulator = listing
+            .devices
+            .iter()
+            .find(|device| device.serial == "emulator-5554")
+            .unwrap();
+        assert_eq!(
+            emulator.network, None,
+            "an emulator reaches the host anyway"
+        );
+        let calls = fixture.calls();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(
+            calls[1],
+            ["-s", "phone-123", "shell", "ip", "-4", "-o", "addr"]
+        );
+        drop(fixture);
+
+        let fixture = Fixture::new("mobile_data");
+        let listing = list_devices_with_networks(&fixture.adb, &host).unwrap();
+        let phone = listing
+            .devices
+            .iter()
+            .find(|device| device.serial == "phone-123")
+            .unwrap();
+        assert_eq!(
+            phone.network,
+            Some(AndroidDeviceNetwork {
+                address: None,
+                on_host_network: false,
+            })
+        );
+        drop(fixture);
+
+        // A device that is not ready is not asked, and the run's own listing never asks.
+        let fixture = Fixture::new("unauthorized");
+        let listing = list_devices_with_networks(&fixture.adb, &host).unwrap();
+        assert!(
+            listing
+                .devices
+                .iter()
+                .all(|device| device.network.is_none())
+        );
+        assert_eq!(fixture.calls().len(), 1);
+    }
+
     #[test]
     fn install_and_launch_use_the_exact_selected_device_and_verified_private_apk() {
         let fixture = Fixture::new("success");
-        let result = fixture.run().unwrap();
+        let (result, events) = fixture.run_then_stop(Duration::from_millis(600));
+        let result = result.unwrap();
         assert!(result.installed && result.launched);
         assert_eq!(result.serial, "phone-123");
+        assert_eq!(result.model.as_deref(), Some("Pixel 9"));
         assert_eq!(result.sha256, SHA256);
+        assert_eq!(result.pid, Some(4242));
+        assert_eq!(result.console_end, ConsoleEnd::Stopped);
+        assert!(result.installed_at_epoch_seconds > 0);
         let calls = fixture.calls();
-        assert_eq!(calls.len(), 5);
+        assert_eq!(calls.len(), 7, "{calls:?}");
         assert_eq!(calls[0], ["devices", "-l"]);
         for call in &calls[1..] {
             assert_eq!(&call[..2], ["-s", "phone-123"]);
@@ -707,6 +1520,120 @@ fi
             b"abc"
         );
         assert_eq!(calls[4].last().unwrap(), "com.example.app/.MainActivity");
+        assert_eq!(&calls[5][2..], ["shell", "pidof", "com.example.app"]);
+        assert_eq!(
+            &calls[6][2..],
+            ["logcat", "-v", "time", "--pid=4242"],
+            "the log is the app's alone"
+        );
+
+        // The phases arrive in order, the app's lines land while it runs, and a stop is the
+        // session's normal end rather than a failure.
+        let phases = events.iter().map(|event| event.phase).collect::<Vec<_>>();
+        let mut expected = phases.clone();
+        expected.dedup();
+        assert_eq!(
+            expected,
+            [
+                AndroidDeviceRunPhase::Checking,
+                AndroidDeviceRunPhase::Staging,
+                AndroidDeviceRunPhase::Installing,
+                AndroidDeviceRunPhase::Launching,
+                AndroidDeviceRunPhase::Running,
+                AndroidDeviceRunPhase::Completed,
+            ]
+        );
+        let streamed = events
+            .iter()
+            .flat_map(|event| event.log_lines.iter().cloned())
+            .collect::<Vec<_>>();
+        assert_eq!(streamed, result.console_tail);
+        assert_eq!(streamed.len(), 2);
+        assert!(
+            streamed[0].ends_with("Starting BridgeActivity"),
+            "{streamed:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.log_lines.is_empty()
+                    || event.phase == AndroidDeviceRunPhase::Running),
+            "lines belong to the running phase"
+        );
+    }
+
+    #[test]
+    fn the_session_ends_when_the_app_exits() {
+        let fixture = Fixture::new("app_exits");
+        let started = Instant::now();
+        let result = fixture.run().unwrap();
+        assert_eq!(result.console_end, ConsoleEnd::Exited);
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(result.console_tail.len(), 2);
+        let pidof_calls = fixture
+            .calls()
+            .iter()
+            .filter(|call| call.contains(&"pidof".to_string()))
+            .count();
+        assert_eq!(pidof_calls, 2, "the process is found once, then found gone");
+    }
+
+    #[test]
+    fn the_session_ends_when_the_log_client_loses_the_device() {
+        let fixture = Fixture::new("logcat_ends");
+        let started = Instant::now();
+        let result = fixture.run().unwrap();
+        assert_eq!(result.console_end, ConsoleEnd::Disconnected);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(result.console_tail.len(), 2);
+    }
+
+    #[test]
+    fn without_a_process_id_the_log_is_narrowed_by_tag_instead() {
+        let fixture = Fixture::new("no_pid");
+        let (result, events) = fixture.run_then_stop(Duration::from_millis(2_500));
+        let result = result.unwrap();
+        assert_eq!(result.pid, None);
+        assert_eq!(result.console_end, ConsoleEnd::Stopped);
+        let calls = fixture.calls();
+        let logcat = calls
+            .iter()
+            .find(|call| call.get(2).map(String::as_str) == Some("logcat"))
+            .expect("the log session starts without a pid");
+        assert!(
+            !logcat.iter().any(|argument| argument.starts_with("--pid")),
+            "{logcat:?}"
+        );
+        assert!(logcat.iter().any(|argument| argument == "Capacitor:*"));
+        assert_eq!(logcat.last().unwrap(), "*:S", "everything else is silent");
+        let running = events
+            .iter()
+            .find(|event| event.phase == AndroidDeviceRunPhase::Running)
+            .unwrap();
+        assert!(running.detail.contains("process id could not be read"));
+    }
+
+    #[test]
+    fn a_process_answer_is_read_as_present_gone_or_unknown() {
+        let present = AdbOutput {
+            success: true,
+            text: "4242\n".into(),
+        };
+        assert!(matches!(app_process(&present), AppProcess::Present(4242)));
+        let gone = AdbOutput {
+            success: false,
+            text: String::new(),
+        };
+        assert!(matches!(app_process(&gone), AppProcess::Gone));
+        let offline = AdbOutput {
+            success: false,
+            text: "error: device offline\n".into(),
+        };
+        assert!(matches!(app_process(&offline), AppProcess::Unknown));
     }
 
     #[test]
@@ -753,6 +1680,7 @@ fi
             application_id,
             &fixture.apk,
             SHA256,
+            |_| {},
         )
         .unwrap_err();
         assert!(error.contains("The APK is ready"), "{error}");
@@ -799,7 +1727,8 @@ fi
                     "phone-123",
                     application_id,
                     &fixture.apk,
-                    SHA256
+                    SHA256,
+                    |_| {},
                 )
                 .is_err()
             );
@@ -811,7 +1740,8 @@ fi
                     serial,
                     "com.example.app",
                     &fixture.apk,
-                    SHA256
+                    SHA256,
+                    |_| {},
                 )
                 .is_err()
             );

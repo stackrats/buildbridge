@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vite-plus/test';
 
-import type { AndroidMachineView } from '../types/backend';
-import { androidDeviceApks, androidInstallCommand } from './android-device';
+import type { AndroidDevice, AndroidMachineView } from '../types/backend';
+import { androidDeviceApks, androidInstallCommand, androidNetworkWarning } from './android-device';
 
 function androidView(): AndroidMachineView {
     return {
@@ -12,6 +12,7 @@ function androidView(): AndroidMachineView {
             lastSnapshotSha256: 'snapshot',
             lastSyncFileCount: 10,
             lastSyncBytes: 1000,
+            lastSyncedAtEpochSeconds: null,
             lastBuildSucceeded: true,
             lastBuild: {
                 allowHttp: false,
@@ -36,6 +37,8 @@ function androidView(): AndroidMachineView {
         },
         releaseEnvSet: 'Production',
         releaseError: null,
+        deviceRun: null,
+        deviceRunError: null,
     };
 }
 
@@ -101,6 +104,8 @@ describe('Android device APKs', () => {
                 release: null,
                 releaseEnvSet: null,
                 releaseError: null,
+                deviceRun: null,
+                deviceRunError: null,
             }),
         ).toEqual([]);
     });
@@ -130,5 +135,53 @@ describe('Android install command', () => {
         ).toBe(
             "adb -s 'device'\\''; echo injected' install -r '/tmp/it'\\''s $(touch marker); `id`.apk'",
         );
+    });
+});
+
+describe('Android device network warning', () => {
+    const phone = (network: AndroidDevice['network']): AndroidDevice => ({
+        serial: 'phone',
+        state: 'device',
+        model: 'Pixel 9',
+        network,
+    });
+    const home = ['192.168.110.0/24'];
+
+    it('says nothing for a phone on this computer’s network, or one that was not asked', () => {
+        expect(
+            androidNetworkWarning(
+                phone({ address: '192.168.110.252/24', onHostNetwork: true }),
+                home,
+            ),
+        ).toBeNull();
+        expect(androidNetworkWarning(phone(null), home)).toBeNull();
+        expect(androidNetworkWarning(null, home)).toBeNull();
+        expect(androidNetworkWarning(undefined, home)).toBeNull();
+    });
+
+    it('names the network to join when the phone is on mobile data alone', () => {
+        const warning = androidNetworkWarning(phone({ address: null, onHostNetwork: false }), home);
+        expect(warning?.title).toBe('The phone is not on Wi-Fi');
+        expect(warning?.message).toContain('Mobile data is all it has');
+        expect(warning?.message).toContain('(192.168.110.0/24)');
+        expect(warning?.message).toContain('then refresh devices');
+    });
+
+    it('names the phone’s own network when it is on a different one', () => {
+        const warning = androidNetworkWarning(
+            phone({ address: '10.1.2.3/24', onHostNetwork: false }),
+            ['192.168.110.0/24', '10.0.1.0/24'],
+        );
+        expect(warning?.title).toBe('The phone is on a different network');
+        expect(warning?.message).toContain('It is on 10.1.2.3/24');
+        expect(warning?.message).toContain('(192.168.110.0/24, 10.0.1.0/24)');
+    });
+
+    it('still asks for this computer’s Wi-Fi when the computer’s networks are unknown', () => {
+        const warning = androidNetworkWarning(phone({ address: null, onHostNetwork: false }), []);
+        expect(warning?.message).toContain(
+            'Join the Wi-Fi network this computer is on, then refresh devices.',
+        );
+        expect(warning?.message).not.toContain('(');
     });
 });

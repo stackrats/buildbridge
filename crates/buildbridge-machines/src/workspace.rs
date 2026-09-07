@@ -113,7 +113,7 @@ where
         archive_bytes,
         archive_bytes,
         started_at,
-        "Extracting the bounded snapshot into the BuildBridge guest workspace.",
+        "Extracting the bounded snapshot into the buildbridge guest workspace.",
         None,
     ));
     let extract = format!(

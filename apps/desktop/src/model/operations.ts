@@ -25,6 +25,7 @@ export type OperationId =
     | 'upload-archive'
     | 'upload-google-play'
     | 'android-run-device'
+    | 'clear-android-device-run'
     | 'release'
     | 'reveal'
     | 'clear-archive'
@@ -56,7 +57,7 @@ export const busyKeyStep: Record<string, string> = {
     activating_xcode: 'xcode-activate',
     provisioning_signing: 'provision',
     clearing_signing: 'provision',
-    synchronizing: 'sync',
+    synchronizing: 'project',
     test_building: 'test-build',
     adopting_lock: 'test-build',
     archiving: 'archive',
@@ -64,8 +65,9 @@ export const busyKeyStep: Record<string, string> = {
     uploading_google_play: 'publish',
     uploading_artifacts: 'publish',
     configuring_google_play: 'publish',
-    approving_android_workspace: 'approve',
-    clearing_android_workspace: 'approve',
+    exporting_google_play_credential: 'publish',
+    approving_android_workspace: 'project',
+    clearing_android_workspace: 'project',
     clearing_android_release: 'release',
     running_android_device: 'run-device',
     listing_android_devices: 'run-device',
@@ -101,10 +103,11 @@ export const busyKeyLabel: Record<string, string> = {
     uploading_google_play: 'Uploading to Google Play',
     uploading_artifacts: 'Uploading artifacts to the dashboard',
     configuring_google_play: 'Saving Google Play credentials',
+    exporting_google_play_credential: 'Exporting the Google Play credentials',
     approving_android_workspace: 'Approving the Android project',
     clearing_android_workspace: 'Removing the Android project approval',
     clearing_android_release: 'Clearing retained Android artifacts',
-    running_android_device: 'Installing and opening on Android',
+    running_android_device: 'Running on the Android device',
     listing_android_devices: 'Finding Android devices',
     clearing_archive: 'Clearing retained artifacts',
     releasing: 'Building the signed release',
@@ -147,7 +150,8 @@ export const operationLabel: Record<OperationId, string> = {
     archive: 'Building the signed archive',
     'upload-archive': 'Uploading with Transporter',
     'upload-google-play': 'Uploading to Google Play',
-    'android-run-device': 'Installing and opening on Android',
+    'android-run-device': 'Running on the Android device',
+    'clear-android-device-run': 'Clearing the last device run',
     release: 'Building the signed release',
     reveal: 'Revealing the artifacts',
     'clear-archive': 'Clearing retained artifacts',
@@ -190,7 +194,10 @@ export const operationStep: Partial<Record<OperationId, string>> = {
     discard: 'launch',
     'xcode-import': 'xcode-import',
     'xcode-activate': 'xcode-activate',
-    sync: 'sync',
+    approve: 'project',
+    'clear-workspace': 'project',
+    'attach-env': 'project',
+    sync: 'project',
     'test-build': 'test-build',
     'adopt-lock': 'test-build',
     provision: 'provision',
@@ -199,6 +206,7 @@ export const operationStep: Partial<Record<OperationId, string>> = {
     'upload-archive': 'publish',
     'upload-google-play': 'publish',
     'android-run-device': 'run-device',
+    'clear-android-device-run': 'run-device',
     release: 'release',
     'clear-release': 'release',
     'usb-rule': 'run-device',

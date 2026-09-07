@@ -682,7 +682,7 @@ int main(int argc, char **argv) {
     CFArrayAppendValue(trusted_applications, codesign);
     CFArrayAppendValue(trusted_applications, xcodebuild);
     status = SecAccessCreate(
-        CFSTR("BuildBridge signing identity"), trusted_applications, &access
+        CFSTR("buildbridge signing identity"), trusted_applications, &access
     );
     if (status != errSecSuccess) {
         result = security_failure("create_access", status);

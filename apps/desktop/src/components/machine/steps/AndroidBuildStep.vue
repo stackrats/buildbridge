@@ -2,35 +2,83 @@
 // The debug build: Gradle's assembleDebug in the container, after the toolchain, the locked
 // dependencies, the web assets and Capacitor's sync. The first run also downloads the toolchain.
 import { FolderOpen, Hammer, Package, ScrollText } from '@lucide/vue';
-import { computed } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 
 import { formatBytes, percent } from '../../../lib/format';
+import type { BuildRequest } from '../../../model/build-flow';
+import { describeEnvSetSize } from '../../../model/envs';
 import { androidBuildPhaseLabel } from '../../../model/phases';
+import { describeSnapshot } from '../../../model/snapshot';
 import type { JourneyStep } from '../../../model/steps';
 import { useBuildFlowStore } from '../../../stores/build-flow';
+import { useEnvSetsStore } from '../../../stores/envs';
 import { activityLabel, useMachinesStore, type MachineSession } from '../../../stores/machines';
 import { useUi } from '../../../stores/ui';
 import Button from '../../ui/Button.vue';
 import CopyButton from '../../ui/CopyButton.vue';
 import FailureBlock from '../../ui/FailureBlock.vue';
+import Field from '../../ui/Field.vue';
 import KeyValue from '../../ui/KeyValue.vue';
 import ProgressRow from '../../ui/ProgressRow.vue';
+import Select from '../../ui/Select.vue';
 import Spinner from '../../ui/Spinner.vue';
 import StepPanel from '../../ui/StepPanel.vue';
 import AndroidHttpOption from '../AndroidHttpOption.vue';
+import VersionFields from '../VersionFields.vue';
 
 const { session, step } = defineProps<{ session: MachineSession; step: JourneyStep }>();
 const machines = useMachinesStore();
 const flows = useBuildFlowStore();
 const ui = useUi();
 
-const workspace = computed(() => session.view!.android?.workspace ?? null);
+const view = computed(() => session.view!);
+const workspace = computed(() => view.value.android?.workspace ?? null);
 const lastBuild = computed(() => workspace.value?.lastBuild ?? null);
 const busy = computed(
     () => !!session.operation || !!session.view?.busyOperation || flows.active(session.id),
 );
 const running = computed(() => step.status === 'running');
 const lastLine = computed(() => session.buildLog.at(-1)?.text ?? null);
+
+// The choices live in the machine's build draft, shared with the other build steps. Latest
+// source copies the folder again before compiling; the saved snapshot compiles what was copied
+// last time. The environment travels with the copy, so it is chosen only then.
+const draft = flows.draft(session.id);
+const envs = useEnvSetsStore();
+onMounted(() => void envs.load());
+const source = computed<BuildRequest['source']>({
+    get: () => draft.source,
+    set: (value) => {
+        draft.source = value;
+    },
+});
+const snapshot = computed(() => workspace.value?.lastSnapshotSha256 ?? null);
+const snapshotSummary = computed(() => describeSnapshot(view.value));
+const envSetId = ref(view.value.envSet?.id ?? '');
+const envOptions = computed(() => [
+    { value: '', label: 'No environment', description: 'The project configuration alone' },
+    ...envs.sets.value.map((set) => ({
+        value: set.id,
+        label: set.name,
+        description: describeEnvSetSize(set),
+    })),
+]);
+function build(): void {
+    if (busy.value) return;
+    void flows.start(
+        session.id,
+        {
+            source: source.value,
+            outcome: 'test',
+            target: 'device_sdk',
+            envSetId: source.value === 'latest' ? envSetId.value || null : null,
+            androidOutputs: draft.androidOutputs,
+            androidAllowHttp: draft.androidAllowHttp,
+            version: draft.version ?? null,
+        },
+        source.value === 'latest' ? (envs.setById(envSetId.value)?.name ?? null) : null,
+    );
+}
 
 const strip = computed(() => {
     const operation = session.operation ?? session.view!.busyOperation;
@@ -66,7 +114,7 @@ const installCommand = computed(() =>
 const details = computed(() =>
     lastBuild.value
         ? [
-              { label: 'Application identifier', value: lastBuild.value.applicationId, mono: true },
+              { label: 'App identifier', value: lastBuild.value.applicationId, mono: true },
               {
                   label: 'Version',
                   value: `${lastBuild.value.versionName} (${lastBuild.value.versionCode})`,
@@ -92,20 +140,22 @@ const details = computed(() =>
         <template #action>
             <Button
                 size="sm"
-                :disabled="busy || step.status === 'pending'"
-                title="Installs the locked dependencies, builds the web assets, synchronizes Capacitor's Android project, and compiles the debug APK"
-                @click="machines.debugBuild(session.id, flows.draft(session.id).androidAllowHttp)"
+                :disabled="
+                    busy || step.status === 'pending' || (source === 'snapshot' && !snapshot)
+                "
+                :title="
+                    source === 'latest'
+                        ? 'Copies the latest local source into the container, installs the locked dependencies, builds the web assets, synchronizes the Capacitor Android project, and compiles the debug APK'
+                        : 'Installs the locked dependencies, builds the web assets, synchronizes the Capacitor Android project, and compiles the debug APK from the saved snapshot'
+                "
+                @click="build"
             >
                 <Spinner
-                    v-if="session.operation === 'test-build'"
+                    v-if="session.operation === 'test-build' || flows.active(session.id)"
                     tone="text-white dark:text-zinc-950"
                 />
                 <Hammer v-else class="h-3.5 w-3.5" />
-                {{
-                    workspace?.lastBuildSucceeded
-                        ? 'Run the debug build again'
-                        : 'Run the debug build'
-                }}
+                {{ source === 'latest' ? 'Build latest source' : 'Rebuild saved snapshot' }}
             </Button>
             <Button
                 v-if="apk"
@@ -170,11 +220,11 @@ const details = computed(() =>
                         {{ apk.path }}
                     </span>
                     <span
-                        class="shrink-0 font-mono text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
+                        class="w-[4.5rem] shrink-0 text-right font-mono text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
                     >
                         {{ formatBytes(apk.bytes) }}
                     </span>
-                    <CopyButton :text="apk.path" label="Copy path" />
+                    <CopyButton :text="apk.path" what="Copy the debug APK path" size="iconXs" />
                 </div>
                 <div
                     class="flex items-center gap-2 rounded-md bg-zinc-50 p-2.5 text-xs dark:bg-zinc-950"
@@ -183,7 +233,11 @@ const details = computed(() =>
                         class="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-600 dark:text-zinc-300"
                         >{{ installCommand }}</span
                     >
-                    <CopyButton :text="installCommand" label="Copy command" />
+                    <CopyButton
+                        :text="installCommand"
+                        what="Copy the install command"
+                        size="iconXs"
+                    />
                 </div>
                 <p class="text-[11px] leading-4 text-zinc-500 dark:text-zinc-400">
                     Installs it on a phone plugged into this host with USB debugging on, or on an
@@ -195,12 +249,51 @@ const details = computed(() =>
             </div>
         </template>
 
-        <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-            Builds a debug APK from the synchronized source without release credentials. Show it in
-            its folder to install it on a phone or emulator. Synchronize first to include project
-            changes; the first build also downloads the Android toolchain.
-        </p>
-        <AndroidHttpOption :session="session" :disabled="busy" />
+        <div class="space-y-3">
+            <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
+                Builds a debug APK without release credentials. Show it in its folder to install it
+                on a phone or emulator. The latest local source is copied into the container first;
+                the saved snapshot compiles what was copied last time. The first build also
+                downloads the Android toolchain.
+            </p>
+            <div class="grid gap-4 sm:grid-cols-2">
+                <Field
+                    label="Source"
+                    :hint="
+                        source === 'latest'
+                            ? 'Copies the current files from the approved folder, including local edits, and replaces the snapshot.'
+                            : `The saved snapshot is compiled as it is: ${snapshotSummary}. New local edits are not included.`
+                    "
+                >
+                    <Select
+                        v-model="source"
+                        :disabled="busy"
+                        :options="[
+                            { value: 'latest', label: 'Latest local source' },
+                            {
+                                value: 'snapshot',
+                                label: 'Saved snapshot',
+                                description: snapshotSummary ?? undefined,
+                                disabled: !snapshot,
+                            },
+                        ]"
+                    />
+                </Field>
+                <Field
+                    v-if="source === 'latest'"
+                    label="Environment"
+                    hint="Written into the container with the snapshot and applied to the web build. The next build starts from the same choice."
+                >
+                    <Select v-model="envSetId" :options="envOptions" :disabled="busy" />
+                </Field>
+                <p v-else class="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                    The saved snapshot keeps the environment it was copied with. Choose the latest
+                    local source to change it.
+                </p>
+            </div>
+            <VersionFields :session="session" :disabled="busy" />
+            <AndroidHttpOption :session="session" :disabled="busy" />
+        </div>
 
         <template #details>
             Compiles the debug build type with Gradle. The first run downloads pinned Node and pnpm,

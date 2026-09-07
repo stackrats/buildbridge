@@ -1,13 +1,14 @@
 <script setup lang="ts">
 // The signed release: Gradle's release bundle and APK, signed with the attached kit's upload
 // key inside the container, verified there, and brought to this host with agreed checksums.
-import { FolderOpen, Package, ScrollText } from '@lucide/vue';
+import { FolderOpen, Package, ScrollText, Variable, ArrowRight, KeyRound } from '@lucide/vue';
 import { computed, onMounted, ref, watch } from 'vue';
 
 import { formatBytes, percent } from '../../../lib/format';
-import { requestedVersion } from '../../../model/build-flow';
+import { requestedVersion, type BuildRequest } from '../../../model/build-flow';
 import type { JourneyStep } from '../../../model/steps';
 import { androidReleasePhaseLabel } from '../../../model/phases';
+import { describeSnapshot } from '../../../model/snapshot';
 import { androidOutputLabel, androidOutputOptions } from '../../../model/android-outputs';
 import { useBuildFlowStore } from '../../../stores/build-flow';
 import type { AndroidReleaseOutputs } from '../../../types/backend';
@@ -37,12 +38,22 @@ const workspace = computed(() => android.value?.workspace ?? null);
 const kit = computed(() => view.value.signingKit);
 const release = computed(() => android.value?.release ?? null);
 const releaseError = computed(() => android.value?.releaseError ?? null);
-const busy = computed(() => session.operation !== null);
+const flows = useBuildFlowStore();
+const busy = computed(() => session.operation !== null || flows.active(session.id));
 const releasing = computed(() => step.status === 'running');
 const progress = computed(() => session.androidRelease);
 const lastLine = computed(() => session.archiveLog.at(-1)?.text ?? null);
 const clearOpen = ref(false);
-const draft = useBuildFlowStore().draft(session.id);
+const snapshotSummary = computed(() => describeSnapshot(view.value));
+// The source, output and version choices live in the machine's build draft, shared with the
+// other build steps.
+const draft = flows.draft(session.id);
+const source = computed<BuildRequest['source']>({
+    get: () => draft.source,
+    set: (value) => {
+        draft.source = value;
+    },
+});
 const outputs = computed<AndroidReleaseOutputs>({
     get: () => draft.androidOutputs,
     set: (value) => {
@@ -69,18 +80,43 @@ const envOptions = computed(() => [
     ...envs.sets.value.map((set) => ({
         value: set.id,
         label: set.name,
-        description:
-            set.id === attachedEnvSet.value?.id
-                ? 'Rebuild web assets · machine default'
-                : 'Rebuild web assets with this environment',
+        description: 'Rebuild web assets with this environment',
     })),
 ]);
 const chosenEnvName = computed(() => envs.setById(envSetId.value)?.name ?? null);
 
+// The latest source goes through the guide, copy, debug build, then release, pausing for any
+// decision on the way; the saved snapshot is built and signed as it is.
+function build(): void {
+    if (busy.value) return;
+    if (source.value === 'latest') {
+        void flows.start(
+            session.id,
+            {
+                source: 'latest',
+                outcome: 'release',
+                target: 'device_sdk',
+                envSetId: envSetId.value || null,
+                androidOutputs: outputs.value,
+                androidAllowHttp: draft.androidAllowHttp,
+                version: draft.version ?? null,
+            },
+            chosenEnvName.value,
+        );
+        return;
+    }
+    void machines.signedRelease(
+        session.id,
+        envSetId.value || null,
+        outputs.value,
+        requestedVersion(view.value, draft),
+    );
+}
+
 const recipe = computed(() => [
-    { label: 'Build type', value: 'release' },
+    { label: 'Build type', value: 'Release', copyable: false },
     {
-        label: 'Application identifier',
+        label: 'App identifier',
         value: workspace.value?.applicationId ?? 'From the Gradle script',
         mono: workspace.value?.applicationId !== null,
     },
@@ -118,39 +154,32 @@ async function clear(): Promise<void> {
 <template>
     <StepPanel :step="step">
         <template #action>
-            <span
-                v-if="envs.sets.value.length"
-                class="w-56 max-w-full"
-                v-tip="
-                    'The environment the web assets are rebuilt with for this release; the one attached at the sync step is the default'
-                "
-            >
-                <Select
-                    v-model="envSetId"
-                    :options="envOptions"
-                    size="sm"
-                    placeholder="Use prepared assets"
-                    :disabled="busy"
-                />
-            </span>
             <Button
                 size="sm"
-                :disabled="busy || step.status === 'pending'"
-                @click="
-                    machines.signedRelease(
-                        session.id,
-                        envSetId || null,
-                        outputs,
-                        requestedVersion(view, draft),
-                    )
+                :disabled="
+                    busy ||
+                    step.status === 'pending' ||
+                    (source === 'snapshot' && !workspace?.lastSnapshotSha256)
                 "
+                :title="
+                    source === 'latest'
+                        ? 'Copies the latest local source, runs the debug build, then builds and signs the release'
+                        : 'Builds and signs the release from the saved snapshot as it is'
+                "
+                @click="build"
             >
                 <Spinner
-                    v-if="session.operation === 'release'"
+                    v-if="session.operation === 'release' || flows.active(session.id)"
                     tone="text-white dark:text-zinc-950"
                 />
                 <Package v-else class="h-3.5 w-3.5" />
-                Build signed {{ androidOutputLabel[outputs] }}
+                {{
+                    source === 'latest'
+                        ? 'Build and sign the latest source'
+                        : release
+                          ? 'Build the signed release again'
+                          : `Build the signed ${androidOutputLabel[outputs]}`
+                }}
             </Button>
             <Button
                 v-if="release"
@@ -185,10 +214,10 @@ async function clear(): Promise<void> {
 
         <template v-if="releasing || (releaseError && !releasing)" #status>
             <ProgressRow
+                v-if="releasing"
                 stoppable
                 :stopping="session.cancelling"
                 @stop="machines.cancelOperation(session.id)"
-                v-if="releasing"
                 :label="progress ? androidReleasePhaseLabel[progress.phase] : 'Preparing'"
                 :detail="progress?.detail"
                 :elapsed-seconds="progress?.elapsedSeconds ?? null"
@@ -234,40 +263,58 @@ async function clear(): Promise<void> {
                         {{ artifact.file.path }}
                     </span>
                     <span
-                        class="shrink-0 font-mono text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
+                        class="w-[4.5rem] shrink-0 text-right font-mono text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
                     >
                         {{ formatBytes(artifact.file.bytes) }}
                     </span>
-                    <CopyButton :text="artifact.file.path" label="Copy path" />
+                    <CopyButton
+                        :text="artifact.file.path"
+                        :what="`Copy the ${artifact.label} path`"
+                        size="iconXs"
+                    />
                 </li>
             </ul>
             <p class="mt-2 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
                 {{ release.versionName }} ({{ release.versionCode }}) ·
-                {{ release.applicationId }} · key {{ release.keyAlias }} · environment
-                {{ android?.releaseEnvSet ?? 'prepared assets (environment not recorded)' }}
+                {{ release.applicationId }} · key {{ release.keyAlias }} ·
+                <span class="inline-flex items-center gap-1" v-tip="'Environment'">
+                    <Variable class="h-3 w-3 shrink-0" aria-hidden="true" />
+                    <span class="sr-only">environment</span
+                    >{{ android?.releaseEnvSet ?? 'prepared assets (environment not recorded)' }}
+                </span>
             </p>
             <div class="mt-3 flex items-start gap-2">
                 <div class="min-w-0 flex-1 text-[11px] text-zinc-500 dark:text-zinc-400">
                     <span class="block font-medium">Signing certificate · SHA-256</span>
-                    <code class="mt-1 block break-all">{{ release.certificateSha256 }}</code>
+                    <code class="mt-1 block font-mono break-all">{{
+                        release.certificateSha256
+                    }}</code>
                 </div>
-                <CopyButton :text="release.certificateSha256" label="Copy fingerprint" />
+                <CopyButton
+                    :text="release.certificateSha256"
+                    what="Copy the signing certificate fingerprint"
+                    size="iconXs"
+                />
             </div>
             <details v-if="installCommand" class="mt-3 text-xs text-zinc-600 dark:text-zinc-300">
-                <DisclosureSummary class="font-medium">Install this APK with ADB</DisclosureSummary>
+                <DisclosureSummary>Install this APK with ADB</DisclosureSummary>
                 <div class="mt-2 space-y-2">
                     <div
                         class="flex items-center gap-2 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950"
                     >
-                        <code class="min-w-0 flex-1 text-[11px] break-all">{{
+                        <code class="min-w-0 flex-1 font-mono text-[11px] break-all">{{
                             installCommand
                         }}</code>
-                        <CopyButton :text="installCommand" label="Copy command" />
+                        <CopyButton
+                            :text="installCommand"
+                            what="Copy the install command"
+                            size="iconXs"
+                        />
                     </div>
                     <p class="text-[11px] leading-5 text-zinc-500 dark:text-zinc-400">
                         Run this in a terminal on this host with Android SDK Platform-Tools
-                        installed and a phone or emulator connected. Preview has the ADB setup
-                        instructions.
+                        installed and a phone or emulator connected. The Run on an Android device
+                        step has the ADB setup instructions.
                     </p>
                 </div>
             </details>
@@ -275,18 +322,74 @@ async function clear(): Promise<void> {
 
         <div class="space-y-3">
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                Saves the selected signed release files on this host. Nothing is uploaded.
-                Synchronize and run the debug build first to include project changes.
+                Saves the selected signed release files on this host. Nothing is uploaded. The
+                latest local source is copied and debug-built first; the saved snapshot is built and
+                signed as it is.
             </p>
-            <Field label="Release files" hint="AAB for Google Play; APK for direct installation.">
-                <Select v-model="outputs" :disabled="busy" :options="androidOutputOptions" />
-            </Field>
+            <div class="grid gap-4 sm:grid-cols-2">
+                <Field
+                    label="Source"
+                    :hint="
+                        source === 'latest'
+                            ? 'Copies the current files from the approved folder, runs the debug build, then builds and signs the release.'
+                            : `The saved snapshot is built and signed as it is: ${snapshotSummary}. New local edits are not included.`
+                    "
+                >
+                    <Select
+                        v-model="source"
+                        :disabled="busy"
+                        :options="[
+                            { value: 'latest', label: 'Latest local source' },
+                            {
+                                value: 'snapshot',
+                                label: 'Saved snapshot',
+                                description: snapshotSummary ?? undefined,
+                                disabled: !workspace?.lastSnapshotSha256,
+                            },
+                        ]"
+                    />
+                </Field>
+                <Field
+                    v-if="envs.sets.value.length"
+                    label="Environment"
+                    :hint="
+                        chosenEnvName
+                            ? 'The web assets are rebuilt with this environment before bundling.'
+                            : 'Keeps the web assets from the most recent build, including their environment values.'
+                    "
+                >
+                    <Select
+                        v-model="envSetId"
+                        :options="envOptions"
+                        placeholder="Use prepared assets"
+                        :disabled="busy"
+                    />
+                </Field>
+                <Field
+                    label="Release files"
+                    hint="AAB for Google Play; APK for direct installation."
+                >
+                    <Select v-model="outputs" :disabled="busy" :options="androidOutputOptions" />
+                </Field>
+            </div>
             <KeyValue :items="recipe" :columns="3" />
-            <VersionFields :session="session" :disabled="busy" />
+            <p class="flex flex-wrap items-center gap-1.5 text-xs">
+                <KeyRound
+                    class="h-3.5 w-3.5 shrink-0 text-zinc-500 dark:text-zinc-400"
+                    aria-hidden="true"
+                />
+                <span class="sr-only">Signing credentials</span>
+                <span v-tip="'Signing credentials'">{{
+                    kit?.name ?? 'Choose before signing'
+                }}</span>
+                <Button variant="ghost" size="sm" @click="ui.selectStep(session.id, 'signing-kit')"
+                    >{{ kit ? 'Review signing credentials' : 'Choose signing credentials'
+                    }}<ArrowRight class="h-3.5 w-3.5"
+                /></Button>
+            </p>
+            <VersionFields :session="session" :disabled="busy" store-check />
             <details class="text-xs text-zinc-600 dark:text-zinc-300">
-                <DisclosureSummary class="font-medium">
-                    Google Play and direct installation
-                </DisclosureSummary>
+                <DisclosureSummary> Google Play and direct installation </DisclosureSummary>
                 <div class="mt-2 space-y-2 leading-5">
                     <p>
                         Upload an AAB through Play Console, or distribute an APK directly. The
@@ -313,7 +416,7 @@ async function clear(): Promise<void> {
             <span class="font-mono">bundleRelease</span> when an AAB is selected. AAB-only builds
             also use an internal APK to check the application identifier, version and signing
             certificate. Only selected release files are retained on this host. The signing key is
-            streamed into the container for this run. BuildBridge signs with
+            streamed into the container for this run. buildbridge signs with
             <span class="font-mono">jarsigner</span> and <span class="font-mono">apksigner</span>,
             verifies signatures, and checks SHA-256 checksums after copying the artifacts. Use
             prepared assets keeps the environment values already compiled into the web app.

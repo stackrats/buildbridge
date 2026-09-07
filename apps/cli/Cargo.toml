@@ -1,7 +1,7 @@
 [package]
 name = "buildbridge-cli"
 version.workspace = true
-description = "BuildBridge from the terminal: the same engine as the desktop"
+description = "buildbridge from the terminal: the same engine as the desktop"
 edition.workspace = true
 license.workspace = true
 

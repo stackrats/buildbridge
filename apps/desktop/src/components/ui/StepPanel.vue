@@ -1,9 +1,8 @@
 <script setup lang="ts" generic="Id extends string">
 // Essential inputs and choices remain visible. Steps can opt into a separate details slot for
 // technical reference that does not need to compete with the current task.
-import { ChevronDown } from '@lucide/vue';
-
 import type { Step } from '../../model/steps';
+import DisclosureSummary from './DisclosureSummary.vue';
 
 const { detailsLabel = 'Technical details' } = defineProps<{
     step: Step<Id>;
@@ -33,15 +32,9 @@ const { detailsLabel = 'Technical details' } = defineProps<{
             v-if="$slots.details"
             class="group/details border-t border-zinc-200 pt-3.5 dark:border-zinc-800"
         >
-            <summary
-                class="flex cursor-pointer list-none items-center gap-2 rounded-sm text-xs font-medium text-zinc-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:text-zinc-300 dark:focus-visible:outline-zinc-300 [&::-webkit-details-marker]:hidden"
-            >
-                <ChevronDown
-                    class="h-3.5 w-3.5 -rotate-90 group-open/details:rotate-0"
-                    aria-hidden="true"
-                />
+            <DisclosureSummary>
                 {{ detailsLabel }}
-            </summary>
+            </DisclosureSummary>
             <div class="mt-3 space-y-3">
                 <slot name="details" />
             </div>

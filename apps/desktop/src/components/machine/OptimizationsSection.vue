@@ -6,6 +6,7 @@ import { ChevronDown, RefreshCw, Terminal, Zap } from '@lucide/vue';
 import { computed, onMounted, ref, watch } from 'vue';
 
 import { useMachinesStore, type MachineSession } from '../../stores/machines';
+import { useUi } from '../../stores/ui';
 import type { GuestOptimizationView, OptimizationTier } from '../../types/backend';
 import ConfirmDialog from '../dialogs/ConfirmDialog.vue';
 import Badge from '../ui/Badge.vue';
@@ -15,8 +16,13 @@ import Spinner from '../ui/Spinner.vue';
 
 const { session } = defineProps<{ session: MachineSession }>();
 const machines = useMachinesStore();
+const ui = useUi();
 
-const open = ref(false);
+// Folded by default; a person's fold or unfold is kept for the session.
+const open = computed({
+    get: () => ui.sectionOpen(session.id, 'optimizations') ?? false,
+    set: (value: boolean) => ui.setSectionOpen(session.id, 'optimizations', value),
+});
 const pending = ref<GuestOptimizationView | null>(null);
 const applyingId = ref<string | null>(null);
 
@@ -99,7 +105,8 @@ const stateBadge = (item: GuestOptimizationView) =>
 </script>
 
 <template>
-    <section class="mt-5">
+    <!-- On the phases' own rhythm: one gap below the last of them, headed the same way. -->
+    <section class="mt-1">
         <button
             type="button"
             class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-zinc-100/70 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-zinc-700 dark:hover:bg-zinc-800/40 dark:focus-visible:outline-zinc-300"
@@ -110,7 +117,9 @@ const stateBadge = (item: GuestOptimizationView) =>
             <span class="text-[13px] font-semibold text-zinc-700 dark:text-zinc-200">
                 Guest optimizations
             </span>
-            <span class="min-w-0 flex-1 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+            <span
+                class="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400"
+            >
                 <template v-if="view?.available"
                     >{{ appliedCount }} of {{ total }} applied</template
                 >
@@ -128,7 +137,7 @@ const stateBadge = (item: GuestOptimizationView) =>
                     macOS defaults from
                     <span class="font-mono">sickcodes/osx-optimizer</span>, each run as a fixed
                     script over the pinned bridge. Anything needing an administrator opens the
-                    guest's Terminal, where sudo reads the password; BuildBridge never sees it. Each
+                    guest's Terminal, where sudo reads the password; buildbridge never sees it. Each
                     item says what it costs, in the source's words.
                 </p>
                 <Button

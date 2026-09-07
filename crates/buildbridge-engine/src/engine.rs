@@ -1,4 +1,4 @@
-//! The engine: everything BuildBridge does, behind one value any client can hold. The desktop
+//! The engine: everything buildbridge does, behind one value any client can hold. The desktop
 //! forwards its events to a window; a command line prints them; a daemon would relay them.
 //! Nothing here knows which.
 

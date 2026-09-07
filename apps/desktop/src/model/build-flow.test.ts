@@ -116,7 +116,7 @@ describe('guided build', () => {
         const { ports, calls } = await fixture();
         expect(await executeBuildFlow(request, ports, 'different-source')).toMatchObject({
             status: 'paused',
-            blocker: { step: 'sync' },
+            blocker: { step: 'project' },
         });
         expect(calls).toEqual([]);
     });
@@ -159,7 +159,7 @@ describe('guided build', () => {
         view.appleWorkspace!.lastSnapshotSha256 = null;
         expect(await executeBuildFlow({ ...request, source: 'snapshot' }, ports)).toMatchObject({
             status: 'paused',
-            blocker: { step: 'sync' },
+            blocker: { step: 'project' },
         });
         expect(calls).toEqual([]);
     });

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-// A compact fact or filter. Interactive chips look clickable; informational ones do not.
+// A compact fact or filter. Interactive chips are buttons and look clickable; informational
+// ones are plain text, so a reader is not told about a button that does nothing.
 import { cn } from '../../lib/utils';
 
 const {
@@ -26,13 +27,13 @@ const variants = {
 </script>
 
 <template>
-    <button
-        type="button"
+    <component
+        :is="interactive ? 'button' : 'span'"
+        :type="interactive ? 'button' : undefined"
         :class="cn(base, !interactive ? variants.static : active ? variants.active : variants.idle)"
         v-tip="tip"
-        :disabled="!interactive"
     >
         <span v-if="dot" class="h-1.5 w-1.5 shrink-0 rounded-full" :class="dot" />
         <slot />
-    </button>
+    </component>
 </template>

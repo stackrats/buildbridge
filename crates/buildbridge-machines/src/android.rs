@@ -32,7 +32,7 @@ pub const ANDROID_IMAGE: &str =
 /// mixing an arm64 base image with x64 executables. Docker Desktop supplies the emulation.
 const ANDROID_PLATFORM: &str = "linux/amd64";
 const ANDROID_PLATFORM_ARG: &str = "--platform=linux/amd64";
-const ANDROID_EMULATION_HELP: &str = "BuildBridge's Android tools require Linux amd64 containers. On Apple Silicon, enable x86/amd64 emulation in Docker Desktop; the Apple Virtualization framework with Rosetta can accelerate it. Also allow Docker Desktop to share the machine's home directory.";
+const ANDROID_EMULATION_HELP: &str = "buildbridge's Android tools require Linux amd64 containers. On Apple Silicon, enable x86/amd64 emulation in Docker Desktop; the Apple Virtualization framework with Rosetta can accelerate it. Also allow Docker Desktop to share the machine's home directory.";
 /// The image's JDK, fixed by the digest above: the JVM Gradle itself runs on.
 const JAVA_HOME: &str = "/opt/java/openjdk";
 /// Temurin JDK 21 for x86_64 Linux, as published on 2026-09-06 (`jdk-21.0.12.1+1`), with the
@@ -124,7 +124,7 @@ pub struct AndroidBuildResult {
     /// The debug APK, retained on this host; `None` on records from before it was kept.
     #[serde(default)]
     pub apk: Option<AndroidArtifact>,
-    // Whether BuildBridge enabled HTTP APIs for this debug APK.
+    // Whether buildbridge enabled HTTP APIs for this debug APK.
     #[serde(default)]
     pub allow_http: bool,
     pub output_tail: Vec<String>,
@@ -487,13 +487,13 @@ fn validate_container_platform(platform: &str) -> Result<(), ProviderError> {
         return Ok(());
     }
     Err(ProviderError::AndroidToolchain(format!(
-        "This container uses {}; the Android tools need {ANDROID_PLATFORM}. Stop the machine, discard its container, and start it again to recreate it with the correct platform. BuildBridge will keep its project records and signing credentials.",
+        "This container uses {}; the Android tools need {ANDROID_PLATFORM}. Stop the machine, discard its container, and start it again to recreate it with the correct platform. buildbridge will keep its project records and signing credentials.",
         platform.trim(),
     )))
 }
 
 /// Inspect the container's actual image ID, not its possibly multi-platform repository digest.
-/// This also catches an arm64 container made by an earlier BuildBridge before any build runs.
+/// This also catches an arm64 container made by an earlier buildbridge before any build runs.
 fn verify_container_platform(container_name: &str) -> Result<(), ProviderError> {
     let image = run_android_docker(
         "Android container inspection",
@@ -1214,27 +1214,44 @@ pub fn run_android_debug_build<F>(
     container_name: &str,
     output_directory: &Path,
     allow_http: bool,
+    version: Option<&ProjectVersion>,
     mut on_progress: F,
 ) -> Result<AndroidBuildResult, ProviderError>
 where
     F: FnMut(AndroidBuildProgress),
 {
+    if let Some(version) = version {
+        validate_android_version(version).map_err(ProviderError::AndroidToolchain)?;
+    }
     validate_archive_output_directory(output_directory)?;
-    let apk_path = output_directory.join(DEBUG_APK_NAME);
+    // The retained APK is named once the build has said which version it is; the partial it
+    // arrives as is fixed, and the destination must start empty.
     let apk_part = output_directory.join(format!("{DEBUG_APK_NAME}.part"));
-    for path in [&apk_path, &apk_part] {
-        if path.exists() {
-            return Err(ProviderError::AndroidToolchain(format!(
-                "{} already exists in the artifact directory",
-                path.display()
-            )));
-        }
+    if directory_has_entries(output_directory).map_err(|error| {
+        ProviderError::AndroidToolchain(format!("the artifact directory is unavailable: {error}"))
+    })? {
+        return Err(ProviderError::AndroidToolchain(
+            "the artifact directory is not empty".to_string(),
+        ));
     }
     let started_at = Instant::now();
     let toolchain = android_toolchain(HOME_CONTAINER_DIR);
     // Reconnect only to an unfinished debug run on the unchanged workspace. Completed
     // jobs belong to earlier requests, and their APK may have been removed by a sync.
     prepare_android_jobs(container_name, &toolchain, true)?;
+    // The requested version goes into the synced script before the recipe runs, the way the
+    // release does it; the built APK is checked against it below.
+    if let Some(version) = version {
+        set_container_gradle_version(container_name, &toolchain.workspace, version)?;
+        on_progress(android_progress(
+            AndroidBuildPhase::PreparingTools,
+            0,
+            0,
+            started_at,
+            android_build_phase_detail(AndroidBuildPhase::PreparingTools),
+            Some(format!("Building as version {}.", version.display())),
+        ));
+    }
     let prepare_tools = android_tools_preparation(&toolchain);
     let environment = android_recipe_environment(&toolchain);
     let AndroidToolchain {
@@ -1407,6 +1424,18 @@ apk_sha256=$(/usr/bin/sha256sum "$apk" | /usr/bin/cut -d ' ' -f 1)
             "the container reported an app identity in an unexpected shape".to_string(),
         ));
     }
+    if let Some(version) = version
+        && (version_name != version.version || version_code != version.build)
+    {
+        return Err(ProviderError::AndroidToolchain(format!(
+            "the debug build reports version {version_name} ({version_code}), not the requested {}; a flavour or a script in the project overrides the version declared in defaultConfig",
+            version.display()
+        )));
+    }
+    let apk_path = output_directory.join(format!(
+        "app-debug-{}.apk",
+        version_file_tag(&version_name, &version_code)
+    ));
     let (apk_bytes, apk_sha256) = apk.ok_or_else(|| {
         ProviderError::AndroidToolchain("the container did not report the debug APK".to_string())
     })?;
@@ -1645,18 +1674,18 @@ where
         validate_android_version(version).map_err(ProviderError::AndroidToolchain)?;
     }
     validate_archive_output_directory(output_directory)?;
-    let aab_path = output_directory.join(AAB_NAME);
-    let apk_path = output_directory.join(APK_NAME);
+    // The retained files are named once the signed APK has said which version it is; the
+    // partials they arrive as are fixed, and the destination must start empty.
     let aab_part = output_directory.join(format!("{AAB_NAME}.part"));
     let apk_part = output_directory.join(format!("{APK_NAME}.part"));
-    for path in [&aab_path, &apk_path, &aab_part, &apk_part] {
-        if path.exists() {
-            return Err(ProviderError::AndroidToolchain(format!(
-                "{} already exists in the artifact directory",
-                path.display()
-            )));
-        }
+    if directory_has_entries(output_directory).map_err(|error| {
+        ProviderError::AndroidToolchain(format!("the artifact directory is unavailable: {error}"))
+    })? {
+        return Err(ProviderError::AndroidToolchain(
+            "the artifact directory is not empty".to_string(),
+        ));
     }
+    let mut retained_paths: Vec<PathBuf> = Vec::new();
 
     let started_at = Instant::now();
     let toolchain = android_toolchain(HOME_CONTAINER_DIR);
@@ -2006,6 +2035,10 @@ fi"#
                     .to_string(),
             ));
         }
+        let tag = version_file_tag(&version_name, &version_code);
+        let aab_path = output_directory.join(format!("app-release-{tag}.aab"));
+        let apk_path = output_directory.join(format!("app-release-{tag}.apk"));
+        retained_paths.extend([aab_path.clone(), apk_path.clone()]);
         if outputs.includes_aab() {
             on_progress(release_progress(
                 AndroidReleasePhase::Transferring,
@@ -2103,7 +2136,7 @@ fi"#
             Ok(result)
         }
         Err(error) => {
-            for path in [&aab_path, &apk_path, &aab_part, &apk_part] {
+            for path in retained_paths.iter().chain([&aab_part, &apk_part]) {
                 let _ = fs::remove_file(path);
             }
             Err(error)
@@ -2252,7 +2285,7 @@ pub fn create_android_keystore(
     })
 }
 
-/// Stops any BuildBridge job still running in the container after its host-side operation was
+/// Stops any buildbridge job still running in the container after its host-side operation was
 /// cancelled: the builds deliberately survive their exec so a desktop restart can reattach,
 /// and a Stop must reach past that.
 pub fn stop_android_jobs(container_name: &str) -> Result<(), ProviderError> {
@@ -2455,7 +2488,7 @@ mod tests {
             create_args("buildbridge-android-x", &profile(), Path::new("/tmp/home")),
             image_pull_args(),
             cleanup_args(Path::new(
-                "/Users/Builder/Library/Application Support/BuildBridge/home",
+                "/Users/Builder/Library/Application Support/buildbridge/home",
             )),
             keystore_creation_args("upload", "Example team"),
         ] {
@@ -2497,7 +2530,7 @@ mod tests {
 
     #[test]
     fn mac_home_paths_and_keystore_values_stay_single_arguments() {
-        let home = Path::new("/Users/Builder/Library/Application Support/BuildBridge/home");
+        let home = Path::new("/Users/Builder/Library/Application Support/buildbridge/home");
         let args = cleanup_args(home);
         assert!(args.contains(&format!(
             "--volume={}:/buildbridge-storage:rw",

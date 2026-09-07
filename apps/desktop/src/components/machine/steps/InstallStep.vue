@@ -26,15 +26,15 @@ const dockurInstructions = [
     },
     {
         title: 'Erase the target disk once',
-        body: 'Open Disk Utility, choose View → Show All Devices, and select the largest "Apple Inc. VirtIO Block Media" disk. Erase it as "Macintosh HD" with APFS and a GUID Partition Map. Leave the smaller installer disk alone.',
+        body: 'Open Disk Utility, choose View › Show All Devices, and select the largest "Apple Inc. VirtIO Block Media" disk. Erase it as "Macintosh HD" with APFS and a GUID Partition Map. Leave the smaller installer disk alone.',
     },
     {
         title: 'Install macOS and create the account',
-        body: 'Quit Disk Utility, choose "Reinstall macOS", and target Macintosh HD. The guest restarts several times; keep the screen open. Create a local user with a password you will type once more when Xcode is activated. Skip Apple Account sign-in: BuildBridge never needs it.',
+        body: 'Quit Disk Utility, choose "Reinstall macOS", and target Macintosh HD. The guest restarts several times; keep the screen open. Create a local user with a password you will type once more when Xcode is activated. Skip Apple Account sign-in: buildbridge never needs it.',
     },
     {
         title: 'Enable Remote Login',
-        body: 'In System Settings, open General → Sharing and turn on Remote Login for that user. BuildBridge detects the SSH service and moves to the next step automatically.',
+        body: 'In System Settings, open General › Sharing and turn on Remote Login for that user. buildbridge detects the SSH service and moves to the next step automatically.',
     },
 ];
 
@@ -45,15 +45,15 @@ const dockerOsxInstructions = [
     },
     {
         title: 'Erase the target disk once',
-        body: 'Open Disk Utility, choose View → Show All Devices, and select the largest "QEMU HARDDISK Media" (about 275 GB). Erase it as "Macintosh HD" with APFS and a GUID Partition Map. Leave the smaller installer disk alone.',
+        body: 'Open Disk Utility, choose View › Show All Devices, and select the largest "QEMU HARDDISK Media" (about 275 GB). Erase it as "Macintosh HD" with APFS and a GUID Partition Map. Leave the smaller installer disk alone.',
     },
     {
         title: 'Install macOS and create the account',
-        body: 'Quit Disk Utility, choose "Reinstall macOS", and target Macintosh HD. The guest restarts several times; keep the console open. Create a local user with a password you will type once more when Xcode is activated. Skip Apple Account sign-in: BuildBridge never needs it.',
+        body: 'Quit Disk Utility, choose "Reinstall macOS", and target Macintosh HD. The guest restarts several times; keep the console open. Create a local user with a password you will type once more when Xcode is activated. Skip Apple Account sign-in: buildbridge never needs it.',
     },
     {
         title: 'Enable Remote Login',
-        body: 'In System Settings, open General → Sharing and turn on Remote Login for that user. BuildBridge detects the SSH service and moves to the next step automatically.',
+        body: 'In System Settings, open General › Sharing and turn on Remote Login for that user. buildbridge detects the SSH service and moves to the next step automatically.',
     },
 ];
 
@@ -79,7 +79,7 @@ const instructions = computed(() => (dockur.value ? dockurInstructions : dockerO
 
         <div class="space-y-3">
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                This happens once per machine and is the only part BuildBridge cannot do for you.
+                This happens once per machine and is the only part buildbridge cannot do for you.
                 Apple shows the remaining installation time inside the installer; it usually takes
                 30 to 60 minutes.
             </p>

@@ -7,9 +7,9 @@ import { useRunnerStore } from '../../stores/runner';
 import type { SharingGrant, SharingInvitation, SharingOverview } from '../../types/backend';
 import Badge from '../ui/Badge.vue';
 import Button from '../ui/Button.vue';
+import Checkbox from '../ui/Checkbox.vue';
 import Callout from '../ui/Callout.vue';
 import Card from '../ui/Card.vue';
-import Checkbox from '../ui/Checkbox.vue';
 import CopyButton from '../ui/CopyButton.vue';
 import Field from '../ui/Field.vue';
 import Modal from '../ui/Modal.vue';
@@ -28,7 +28,6 @@ const duration = ref('24');
 const allowedEnvs = ref<string[]>([]);
 const invitation = ref<SharingInvitation | null>(null);
 const approving = ref<SharingGrant | null>(null);
-const trustBuilds = ref(false);
 let timer: ReturnType<typeof setTimeout> | null = null;
 let disposed = false;
 
@@ -89,9 +88,7 @@ onBeforeUnmount(() => {
 watch(machineId, () => {
     allowedEnvs.value = selected.value ? [selected.value.env_set ?? ''] : [];
 });
-watch(approving, () => {
-    trustBuilds.value = false;
-});
+watch(approving, () => {});
 
 function begin(): void {
     invitation.value = null;
@@ -127,7 +124,7 @@ async function create(): Promise<void> {
     });
 }
 async function approve(): Promise<void> {
-    if (!approving.value || !trustBuilds.value) return;
+    if (!approving.value) return;
     const id = approving.value.id;
     await perform(async () => {
         await useBackend().approveSharingGrant(id);
@@ -207,7 +204,7 @@ function grantLabel(grant: SharingGrant): string {
                 v-if="loading && !overview"
                 class="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400"
             >
-                <Spinner />Loading sharing permissions…
+                <Spinner />Loading sharing permissions
             </p>
             <Callout v-if="overview?.paused" tone="warn"
                 >Shared builds are paused. Active shared builds stop at the next permission check;
@@ -217,7 +214,7 @@ function grantLabel(grant: SharingGrant): string {
                 v-if="overview && !targetOptions.some((option) => !option.disabled)"
                 class="text-xs leading-5 text-zinc-500 dark:text-zinc-400"
             >
-                Sharing currently supports a Mac running BuildBridge directly. On that Mac, open
+                Sharing currently supports a Mac running buildbridge directly. On that Mac, open
                 This Mac and approve a Git project and signing credentials before creating an
                 invitation. You can also start your own Android and virtual Mac builds in your
                 browser.
@@ -382,7 +379,7 @@ function grantLabel(grant: SharingGrant): string {
         title="Approve build access"
         confirm-label="Approve access"
         :busy="busy"
-        :confirm-disabled="!trustBuilds"
+        acknowledgement="I trust this person to run this project's build scripts on my computer."
         :destructive="false"
         @update:open="!$event && (approving = null)"
         @confirm="approve"
@@ -397,10 +394,7 @@ function grantLabel(grant: SharingGrant): string {
                 Allowed environments:
                 {{ approving.env_sets.map((name) => name || 'No environment').join(', ') }}. This
                 does not share your signing files or give access to other projects.
-            </p>
-            <Checkbox v-model="trustBuilds" block
-                >I trust this person to run this project's build scripts on my computer.</Checkbox
-            ></template
+            </p></template
         >
         <Callout v-if="error" tone="danger">{{ error }}</Callout>
     </ConfirmDialog>

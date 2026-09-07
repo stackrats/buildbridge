@@ -66,20 +66,18 @@ async function save(): Promise<void> {
             </Callout>
         </form>
         <template #footer>
-            <div class="flex justify-end gap-2">
-                <Button variant="outline" size="sm" :disabled="saving" @click="open = false">
-                    Cancel
-                </Button>
-                <Button
-                    type="submit"
-                    :form="formId"
-                    size="sm"
-                    :disabled="saving || profile.name.trim() === ''"
-                >
-                    <Spinner v-if="saving" tone="text-white dark:text-zinc-950" />
-                    {{ saving ? 'Saving changes' : 'Save changes' }}
-                </Button>
-            </div>
+            <Button variant="outline" size="sm" :disabled="saving" @click="open = false">
+                Cancel
+            </Button>
+            <Button
+                type="submit"
+                :form="formId"
+                size="sm"
+                :disabled="saving || profile.name.trim() === ''"
+            >
+                <Spinner v-if="saving" tone="text-white dark:text-zinc-950" />
+                {{ saving ? 'Saving changes' : 'Save changes' }}
+            </Button>
         </template>
     </Modal>
 </template>

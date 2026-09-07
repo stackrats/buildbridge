@@ -4,7 +4,7 @@
 //! A template keeps three things beside the disk files the provider writes: the source
 //! machine's guest access key (owner-only, because it opens every clone until the clone's
 //! own key replaces it), the guest's pinned host key, and the guest username. With those a
-//! clone needs no console, no fingerprint comparison and no password: BuildBridge pins the
+//! clone needs no console, no fingerprint comparison and no password: buildbridge pins the
 //! identity it already knows, installs the clone's own key through the template's, retires
 //! the template's, and the journey resumes at the first project step.
 
@@ -290,7 +290,7 @@ pub async fn save_machine_template(
         );
     }
     let access = load_mac_guest_access(&paths)?.ok_or_else(|| {
-        "Authorize the BuildBridge key first; a template carries it so clones need no password."
+        "Authorize the buildbridge key first; a template carries it so clones need no password."
             .to_string()
     })?;
     if !paths.guest_identity().is_file() {

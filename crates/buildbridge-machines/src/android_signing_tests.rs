@@ -142,7 +142,7 @@ impl JdkFixture {
                 "-keyalg",
                 algorithm,
                 "-dname",
-                "CN=BuildBridge disposable test",
+                "CN=buildbridge disposable test",
                 "-validity",
                 "365",
                 "-storetype",

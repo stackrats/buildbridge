@@ -33,7 +33,7 @@ jobs:
                   GH_TOKEN: ${{ github.token }}
               run: |
                   gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-                      || gh release create "$GITHUB_REF_NAME" --draft --verify-tag --notes-from-tag --title "BuildBridge $GITHUB_REF_NAME"
+                      || gh release create "$GITHUB_REF_NAME" --draft --verify-tag --notes-from-tag --title "buildbridge $GITHUB_REF_NAME"
 
     bundles:
         name: ${{ matrix.name }}

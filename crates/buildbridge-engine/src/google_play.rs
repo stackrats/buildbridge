@@ -114,7 +114,7 @@ fn account_assertion(account: &ServiceAccount, now: u64) -> Result<String, Strin
             "iat": now, "exp": now + 3600}),
         &key,
     )
-    .map_err(|_| "BuildBridge could not sign with this service-account RSA key.".to_string())
+    .map_err(|_| "buildbridge could not sign with this service-account RSA key.".to_string())
 }
 
 fn require_android(app: &Engine, machine_id: &str) -> Result<(), String> {
@@ -422,6 +422,35 @@ pub async fn upload_google_play(
         .await
 }
 
+/// A version code Google Play already holds for the app, with the release it belongs to when
+/// a track names one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayVersionCode {
+    pub code: u64,
+    pub release_name: Option<String>,
+}
+
+/// Every version code Google Play has received for the app: its bundles, its APKs and the
+/// releases on its tracks, read through a throwaway edit that is deleted afterwards. A read
+/// takes no machine lock; nothing is committed.
+pub(crate) async fn fetch_version_codes(
+    app: &Engine,
+    machine_id: &str,
+    package_name: &str,
+) -> Result<Vec<PlayVersionCode>, String> {
+    if !valid_package_name(package_name) {
+        return Err("The project's application identifier is not a valid package name.".into());
+    }
+    let account = read_account(app, machine_id).await?.ok_or_else(|| {
+        "Import a Google Play service-account JSON key before asking Google Play about builds."
+            .to_string()
+    })?;
+    let client = PlayClient::new()?;
+    let scope = OperationScope::new();
+    let token = client.authenticate(&account, &scope).await?;
+    client.version_codes(&token, package_name, &scope).await
+}
+
 fn reviewed_aab_path(
     paths: &MachinePaths,
     release: &AndroidReleaseResult,
@@ -679,6 +708,111 @@ impl PlayClient {
             status: "draft".into(),
             sha256: aab.sha256.clone(),
         })
+    }
+
+    async fn version_codes(
+        &self,
+        token: &str,
+        package_name: &str,
+        scope: &OperationScope,
+    ) -> Result<Vec<PlayVersionCode>, String> {
+        let edits_url = format!(
+            "{}/androidpublisher/v3/applications/{}/edits",
+            self.origin, package_name
+        );
+        let edit = response_json(
+            request(
+                self.http
+                    .post(&edits_url)
+                    .bearer_auth(token)
+                    .json(&json!({})),
+                scope,
+            )
+            .await?,
+            scope,
+        )
+        .await?;
+        let edit_id = edit["id"]
+            .as_str()
+            .filter(|id| valid_remote_id(id))
+            .ok_or_else(|| "Google returned an invalid edit identifier.".to_string())?;
+        let edit_url = format!("{edits_url}/{edit_id}");
+        let listed = self.version_codes_in_edit(token, &edit_url, scope).await;
+        // A read needs no commit; the edit goes whichever way the read went.
+        let _ = self
+            .http
+            .delete(&edit_url)
+            .bearer_auth(token)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await;
+        listed
+    }
+
+    async fn version_codes_in_edit(
+        &self,
+        token: &str,
+        edit_url: &str,
+        scope: &OperationScope,
+    ) -> Result<Vec<PlayVersionCode>, String> {
+        let mut codes: Vec<PlayVersionCode> = Vec::new();
+        let mut note = |code: u64, name: Option<String>| match codes
+            .iter_mut()
+            .find(|known| known.code == code)
+        {
+            Some(known) => {
+                if known.release_name.is_none() {
+                    known.release_name = name;
+                }
+            }
+            None => codes.push(PlayVersionCode {
+                code,
+                release_name: name,
+            }),
+        };
+        for resource in ["bundles", "apks"] {
+            let value = response_json(
+                request(
+                    self.http
+                        .get(format!("{edit_url}/{resource}"))
+                        .bearer_auth(token),
+                    scope,
+                )
+                .await?,
+                scope,
+            )
+            .await?;
+            for item in value[resource].as_array().into_iter().flatten() {
+                if let Some(code) = item["versionCode"].as_u64() {
+                    note(code, None);
+                }
+            }
+        }
+        let tracks = response_json(
+            request(
+                self.http
+                    .get(format!("{edit_url}/tracks"))
+                    .bearer_auth(token),
+                scope,
+            )
+            .await?,
+            scope,
+        )
+        .await?;
+        for track in tracks["tracks"].as_array().into_iter().flatten() {
+            for release in track["releases"].as_array().into_iter().flatten() {
+                let name = release["name"].as_str().map(str::to_string);
+                for code in release["versionCodes"].as_array().into_iter().flatten() {
+                    let code = code
+                        .as_u64()
+                        .or_else(|| code.as_str().and_then(|code| code.parse().ok()));
+                    if let Some(code) = code {
+                        note(code, name.clone());
+                    }
+                }
+            }
+        }
+        Ok(codes)
     }
 
     async fn upload_chunks(

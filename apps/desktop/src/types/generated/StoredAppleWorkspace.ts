@@ -2,7 +2,12 @@
 import type { UnsignedBuildTarget } from "./UnsignedBuildTarget";
 import type { WorkspaceSource } from "./WorkspaceSource";
 
-export type StoredAppleWorkspace = { localPath: string, name: string, iosWorkspace: string, scheme: string, developmentTeam: string | null, bundleIdentifier: string | null, lastSnapshotSha256: string | null, lastSyncFileCount: number | null, lastSyncBytes: number | null, lastBuildSucceeded: boolean, lastXcodeVersion: string | null, lastNativeLockUpdated: boolean, 
+export type StoredAppleWorkspace = { localPath: string, name: string, iosWorkspace: string, scheme: string, developmentTeam: string | null, bundleIdentifier: string | null, lastSnapshotSha256: string | null, lastSyncFileCount: number | null, lastSyncBytes: number | null, 
+/**
+ * When the snapshot was copied, so a saved snapshot can be told from the folder as it is
+ * now; `None` on records from before it was kept.
+ */
+lastSyncedAtEpochSeconds: number | null, lastBuildSucceeded: boolean, lastXcodeVersion: string | null, lastNativeLockUpdated: boolean, 
 /**
  * Which SDK the last unsigned build compiled against; None on records from before the choice.
  */

@@ -21,7 +21,7 @@ import type { TunnelState } from './generated/TunnelState';
 export type MachineEvent<T> = T & { machineId: string };
 
 /**
- * An Xcode archive on its way from Apple into BuildBridge's folder, reported by the desktop
+ * An Xcode archive on its way from Apple into buildbridge's folder, reported by the desktop
  * shell rather than the engine: the download runs in a window of the app, so only the desktop
  * sees it. The total is unknown; the file's size so far is what there is.
  */

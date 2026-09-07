@@ -64,22 +64,20 @@ where
             "the provisioned signing keychain path is invalid".to_string(),
         ));
     }
-    let ipa_path = output_directory.join(format!("{scheme}-AppStore.ipa"));
-    let archive_path = output_directory.join(format!("{scheme}.xcarchive.zip"));
-    let ipa_partial_path = ipa_path.with_extension("ipa.part");
-    let archive_partial_path = archive_path.with_extension("zip.part");
-    for path in [
-        &ipa_path,
-        &archive_path,
-        &ipa_partial_path,
-        &archive_partial_path,
-    ] {
-        if path.exists() {
-            return Err(ProviderError::GuestBridge(
-                "the signed artifact destination is not empty".to_string(),
-            ));
-        }
+    // The retained files are named once the archived app has said which version it is; the
+    // partials they arrive as are fixed, and the destination must start empty.
+    let ipa_partial_path = output_directory.join(format!("{scheme}-AppStore.ipa.part"));
+    let archive_partial_path = output_directory.join(format!("{scheme}.xcarchive.zip.part"));
+    if directory_has_entries(&output_directory).map_err(|error| {
+        ProviderError::GuestBridge(format!(
+            "the signed artifact destination is unavailable: {error}"
+        ))
+    })? {
+        return Err(ProviderError::GuestBridge(
+            "the signed artifact destination is not empty".to_string(),
+        ));
     }
+    let mut retained_paths: Vec<PathBuf> = Vec::new();
 
     let started_at = Instant::now();
     let guest_home = format!("/Users/{username}");
@@ -332,6 +330,10 @@ where
             inspection.archive_bytes,
             &inspection.archive_sha256,
         )?;
+        let tag = version_file_tag(&inspection.marketing_version, &inspection.build_number);
+        let ipa_path = output_directory.join(format!("{scheme}-AppStore-{tag}.ipa"));
+        let archive_path = output_directory.join(format!("{scheme}-{tag}.xcarchive.zip"));
+        retained_paths.extend([ipa_path.clone(), archive_path.clone()]);
         fs::rename(&ipa_partial_path, &ipa_path).map_err(|error| {
             ProviderError::GuestBridge(format!("could not retain the signed IPA: {error}"))
         })?;
@@ -379,12 +381,10 @@ where
         &format!("/bin/rm -rf {}", shell_single_quote(&staging)),
     );
     if operation.is_err() {
-        for path in [
-            &ipa_path,
-            &archive_path,
-            &ipa_partial_path,
-            &archive_partial_path,
-        ] {
+        for path in retained_paths
+            .iter()
+            .chain([&ipa_partial_path, &archive_partial_path])
+        {
             let _ = fs::remove_file(path);
         }
     }
@@ -399,6 +399,12 @@ where
     ));
 
     Ok(result)
+}
+
+/// Whether a directory already holds anything: a retained artifact must never land beside
+/// or over another.
+pub(crate) fn directory_has_entries(path: &Path) -> std::io::Result<bool> {
+    Ok(fs::read_dir(path)?.next().is_some())
 }
 
 pub(crate) fn valid_apple_scheme(value: &str) -> bool {

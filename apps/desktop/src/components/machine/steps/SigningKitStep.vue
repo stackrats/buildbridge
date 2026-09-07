@@ -108,6 +108,7 @@ const details = computed(() =>
               {
                   label: 'Keystore password',
                   value: kit.value.androidKeystorePasswordStored ? 'Stored' : 'Not stored',
+                  copyable: false,
                   tone: kit.value.androidKeystorePasswordStored
                       ? ('default' as const)
                       : ('warn' as const),
@@ -117,6 +118,7 @@ const details = computed(() =>
                   value: kit.value.androidKeyPasswordStored
                       ? 'Stored'
                       : 'Same as the keystore password',
+                  copyable: false,
               },
           ]
         : kit.value
@@ -124,6 +126,7 @@ const details = computed(() =>
                 {
                     label: 'Guest keychain password',
                     value: kit.value.guestKeychainConfigured ? 'Stored' : 'Not stored',
+                    copyable: false,
                     tone: kit.value.guestKeychainConfigured
                         ? ('default' as const)
                         : ('warn' as const),
@@ -182,7 +185,7 @@ async function attach(): Promise<void> {
             <Button variant="outline" size="sm" @click="ui.navigate({ kind: 'signing' })">
                 <KeyRound class="h-3.5 w-3.5" />
                 {{ kit ? 'Review signing credentials' : 'Choose signing credentials' }}
-                <ArrowRight class="h-3 w-3" />
+                <ArrowRight class="h-3.5 w-3.5" />
             </Button>
         </template>
 
@@ -208,7 +211,7 @@ async function attach(): Promise<void> {
             <FailureBlock
                 v-else-if="view.signingHealth === 'kit_missing'"
                 title="The credentials this machine was provisioned from are no longer stored"
-                cause="Signing was provisioned here before, so the guest still holds a BuildBridge keychain, but the credentials that created it are gone from this host's keyring. That happens when the operating-system keyring is reset or recreated; nothing inside the machine was touched."
+                cause="Signing was provisioned here before, so the guest still holds a buildbridge keychain, but the credentials that created it are gone from this host's keyring. That happens when the operating-system keyring is reset or recreated; nothing inside the machine was touched."
             >
                 Store the credentials again, attach them here, then run
                 <b>Provision signing into macOS</b> once more. Provisioning recreates the guest
@@ -232,7 +235,7 @@ async function attach(): Promise<void> {
             </Callout>
             <Callout v-else tone="warn" title="No signing credentials stored yet">
                 Store a Team key (an App Store Connect API key), or the identity and profiles
-                exported from a Mac, then attach the credentials here. BuildBridge generates the
+                exported from a Mac, then attach the credentials here. buildbridge generates the
                 guest keychain password for you unless you choose your own.
                 <div class="mt-2">
                     <Button variant="outline" size="sm" @click="ui.navigate({ kind: 'signing' })">

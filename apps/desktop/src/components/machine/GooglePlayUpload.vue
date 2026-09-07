@@ -126,8 +126,8 @@ async function setupHelp(): Promise<void> {
 <template>
     <section class="space-y-3" aria-label="Google Play upload">
         <p class="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-            Upload this retained AAB as a draft on the internal testing track. Review and finish the
-            rollout in Play Console.
+            Connect the Google Play service account for this machine, then upload the retained AAB
+            as a draft on the internal testing track. Review and finish the rollout in Play Console.
         </p>
         <Callout v-if="error || session.googlePlayConnectionError" tone="danger">{{
             error || session.googlePlayConnectionError
@@ -146,13 +146,14 @@ async function setupHelp(): Promise<void> {
         />
         <div class="flex flex-wrap gap-2">
             <Button
+                size="sm"
                 :disabled="!!blocker || upload?.status === 'uploaded'"
                 @click="machines.uploadGooglePlay(session.id)"
                 ><Spinner v-if="uploading" /><Upload v-else class="h-3.5 w-3.5" />{{
                     uploading ? 'Uploading to Google Play' : 'Upload to Google Play'
                 }}</Button
             >
-            <Button variant="outline" :disabled="busy" @click="importKey"
+            <Button variant="outline" size="sm" :disabled="busy" @click="importKey"
                 ><Spinner v-if="picking || session.googlePlayConnectionLoading" /><FileKey
                     v-else
                     class="h-3.5 w-3.5"
@@ -165,6 +166,7 @@ async function setupHelp(): Promise<void> {
             <Button
                 v-if="session.googlePlayConnection?.configured"
                 variant="outline"
+                size="sm"
                 :disabled="busy"
                 @click="exportKey"
                 ><Spinner v-if="exporting" /><Download v-else class="h-3.5 w-3.5" />Export service
@@ -173,6 +175,7 @@ async function setupHelp(): Promise<void> {
             <Button
                 v-if="session.googlePlayConnection?.configured"
                 variant="ghost"
+                size="sm"
                 :disabled="busy"
                 @click="disconnectOpen = true"
                 >Disconnect</Button
@@ -180,6 +183,7 @@ async function setupHelp(): Promise<void> {
             <Button
                 v-else-if="session.googlePlayConnectionError"
                 variant="outline"
+                size="sm"
                 :disabled="busy"
                 @click="machines.loadGooglePlayConnection(session.id)"
                 >Recheck credentials</Button
@@ -212,9 +216,7 @@ async function setupHelp(): Promise<void> {
             >
         </div>
         <details>
-            <DisclosureSummary class="text-xs font-medium text-zinc-600 dark:text-zinc-300"
-                >Google Play connection setup</DisclosureSummary
-            >
+            <DisclosureSummary>Google Play connection setup</DisclosureSummary>
             <div class="mt-2 space-y-2 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                 <p>
                     Set up this app and its internal testing track in Play Console first. Enable the
@@ -223,7 +225,7 @@ async function setupHelp(): Promise<void> {
                     app and testing releases.
                 </p>
                 <p>
-                    Import its JSON key here. BuildBridge stores the key in your operating system's
+                    Import its JSON key here. buildbridge stores the key in your operating system's
                     credential vault for this machine.
                 </p>
                 <p v-if="session.googlePlayConnection?.configured">

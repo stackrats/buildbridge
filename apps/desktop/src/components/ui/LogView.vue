@@ -15,7 +15,7 @@ export interface LogLine {
 const {
     lines,
     height = 'h-64',
-    emptyText = 'Waiting for output…',
+    emptyText = 'Waiting for output',
     clearable = false,
 } = defineProps<{
     lines: LogLine[];
@@ -98,6 +98,7 @@ function toggleWrap(): void {
                     variant="ghost"
                     size="iconSm"
                     :title="wrap ? 'Scroll long lines' : 'Wrap long lines'"
+                    :aria-label="wrap ? 'Scroll long lines' : 'Wrap long lines'"
                     @click="toggleWrap"
                 >
                     <TextWrap
@@ -105,12 +106,18 @@ function toggleWrap(): void {
                         :class="wrap ? 'text-zinc-700 dark:text-zinc-300' : ''"
                     />
                 </Button>
-                <CopyButton v-if="lines.length" :text="text" size="iconSm" />
+                <CopyButton
+                    v-if="lines.length"
+                    :text="text"
+                    what="Copy the log lines"
+                    size="iconSm"
+                />
                 <Button
                     v-if="clearable && lines.length"
                     variant="ghost"
                     size="iconSm"
-                    title="Clear"
+                    title="Clears these lines from the drawer; the guest keeps its own log"
+                    aria-label="Clear the log"
                     @click="emit('clear')"
                 >
                     <Eraser class="h-3.5 w-3.5" />

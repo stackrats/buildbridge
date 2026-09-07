@@ -62,7 +62,7 @@ const providerOptions = computed(() =>
     })),
 );
 
-// The two macOS providers run macOS under QEMU with KVM in a container BuildBridge creates;
+// The two macOS providers run macOS under QEMU with KVM in a container buildbridge creates;
 // installs, builds, signing and templates are the same on either. The Android one is a
 // toolchain container with no virtual machine. What differs is below, so the choice is an
 // informed one rather than a label.
@@ -75,7 +75,7 @@ const differences: Record<MachineProvider, { label: string; detail: string }[]> 
         { label: 'Host', detail: 'Docker with KVM and an X11 display; nothing else.' },
         {
             label: 'Disk',
-            detail: 'A qcow2 BuildBridge keeps beside the machine on this host, with an identity it generates once.',
+            detail: 'A qcow2 buildbridge keeps beside the machine on this host, with an identity it generates once.',
         },
         {
             label: 'Track record',
@@ -178,7 +178,7 @@ const releaseWarning = computed(() => {
                     :class="
                         platform === option.value
                             ? 'border-zinc-900 bg-zinc-50 dark:border-zinc-100 dark:bg-zinc-800'
-                            : 'border-zinc-200 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800'
+                            : 'border-zinc-200 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800'
                     "
                     @click="choosePlatform(option.value)"
                 >
@@ -203,12 +203,7 @@ const releaseWarning = computed(() => {
             <span class="mt-1 block">Platform and provider are fixed for this machine.</span>
         </p>
         <Field label="Machine name" hint="Shown in the sidebar. Rename it at any time." required>
-            <Input
-                v-model="model.name"
-                placeholder="A name for this machine"
-                :maxlength="80"
-                required
-            />
+            <Input v-model="model.name" placeholder="A name for this machine" :maxlength="80" />
         </Field>
         <slot name="after-basics" />
         <Callout v-if="releaseWarning" tone="warn">{{ releaseWarning }}</Callout>
@@ -249,9 +244,7 @@ const releaseWarning = computed(() => {
                     />
                 </Field>
                 <details class="rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950">
-                    <DisclosureSummary
-                        class="cursor-pointer rounded-sm text-xs text-zinc-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:text-zinc-300 dark:focus-visible:outline-zinc-300"
-                    >
+                    <DisclosureSummary>
                         About {{ providerLabel[model.provider] }}
                     </DisclosureSummary>
                     <dl class="mt-3 space-y-1.5">

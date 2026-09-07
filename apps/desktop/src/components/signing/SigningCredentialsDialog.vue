@@ -76,7 +76,12 @@ async function exportFile(credential: SigningCredential): Promise<void> {
 </script>
 
 <template>
-    <Modal v-model:open="open" :title="`Review credentials · ${kit.name}`" wide>
+    <Modal
+        v-model:open="open"
+        :title="`Review credentials · ${kit.name}`"
+        wide
+        :busy="exportingId !== null"
+    >
         <div class="space-y-4">
             <p class="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                 Show or copy saved values and export credential files for your backup. Keep copies
@@ -89,7 +94,7 @@ async function exportFile(credential: SigningCredential): Promise<void> {
                 v-if="loading"
                 class="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400"
             >
-                <Spinner /> Loading saved credentials…
+                <Spinner /> Loading saved credentials
             </div>
             <Callout v-else-if="error" tone="danger">
                 {{ error }}
@@ -129,8 +134,8 @@ async function exportFile(credential: SigningCredential): Promise<void> {
                     <CopyButton
                         v-if="credential.kind === 'value' && credential.available"
                         :text="credential.value ?? ''"
-                        label="Copy"
                         :what="`Copy ${credential.label}`"
+                        size="iconSm"
                     />
                     <FileKey
                         v-else-if="credential.kind === 'file'"

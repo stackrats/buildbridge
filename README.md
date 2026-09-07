@@ -3,13 +3,15 @@
 <h1>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/buildbridge-logo-dark.svg">
-    <img src="docs/images/buildbridge-logo-light.svg" alt="BuildBridge" width="240" height="120">
+    <img src="docs/images/buildbridge-logo-light.svg" alt="buildbridge" width="240" height="120">
   </picture>
 </h1>
 
-### Build and sign iOS and Android apps locally, from Linux or a Mac.
+### Build, sign, and ship iOS and Android apps locally.
 
-BuildBridge creates persistent build machines on your Linux host with Docker: a macOS virtual machine under QEMU and KVM, run by Docker-OSX or by dockur/macos, for iOS; and an Android toolchain container, with no virtual machine in it, for Android. On a Mac it can instead use the installed Xcode and your own signing identity directly for iOS, and Docker Desktop for Android. Its desktop app handles setup, project sync, the builds, signing, export and publishing: a verified App Store Connect IPA, or a signed app bundle and APK. An optional self-hosted dashboard queues builds, shows their progress, logs and artifacts, and lets you lend a trusted Mac to someone else.
+A desktop app for local mobile builds on Linux and macOS. Go from local code to signed releases, with device testing, signing, and store uploads in one place.
+
+Your hardware. Your signing keys. No cloud build service required.
 
 [Features](#features) · [How it works](#how-it-works) · [Requirements](#requirements) · [Development](#development)
 
@@ -19,20 +21,19 @@ BuildBridge creates persistent build machines on your Linux host with Docker: a 
 
 ## Features
 
-- Install macOS and Xcode once, then reuse the machine across projects; an Android toolchain prepares itself on its first build; a Mac's own Xcode needs no setup at all.
-- Sync an approved Capacitor project folder and run unsigned test builds or debug builds; the debug APK is kept on the host, ready to install.
-- Run the debug build on a real iPhone through the machine, or on a real Android phone or emulator through ADB on the host, and inspect it from Safari or Chrome.
-- Store Apple certificates and profiles, and Android upload keys, in the operating system's credential vault; create either without a Mac or a keystore to hand; review, copy or export what is stored later.
-- Create signed archives and verified App Store Connect IPAs, and signed app bundles and APKs for Google Play, choosing AAB, APK or both.
-- Publish from the desktop: upload an IPA with Transporter from a managed macOS machine, save a Google Play internal-testing draft with a service account held in the vault, or follow the guided handoff for TestFlight, the App Store and direct APK distribution.
-- Manage several machines of either platform from the desktop app or the command line.
-- Pair with a self-hosted dashboard for queued builds, live status, logs and artifacts, and lend a trusted Mac to another person on the same server.
+- **Set up once.** Reuse macOS and Android build machines across projects, or use Xcode on your Mac.
+- **Build as you work.** Sync your project and run test builds before setting up release signing.
+- **Test on devices.** Run debug builds on iPhone or Android and inspect your app with Safari or Chrome.
+- **Keep your keys.** Create, import, and reuse Apple signing credentials and Android upload keys in your OS credential vault.
+- **Export signed releases.** Get verified App Store Connect IPAs, Android App Bundles, and APKs.
+- **Publish from the desktop.** Upload IPAs from a managed Mac or create Google Play internal-testing drafts, with guided release steps.
+- **Use the app or CLI.** Manage the same machines and builds from either.
 
 ## How it works
 
 ```text
-Dashboard ─────────── Reverb + HTTPS ─┐   Tauri desktop ─┐
-Approved projects ───────────────────┼─ BuildBridge engine ◄─ buildbridge CLI
+                                          Tauri desktop ─┐
+Approved projects ───────────────────┬─ buildbridge engine ◄─ buildbridge CLI
 Credential vault ────────────────────┘   trusted host
                                           ├─ macOS machine lifecycle ─┐
                                           ├─ pinned SSH bridge ────────┴─ macOS / Xcode ── archive / IPA
@@ -40,16 +41,18 @@ Credential vault ────────────────────┘
                                           └─ native Xcode ────────────── This Mac ── archive / IPA
 ```
 
-The engine is the trusted side, running inside the desktop app or the `buildbridge` command line on your host. It owns the machines, approved project folders, signing credentials, and pinned SSH connection to each guest. The dashboard only coordinates pairing, builds and sharing over the protocol in the contract crate; it cannot run arbitrary shell commands or access signing secrets.
+The engine is the trusted side, running inside the desktop app or the `buildbridge` command line on your host. It owns the machines, approved project folders, signing credentials, and pinned SSH connection to each guest. Everything happens on your own host; buildbridge needs no account and no server.
 
 The desktop guides each machine through two workflows, and the command line drives the same steps:
 
 1. **Setup:** Check the host and create the machine. For a managed macOS machine, install macOS, configure SSH, and download Xcode from Apple in a window of the app, signed in with your own Apple ID; an Android toolchain has nothing else to set up; **This Mac** reports the Xcode and signing identity it found.
-2. **Build:** Approve and sync a project, run the unsigned test build or the debug build, attach signing credentials, and export the signed archive and IPA or the signed app bundle and APK. **Preview** runs the debug build on a real device, and **Publish** hands the retained file to its store.
+2. **Build:** Set up the project, run the unsigned test build or the debug build, attach signing credentials, and export the signed archive and IPA or the signed app bundle and APK. **On a real device** runs the debug build on a phone, and **Publishing** hands the retained file to its store.
 
-BuildBridge never collects an Apple Account password or two-factor code. The local macOS login password is asked for once, to install the SSH key into a guest whose fingerprint is already pinned, and is discarded after that one session; the same step can be done by typing commands in the guest Terminal instead. For more detail, see [Product and Architecture](docs/PRODUCT_AND_ARCHITECTURE.md).
+buildbridge never collects an Apple Account password or two-factor code. The local macOS login password is asked for once, to install the SSH key into a guest whose fingerprint is already pinned, and is discarded after that one session; the same step can be done by typing commands in the guest Terminal instead. For more detail, see [Product and Architecture](docs/PRODUCT_AND_ARCHITECTURE.md).
 
 ## Requirements
+
+The automated workflow currently requires a Capacitor project with `capacitor.config.ts`, `pnpm-lock.yaml`, and a Vite+ web build. Other iOS and Android project types need additional build recipes.
 
 For the desktop on Linux:
 
@@ -63,7 +66,7 @@ For the desktop on a Mac: Xcode with the iOS platform, and an Apple Distribution
 
 Optional, to run a Debug build on a real iPhone from a managed macOS machine: the phone on USB, polkit (`pkexec`) to install one udev rule that releases iPhones from `usbmuxd`, and a `plugdev` group. Host-side iPhone sync is off while that rule is installed; the desktop can remove it again. This route is experimental.
 
-Docker-OSX is an experimental, self-hosted route. Apple's licensing ties macOS virtualization to Apple hardware; review it before using BuildBridge for production builds.
+Docker-OSX is an experimental, self-hosted route. Apple's licensing ties macOS virtualization to Apple hardware; review it before using buildbridge for production builds.
 
 ## Command line
 
@@ -101,10 +104,8 @@ This is a monorepo:
 ```text
 apps/desktop    Tauri and Vue desktop, a thin client of the engine
 apps/cli        The buildbridge command line, the other client
-crates/         Rust: protocol contract, runner transport, the machines (Docker-OSX, dockur/macos, the Android toolchain, and the native Mac), and the engine
+crates/         Rust: the engine, the machines (Docker-OSX, dockur/macos, the Android toolchain, and the native Mac), and the wire protocol contract
 ```
-
-The dashboard a runner pairs with is a separate service, not part of this repository; the two share only the wire protocol defined in `crates/buildbridge-contract`.
 
 Requirements are Rust, Docker, and the Node.js version managed by Vite+.
 

@@ -74,7 +74,7 @@ onBeforeUnmount(hide);
         ref="anchor"
         :class="
             tip
-                ? 'inline-flex max-w-full rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300'
+                ? 'relative inline-flex max-w-full rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:focus-visible:outline-zinc-300'
                 : 'contents'
         "
         :tabindex="disabled && tip ? 0 : undefined"

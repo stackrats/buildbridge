@@ -103,7 +103,8 @@ pub(crate) async fn build_machine_list_view(app: &Engine) -> Result<MachineListV
                         .is_some_and(|layout| {
                             layout.disk_on_host && layout.usb_access && layout.control_socket
                         }),
-                device_run_retained: paths.apple_device_run_record().is_file(),
+                device_run_retained: paths.apple_device_run_record().is_file()
+                    || paths.android_device_run_record().is_file(),
             });
         }
 
@@ -254,6 +255,8 @@ pub(crate) async fn build_machine_view(
             release,
             release_env_set,
             release_error: read_optional_text(&paths.android_release_error())?,
+            device_run: load_android_device_run(paths)?,
+            device_run_error: read_optional_text(&paths.android_device_run_error())?,
         })
     };
     let signing_health = signing_health_for(

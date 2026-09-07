@@ -72,7 +72,7 @@ async function forget(): Promise<void> {
 
         <div class="space-y-3">
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                BuildBridge only ever talks to a guest whose SSH host key you have pinned. This
+                buildbridge only ever talks to a guest whose SSH host key you have pinned. This
                 guest is a machine on this host, reached over its own loopback port, so pinning the
                 fingerprint it just scanned is the usual step; comparing it with the one macOS
                 reports first is the careful option, for a host you share. A key that changes later
@@ -86,7 +86,7 @@ async function forget(): Promise<void> {
                         :text="ssh.fingerprint"
                         what="Copy the scanned fingerprint"
                         size="iconXs"
-                        class="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                        class="opacity-45 group-hover:opacity-100 focus-visible:opacity-100"
                     />
                 </p>
                 <p class="mt-1 font-mono text-xs break-all text-zinc-900 dark:text-zinc-50">
@@ -97,6 +97,11 @@ async function forget(): Promise<void> {
                     class="mt-2 text-xs text-red-700 dark:text-red-400"
                 >
                     Pinned: <span class="font-mono break-all">{{ ssh.pinnedFingerprint }}</span>
+                    <CopyButton
+                        :text="ssh.pinnedFingerprint"
+                        what="Copy the pinned fingerprint"
+                        size="iconXs"
+                    />
                 </p>
             </div>
 
@@ -109,7 +114,11 @@ async function forget(): Promise<void> {
                         class="min-w-0 flex-1 font-mono text-[11px] break-all text-zinc-600 dark:text-zinc-300"
                         >{{ compareCommand }}</code
                     >
-                    <CopyButton :text="compareCommand" size="iconSm" />
+                    <CopyButton
+                        :text="compareCommand"
+                        what="Copy the compare command"
+                        size="iconSm"
+                    />
                 </div>
             </div>
         </div>
@@ -121,7 +130,7 @@ async function forget(): Promise<void> {
             @confirm="forget"
         >
             <p>
-                The stored host key for this machine is removed. BuildBridge will not authenticate
+                The stored host key for this machine is removed. buildbridge will not authenticate
                 to the guest again until you compare and trust a fingerprint.
             </p>
             <p>Only do this if you rebuilt the machine yourself and expect the key to differ.</p>

@@ -24,7 +24,7 @@ export interface BuildRequest {
 /**
  * The version a release asks for: the edit, else the project's own, so the artifact matches
  * what the panel shows even when the synced snapshot is older; null when the project declares
- * none BuildBridge can read, which leaves the build to the project as synced.
+ * none buildbridge can read, which leaves the build to the project as synced.
  */
 export function requestedVersion(
     view: MachineView,
@@ -94,7 +94,7 @@ export function buildPrerequisite(view: MachineView): BuildBlocker | null {
     }
     if (!projectWorkspace(view)) {
         return {
-            step: 'approve',
+            step: 'project',
             message: 'Choose and approve the local project you want to build.',
             action: 'Choose project',
         };
@@ -168,7 +168,7 @@ export async function executeBuildFlow(
         return {
             status: 'paused',
             blocker: {
-                step: 'sync',
+                step: 'project',
                 message:
                     'The prepared source changed while this build was paused. Start a new build to review the source and environment again.',
                 action: 'Review source',
@@ -179,7 +179,7 @@ export async function executeBuildFlow(
         return {
             status: 'paused',
             blocker: {
-                step: 'sync',
+                step: 'project',
                 message:
                     'There is no saved snapshot yet. Choose Latest local source for the first build.',
                 action: 'Review source',

@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Installs the BuildBridge public key into the guest user's `authorized_keys` over one
+/// Installs the buildbridge public key into the guest user's `authorized_keys` over one
 /// password-authenticated SSH session — the `ssh-copy-id` route. The session is pinned to the
 /// already-trusted host key, so the password only ever reaches the machine whose fingerprint
 /// was verified. The password is handed to `ssh` through the environment of that one process
@@ -32,7 +32,7 @@ pub fn authorize_guest_key(
     }
     if !valid_guest_public_key(public_key) {
         return Err(ProviderError::GuestBridge(
-            "the BuildBridge guest public key is invalid".to_string(),
+            "the buildbridge guest public key is invalid".to_string(),
         ));
     }
     if !valid_guest_password(password) {
@@ -193,7 +193,7 @@ where
         transferred_bytes: total_bytes,
         total_bytes,
         elapsed_seconds: started_at.elapsed().as_secs(),
-        detail: "Xcode is expanded and ready for BuildBridge activation.".to_string(),
+        detail: "Xcode is expanded and ready for buildbridge activation.".to_string(),
     });
 
     Ok(XcodeImportResult {
@@ -215,7 +215,7 @@ where
     let installed_path =
         ensure_imported_xcode(ssh_port, username, identity_path, known_hosts_path)?;
 
-    let detail = "A macOS Terminal window is opening. Enter the local macOS login password there; BuildBridge does not receive or store it.";
+    let detail = "A macOS Terminal window is opening. Enter the local macOS login password there; buildbridge does not receive or store it.";
     on_progress(XcodeImportProgress {
         phase: XcodeImportPhase::AwaitingAuthorization,
         transferred_bytes: 0,
@@ -238,7 +238,7 @@ where
     let terminal_script = format!(
         r#"#!/bin/zsh
 /usr/bin/clear
-/usr/bin/printf "BuildBridge Xcode activation\n\n"
+/usr/bin/printf "buildbridge Xcode activation\n\n"
 /usr/bin/printf "Enter the local macOS login password when sudo asks.\n"
 /usr/bin/printf "The password remains inside this macOS Terminal.\n"
 /usr/bin/printf "Continuing selects Xcode, accepts its license, and installs required components.\n\n"
@@ -253,7 +253,7 @@ else
     result=$?
     trap - EXIT
     /usr/bin/printf "failed:%s\n" "$result" > {status_path}
-    /usr/bin/printf "\nActivation did not complete. Return to BuildBridge and retry.\n"
+    /usr/bin/printf "\nActivation did not complete. Return to buildbridge and retry.\n"
 fi
 read -k 1 "?Press any key to close this window."
 "#

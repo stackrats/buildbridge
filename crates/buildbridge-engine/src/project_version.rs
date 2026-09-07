@@ -67,7 +67,7 @@ fn resolve_project_version(
         },
         _ => {
             return Err(format!(
-                "BuildBridge could not read one version and build number from {file}, so give both to set them."
+                "buildbridge could not read one version and build number from {file}, so give both to set them."
             ));
         }
     };

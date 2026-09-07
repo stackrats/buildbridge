@@ -229,7 +229,7 @@ async function save(): Promise<void> {
                         />
                         <Button
                             variant="ghost"
-                            size="iconSm"
+                            size="icon"
                             :title="`Remove ${row.key || 'this variable'}`"
                             :aria-label="`Remove ${row.key || 'this variable'}`"
                             @click="removeRow('variables', index)"
@@ -282,7 +282,7 @@ async function save(): Promise<void> {
                         />
                         <Button
                             variant="ghost"
-                            size="iconSm"
+                            size="icon"
                             :disabled="loadingSecrets && awaitingValue(row)"
                             :title="row.shown ? 'Hide value' : 'Show value'"
                             :aria-label="`${row.shown ? 'Hide' : 'Show'} ${row.key || 'secret'} value`"
@@ -300,12 +300,12 @@ async function save(): Promise<void> {
                         <CopyButton
                             :text="row.value"
                             :what="`Copy ${row.key || 'secret'} value`"
-                            size="iconSm"
+                            size="icon"
                             :disabled="row.value === ''"
                         />
                         <Button
                             variant="ghost"
-                            size="iconSm"
+                            size="icon"
                             :title="`Remove ${row.key || 'this secret'}`"
                             :aria-label="`Remove ${row.key || 'this secret'}`"
                             @click="removeRow('secrets', index)"
@@ -338,34 +338,23 @@ async function save(): Promise<void> {
                 Changes apply when a machine next synchronizes with this default, or a release
                 rebuilds web assets with this environment. Existing builds keep their values.
             </p>
+            <Callout v-if="envs.state.error" tone="danger">{{ envs.state.error }}</Callout>
         </form>
 
         <template #footer>
-            <div class="w-full space-y-3">
-                <Callout v-if="envs.state.error" tone="danger">{{ envs.state.error }}</Callout>
-                <div class="flex items-center justify-end gap-2">
-                    <Button
-                        variant="outline"
-                        size="sm"
-                        :disabled="envs.state.saving"
-                        @click="open = false"
-                    >
-                        Cancel
-                    </Button>
-                    <Button
-                        type="submit"
-                        :form="formId"
-                        size="sm"
-                        :disabled="
-                            envs.state.saving || form.name.trim() === '' || issues.length > 0
-                        "
-                    >
-                        <Spinner v-if="envs.state.saving" tone="text-white dark:text-zinc-950" />
-                        <Lock v-else class="h-3.5 w-3.5" />
-                        {{ editing ? 'Save changes' : 'Store in the OS vault' }}
-                    </Button>
-                </div>
-            </div>
+            <Button variant="outline" size="sm" :disabled="envs.state.saving" @click="open = false">
+                Cancel
+            </Button>
+            <Button
+                type="submit"
+                :form="formId"
+                size="sm"
+                :disabled="envs.state.saving || form.name.trim() === '' || issues.length > 0"
+            >
+                <Spinner v-if="envs.state.saving" tone="text-white dark:text-zinc-950" />
+                <Lock v-else class="h-3.5 w-3.5" />
+                {{ editing ? 'Save changes' : 'Store in the OS vault' }}
+            </Button>
         </template>
     </Modal>
 </template>

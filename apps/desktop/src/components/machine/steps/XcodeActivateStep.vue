@@ -119,7 +119,7 @@ const commands = computed(() => {
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
                 Activation selects the developer directory, accepts Apple's license, and runs
                 Xcode's first-launch tasks, all of which need an administrator. Type the local macOS
-                password here and BuildBridge runs them over the pinned SSH bridge with sudo, using
+                password here and buildbridge runs them over the pinned SSH bridge with sudo, using
                 the password for that one session and then discarding it. If you would rather not
                 type it here, the guest Terminal route opens a short-lived command file inside macOS
                 where you type the password yourself; it times out after 30 minutes.
@@ -148,15 +148,17 @@ const commands = computed(() => {
             </Callout>
 
             <details>
-                <DisclosureSummary class="text-xs font-medium text-zinc-600 dark:text-zinc-300">
-                    Manual recovery commands
-                </DisclosureSummary>
+                <DisclosureSummary> Manual recovery commands </DisclosureSummary>
                 <div class="mt-2 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950">
                     <div class="flex items-center justify-between gap-2">
                         <p class="text-xs text-zinc-500 dark:text-zinc-400">
                             Run these in the guest Terminal if both automatic routes fail
                         </p>
-                        <CopyButton :text="commands.join('\n')" label="Copy" />
+                        <CopyButton
+                            :text="commands.join('\n')"
+                            what="Copy the commands"
+                            size="iconSm"
+                        />
                     </div>
                     <pre
                         class="mt-1 overflow-x-auto font-mono text-[11px] leading-4 whitespace-pre text-zinc-600 dark:text-zinc-300"

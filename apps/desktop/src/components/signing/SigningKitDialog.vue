@@ -2,10 +2,10 @@
 // Create or update one signing kit.
 //
 // The simplest kit is a name and one of two routes to Apple's signing material: a Team key, from
-// which BuildBridge creates the certificates and profiles at Apple when a machine first needs
+// which buildbridge creates the certificates and profiles at Apple when a machine first needs
 // them, or the files exported from a Mac. Both can be stored; files are used where they exist and
 // the key creates the rest. The guest keychain password is invented when left blank, since nothing
-// but BuildBridge ever asks for it. The form says at the bottom exactly what the kit will be able
+// but buildbridge ever asks for it. The form says at the bottom exactly what the kit will be able
 // to do if saved now.
 import { CircleCheck, Eye, Lock, Plus } from '@lucide/vue';
 import { computed, reactive, ref, useId, watch } from 'vue';
@@ -112,7 +112,7 @@ function disclosureOpen(event: Event): boolean {
     return (event.currentTarget as HTMLDetailsElement).open;
 }
 
-// Every profile BuildBridge downloads is kept on this host. A vault that loses its paths — a
+// Every profile buildbridge downloads is kept on this host. A vault that loses its paths — a
 // cleared keyring, a new machine profile — does not lose those files, so they are offered back
 // here rather than making anyone find them or fetch them from Apple again.
 const managedProfiles = ref<ManagedAppleProfile[]>([]);
@@ -283,7 +283,7 @@ async function save(): Promise<void> {
             </Callout>
 
             <p v-if="showApple" class="px-3 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                A Team key is the simplest route. BuildBridge creates signing files as needed and
+                A Team key is the simplest route. buildbridge creates signing files as needed and
                 generates the guest keychain password for you. Existing files work too.
             </p>
 
@@ -304,7 +304,7 @@ async function save(): Promise<void> {
                             >
                         </span>
                         <span class="block text-[11px] text-zinc-500 dark:text-zinc-400">
-                            An App Store Connect API key. BuildBridge creates the distribution
+                            An App Store Connect API key. buildbridge creates the distribution
                             certificate and App Store profile when a machine first provisions, and
                             the development identity and device profile when a phone is prepared. No
                             Mac needed.
@@ -362,7 +362,8 @@ async function save(): Promise<void> {
                     </p>
                     <CopyButton
                         :text="APP_STORE_CONNECT_KEYS_URL"
-                        label="Copy App Store Connect link"
+                        what="Copy the App Store Connect link"
+                        size="iconSm"
                     />
                 </div>
             </details>
@@ -406,11 +407,7 @@ async function save(): Promise<void> {
 
                 <div class="mt-3 space-y-3">
                     <details>
-                        <DisclosureSummary
-                            class="text-[11px] text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
-                        >
-                            Where do these come from?
-                        </DisclosureSummary>
+                        <DisclosureSummary quiet> Where do these come from? </DisclosureSummary>
                         <ol
                             class="mt-2 space-y-1.5 text-xs leading-5 text-zinc-600 dark:text-zinc-300"
                         >
@@ -444,9 +441,14 @@ async function save(): Promise<void> {
                         <div class="mt-2 flex flex-wrap gap-2">
                             <CopyButton
                                 :text="APPLE_CERTIFICATES_URL"
-                                label="Copy certificates link"
+                                what="Copy the certificates link"
+                                size="iconSm"
                             />
-                            <CopyButton :text="APPLE_PROFILES_URL" label="Copy profiles link" />
+                            <CopyButton
+                                :text="APPLE_PROFILES_URL"
+                                what="Copy the profiles link"
+                                size="iconSm"
+                            />
                         </div>
                     </details>
 
@@ -502,7 +504,7 @@ async function save(): Promise<void> {
                         class="rounded-md bg-zinc-50 p-2 dark:bg-zinc-800/50"
                     >
                         <p class="text-[11px] text-zinc-600 dark:text-zinc-300">
-                            Already on this host. BuildBridge keeps a copy of every profile it
+                            Already on this host. buildbridge keeps a copy of every profile it
                             downloads, so one can be added back without going to Apple.
                         </p>
                         <div class="mt-1.5 flex flex-wrap gap-1.5">
@@ -569,16 +571,12 @@ async function save(): Promise<void> {
                 v-if="showApple"
                 class="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800"
             >
-                <DisclosureSummary
-                    class="cursor-pointer text-xs font-medium text-zinc-700 dark:text-zinc-200"
-                >
-                    Advanced: guest keychain password
-                </DisclosureSummary>
+                <DisclosureSummary> Advanced: guest keychain password </DisclosureSummary>
                 <Field
                     class="mt-3"
                     label="Guest keychain password"
                     :stored="kit?.guestKeychainConfigured"
-                    hint="Optional. Leave blank to keep the stored password or generate one for new credentials. This protects BuildBridge's signing keychain in macOS; it is not your Apple password."
+                    hint="Optional. Leave blank to keep the stored password or generate one for new credentials. This protects buildbridge's signing keychain in macOS; it is not your Apple password."
                 >
                     <Input
                         v-model="form.guestKeychainPassword"
@@ -713,35 +711,28 @@ async function save(): Promise<void> {
                     <b>Create Android upload key</b> on their card.
                 </p>
             </Callout>
+            <Callout v-if="signing.state.error" tone="danger">{{ signing.state.error }}</Callout>
         </form>
 
         <template #footer>
-            <div class="w-full space-y-3">
-                <Callout v-if="signing.state.error" tone="danger">{{
-                    signing.state.error
-                }}</Callout>
-
-                <div class="flex items-center justify-end gap-2">
-                    <Button
-                        variant="outline"
-                        size="sm"
-                        :disabled="signing.state.saving"
-                        @click="open = false"
-                    >
-                        Cancel
-                    </Button>
-                    <Button
-                        type="submit"
-                        :form="formId"
-                        size="sm"
-                        :disabled="signing.state.saving || form.name.trim() === ''"
-                    >
-                        <Spinner v-if="signing.state.saving" tone="text-white dark:text-zinc-950" />
-                        <Lock v-else class="h-3.5 w-3.5" />
-                        {{ editing ? 'Save changes' : 'Store in the OS vault' }}
-                    </Button>
-                </div>
-            </div>
+            <Button
+                variant="outline"
+                size="sm"
+                :disabled="signing.state.saving"
+                @click="open = false"
+            >
+                Cancel
+            </Button>
+            <Button
+                type="submit"
+                :form="formId"
+                size="sm"
+                :disabled="signing.state.saving || form.name.trim() === ''"
+            >
+                <Spinner v-if="signing.state.saving" tone="text-white dark:text-zinc-950" />
+                <Lock v-else class="h-3.5 w-3.5" />
+                {{ editing ? 'Save changes' : 'Store in the OS vault' }}
+            </Button>
         </template>
     </Modal>
     <SigningCredentialsDialog v-if="open && kit && reviewing" v-model:open="reviewing" :kit="kit" />

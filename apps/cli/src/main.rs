@@ -1,4 +1,4 @@
-//! `buildbridge` — BuildBridge from the terminal. The same engine the desktop drives, in this
+//! `buildbridge` — buildbridge from the terminal. The same engine the desktop drives, in this
 //! process, on the same directories, so both see the same machines; the engine's per-machine
 //! lock keeps the two from running one machine at once. Progress goes to stderr as it happens,
 //! results to stdout, and `--json` makes both machine-readable.
@@ -39,7 +39,7 @@ enum Command {
     /// Templates: prepared machines saved once and cloned in seconds.
     #[command(subcommand)]
     Template(TemplateCommand),
-    /// The guest's access: pin its identity and install the BuildBridge key.
+    /// The guest's access: pin its identity and install the buildbridge key.
     #[command(subcommand)]
     Guest(GuestCommand),
     /// Xcode inside the machine: import the archive and activate it.
@@ -60,9 +60,41 @@ enum Command {
     /// Environments stored on this host.
     #[command(subcommand)]
     Env(EnvCommand),
-    /// The control plane this host is paired with.
-    #[command(subcommand)]
+    /// The control plane this host is paired with. Hidden while remote builds are off, which
+    /// is where a host starts: every command here refuses until `settings set
+    /// --remote-builds on`.
+    #[command(subcommand, hide = true)]
     Runner(RunnerCommand),
+    /// What each running machine costs right now: cores and memory, as Docker measures them.
+    Usage,
+    /// This host's preferences, shared with the desktop.
+    #[command(subcommand)]
+    Settings(SettingsCommand),
+}
+
+#[derive(Subcommand)]
+enum SettingsCommand {
+    Show,
+    Set {
+        /// The browser that opens pages outside buildbridge: a command name, a path, or on
+        /// macOS an application bundle such as Firefox.app. Empty returns to the desktop's
+        /// default browser.
+        #[arg(long, value_name = "COMMAND")]
+        browser: Option<String>,
+        /// Whether this host offers remote builds: pairing with a buildbridge server, claiming
+        /// queued work, and sharing a Mac. Off until the server it would pair with exists.
+        #[arg(long, value_name = "ON|OFF", value_parser = parse_on_off)]
+        remote_builds: Option<bool>,
+    },
+}
+
+/// `on` and `off` as a person types them, with true/false accepted for scripts.
+fn parse_on_off(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "yes" | "1" => Ok(true),
+        "off" | "false" | "no" | "0" => Ok(false),
+        other => Err(format!("Expected on or off, not {other}.")),
+    }
 }
 
 #[derive(Subcommand)]
@@ -151,7 +183,7 @@ enum GuestCommand {
         machine: String,
         fingerprint: String,
     },
-    /// Install the BuildBridge key; the macOS password is read from stdin.
+    /// Install the buildbridge key; the macOS password is read from stdin.
     Authorize {
         machine: String,
         username: String,
@@ -204,6 +236,12 @@ enum BuildCommand {
         /// Allow HTTP API requests in this Android debug APK only.
         #[arg(long)]
         allow_http: bool,
+        /// Set the version (marketing version or version name), in the project and this build.
+        #[arg(long)]
+        version: Option<String>,
+        /// Set the build number (or version code), in the project and this build.
+        #[arg(long)]
+        build: Option<String>,
     },
     /// The signed archive and IPA, on a macOS machine.
     Archive {
@@ -231,6 +269,13 @@ enum BuildCommand {
         #[arg(long)]
         build: Option<String>,
     },
+    /// Ask the store which build numbers it already holds for this app.
+    Check {
+        machine: String,
+        /// The version to ask about; the project's own by default.
+        #[arg(long)]
+        version: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -244,7 +289,7 @@ enum SigningCommand {
         machine: String,
     },
     /// Create an Android upload key for stored signing credentials; the keystore password is read from stdin and is
-    /// yours to keep, because neither Google Play nor BuildBridge can recover it.
+    /// yours to keep, because neither Google Play nor buildbridge can recover it.
     Keystore {
         kit: String,
         /// The alias of the key inside the keystore.
@@ -260,7 +305,7 @@ enum SigningCommand {
 
 #[derive(Subcommand)]
 enum DeviceCommand {
-    /// Phones the guest sees, after asking it.
+    /// Phones the guest sees, after asking it; on an Android machine, what host ADB sees.
     List {
         machine: String,
     },
@@ -286,12 +331,22 @@ enum DeviceCommand {
         #[command(flatten)]
         confirm: Confirm,
     },
-    /// Build, install and launch the Debug build; its console streams until Ctrl-C.
+    /// Build, install and launch the Debug build; its console streams until Ctrl-C. On an
+    /// Android machine, install and launch the retained debug APK on the ADB device with this
+    /// serial; its log streams until Ctrl-C.
     Run {
         machine: String,
+        /// The phone: its UDID on a macOS machine, its ADB serial on an Android one.
         udid: String,
+        /// macOS machines only; an Android debug APK carries the environment it was built with.
         #[arg(long)]
         env: Option<String>,
+        /// macOS machines only: set the marketing version in the project and this build.
+        #[arg(long)]
+        version: Option<String>,
+        /// macOS machines only: set the build number in the project and this build.
+        #[arg(long)]
+        build: Option<String>,
     },
 }
 
@@ -414,10 +469,15 @@ fn version_input(
     version: Option<String>,
     build: Option<String>,
 ) -> Result<Option<buildbridge_engine::ProjectVersionInput>, String> {
+    input(version_json(version, build))
+}
+
+/// The same request as JSON, for inputs that carry it as one field.
+fn version_json(version: Option<String>, build: Option<String>) -> Value {
     if version.is_none() && build.is_none() {
-        return Ok(None);
+        return Value::Null;
     }
-    input(json!({ "version": version, "build": build })).map(Some)
+    json!({ "version": version, "build": build })
 }
 
 /// `3.2.0 (15)` from a view's project version, or nothing when the project declares none.
@@ -529,6 +589,20 @@ fn text(value: &Value) -> String {
         Value::String(text) => text.clone(),
         Value::Bool(flag) => if *flag { "yes" } else { "no" }.to_string(),
         other => other.to_string(),
+    }
+}
+
+/// A phone's network beside this computer's, as the listing read it; blank when it was not
+/// asked (an emulator, or a device that is not ready).
+fn device_network_text(network: &Value) -> String {
+    if network.is_null() {
+        return "—".to_string();
+    }
+    let address = network["address"].as_str().unwrap_or("no Wi-Fi");
+    if network["onHostNetwork"] == true {
+        format!("{address} · this computer's")
+    } else {
+        format!("{address} · not this computer's")
     }
 }
 
@@ -767,6 +841,77 @@ fn print_machine(view: &Value) {
     }
 }
 
+fn print_settings(settings: &Value) {
+    println!(
+        "browser: {}",
+        settings["browser"]
+            .as_str()
+            .unwrap_or("the desktop's default")
+    );
+    let remote_builds = settings["remoteBuilds"].as_bool().unwrap_or(false);
+    println!(
+        "remote builds: {}",
+        if remote_builds { "on" } else { "off" }
+    );
+    if remote_builds {
+        println!("  buildbridge runner status · buildbridge runner check");
+    }
+}
+
+/// Bytes as a person reads memory: binary units, whole numbers above ten.
+fn memory_text(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        let value = bytes / GIB;
+        if value >= 10.0 {
+            format!("{value:.0} GiB")
+        } else {
+            format!("{value:.1} GiB")
+        }
+    } else {
+        format!("{:.0} MiB", bytes / MIB)
+    }
+}
+
+fn print_usage(sample: &Value) {
+    let host_cores = sample["hostCores"].as_u64().unwrap_or(0);
+    let host_memory = sample["hostMemoryBytes"].as_u64().unwrap_or(0);
+    let rows = sample["machines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|machine| {
+            vec![
+                text(&machine["machineId"]),
+                format!("{:.2}", machine["cpuCores"].as_f64().unwrap_or(0.0)),
+                memory_text(machine["memoryBytes"].as_u64().unwrap_or(0)),
+                if machine["memoryLimited"] == true {
+                    memory_text(machine["memoryLimitBytes"].as_u64().unwrap_or(0))
+                } else {
+                    "—".to_string()
+                },
+            ]
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        println!("No machine is running.");
+    } else {
+        table(&["machine", "cores", "memory", "limit"], rows);
+    }
+    let mut host = Vec::new();
+    if host_cores > 0 {
+        host.push(format!("{host_cores} cores"));
+    }
+    if host_memory > 0 {
+        host.push(memory_text(host_memory));
+    }
+    if !host.is_empty() {
+        println!("host: {}", host.join(" · "));
+    }
+}
+
 fn print_done(view: &Value) {
     println!(
         "{} is {}",
@@ -861,16 +1006,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                 println!("{url}");
             }
             if open {
-                let status = std::process::Command::new("xdg-open")
-                    .arg(&url)
-                    .status()
-                    .map_err(|error| format!("could not run xdg-open: {error}"))?;
-                if !status.success() {
-                    return Err(
-                        "xdg-open could not open the screen; open the address above in a browser."
-                            .to_string(),
-                    );
-                }
+                e::open_url(engine, url).await?;
             }
             Ok(())
         }
@@ -1152,6 +1288,8 @@ async fn run(cli: Cli) -> Result<(), String> {
             machine,
             target,
             allow_http,
+            version,
+            build,
         }) => {
             if machine_is_android(engine, &machine).await? {
                 report(
@@ -1159,7 +1297,12 @@ async fn run(cli: Cli) -> Result<(), String> {
                     &on_machine(
                         engine,
                         &machine,
-                        e::run_android_debug_build(engine, machine.clone(), allow_http),
+                        e::run_android_debug_build(
+                            engine,
+                            machine.clone(),
+                            allow_http,
+                            version_input(version, build)?,
+                        ),
                     )
                     .await?,
                     |result| {
@@ -1188,7 +1331,10 @@ async fn run(cli: Cli) -> Result<(), String> {
                         e::run_apple_smoke_build(
                             engine,
                             machine.clone(),
-                            input(json!({ "target": target }))?,
+                            input(json!({
+                                "target": target,
+                                "version": version_json(version, build),
+                            }))?,
                         ),
                     )
                     .await?,
@@ -1271,6 +1417,34 @@ async fn run(cli: Cli) -> Result<(), String> {
                 );
                 println!("IPA: {}", text(&archive["ipa"]["path"]));
                 println!("Archive: {}", text(&archive["archive"]["path"]));
+            },
+        ),
+        Command::Build(BuildCommand::Check { machine, version }) => report(
+            json,
+            &e::check_store_builds(
+                engine,
+                machine.clone(),
+                Some(input(json!({ "version": version }))?),
+            )
+            .await?,
+            |check| {
+                let store = match check["store"].as_str() {
+                    Some("google_play") => "Google Play",
+                    _ => "App Store Connect",
+                };
+                if check["mustExceed"].is_object() {
+                    println!(
+                        "{store} holds {} ({}); the next upload needs a higher build number, {} or more.",
+                        text(&check["mustExceed"]["version"]),
+                        text(&check["mustExceed"]["build"]),
+                        text(&check["nextBuild"])
+                    );
+                } else {
+                    println!(
+                        "{store} holds nothing that binds version {}; any build number is accepted.",
+                        text(&check["version"])
+                    );
+                }
             },
         ),
         Command::Signing(SigningCommand::Kits) => {
@@ -1356,38 +1530,90 @@ async fn run(cli: Cli) -> Result<(), String> {
                 )
             },
         ),
-        Command::Device(DeviceCommand::List { machine }) => report(
-            json,
-            &on_machine(
-                engine,
-                &machine,
-                e::list_guest_devices(engine, machine.clone()),
-            )
-            .await?,
-            |view| {
-                let rows = view["guest"]["devices"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|device| {
-                        vec![
-                            text(&device["name"]),
-                            text(&device["udid"]),
-                            text(&device["osVersion"]),
-                            text(&device["pairingState"]),
-                            text(&device["developerMode"]),
-                        ]
-                    })
-                    .collect::<Vec<_>>();
-                if rows.is_empty() {
-                    println!(
-                        "The guest sees no phone. `buildbridge device attach` hands one over."
-                    );
-                } else {
-                    table(&["name", "udid", "iOS", "pairing", "developer mode"], rows);
-                }
-            },
-        ),
+        Command::Device(DeviceCommand::List { machine }) => {
+            if machine_is_android(engine, &machine).await? {
+                report(
+                    json,
+                    &e::list_android_devices(engine, machine).await?,
+                    |devices| {
+                        let listed = devices["devices"].as_array().into_iter().flatten();
+                        let rows = listed
+                            .clone()
+                            .map(|device| {
+                                vec![
+                                    text(&device["serial"]),
+                                    text(&device["state"]),
+                                    text(&device["model"]),
+                                    device_network_text(&device["network"]),
+                                ]
+                            })
+                            .collect::<Vec<_>>();
+                        if devices["available"].as_bool() != Some(true) {
+                            println!("{}", text(&devices["issue"]));
+                        } else if rows.is_empty() {
+                            println!(
+                                "ADB sees no device. Plug a phone in with USB debugging on, or start an emulator on this host."
+                            );
+                        } else {
+                            table(&["serial", "state", "model", "network"], rows);
+                            if listed
+                                .clone()
+                                .any(|device| device["network"]["onHostNetwork"] == false)
+                            {
+                                let networks = devices["hostNetworks"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(Value::as_str)
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                println!(
+                                    "A phone off this computer's network gets no response from an API served here. Join the Wi-Fi network this computer is on{}, then list again.",
+                                    if networks.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(" ({networks})")
+                                    }
+                                );
+                            }
+                        }
+                    },
+                )
+            } else {
+                report(
+                    json,
+                    &on_machine(
+                        engine,
+                        &machine,
+                        e::list_guest_devices(engine, machine.clone()),
+                    )
+                    .await?,
+                    |view| {
+                        let rows = view["guest"]["devices"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|device| {
+                                vec![
+                                    text(&device["name"]),
+                                    text(&device["udid"]),
+                                    text(&device["osVersion"]),
+                                    text(&device["pairingState"]),
+                                    text(&device["developerMode"]),
+                                ]
+                            })
+                            .collect::<Vec<_>>();
+                        if rows.is_empty() {
+                            println!(
+                                "The guest sees no phone. `buildbridge device attach` hands one over."
+                            );
+                        } else {
+                            table(&["name", "udid", "iOS", "pairing", "developer mode"], rows);
+                        }
+                    },
+                )
+            }
+        }
         Command::Device(DeviceCommand::Attach { machine, bus, port }) => report(
             json,
             &on_machine(
@@ -1462,27 +1688,90 @@ async fn run(cli: Cli) -> Result<(), String> {
                 },
             )
         }
-        Command::Device(DeviceCommand::Run { machine, udid, env }) => report(
-            json,
-            &on_machine(
-                engine,
-                &machine,
-                e::run_apple_device_build(
-                    engine,
-                    machine.clone(),
-                    input(json!({ "udid": udid, "envSetId": env }))?,
-                ),
-            )
-            .await?,
-            |result| {
-                println!(
-                    "Ran {} on {}; console ended: {}",
-                    text(&result["run"]["bundleIdentifier"]),
-                    text(&result["run"]["device"]["name"]),
-                    text(&result["run"]["consoleEnd"])
+        Command::Device(DeviceCommand::Run {
+            machine,
+            udid,
+            env,
+            version,
+            build,
+        }) => {
+            if machine_is_android(engine, &machine).await? {
+                if env.is_some() {
+                    return Err(
+                        "--env applies to macOS machines; an Android debug APK carries the environment it was built with."
+                            .into(),
+                    );
+                }
+                if version.is_some() || build.is_some() {
+                    return Err(
+                        "--version and --build apply to macOS machines; an Android debug APK carries the version it was built with, so set it on `build test`."
+                            .into(),
+                    );
+                }
+                let view = serde_json::to_value(e::get_machine(engine, machine.clone()).await?)
+                    .map_err(|error| error.to_string())?;
+                let Some(sha256) = view["android"]["workspace"]["lastBuild"]["apk"]["sha256"]
+                    .as_str()
+                    .map(str::to_string)
+                else {
+                    return Err(
+                        "No debug APK is retained. Run `buildbridge build test` on this machine first."
+                            .into(),
+                    );
+                };
+                report(
+                    json,
+                    &on_machine(
+                        engine,
+                        &machine,
+                        e::run_android_device(
+                            engine,
+                            machine.clone(),
+                            input(json!({
+                                "kind": "debug",
+                                "serial": udid,
+                                "expectedSha256": sha256,
+                            }))?,
+                        ),
+                    )
+                    .await?,
+                    |result| {
+                        println!(
+                            "Ran {} on {}; log ended: {}",
+                            text(&result["run"]["applicationId"]),
+                            text(&result["run"]["serial"]),
+                            text(&result["run"]["consoleEnd"])
+                        )
+                    },
                 )
-            },
-        ),
+            } else {
+                report(
+                    json,
+                    &on_machine(
+                        engine,
+                        &machine,
+                        e::run_apple_device_build(
+                            engine,
+                            machine.clone(),
+                            input(json!({
+                                "udid": udid,
+                                "envSetId": env,
+                                "version": version_json(version, build),
+                            }))?,
+                        ),
+                    )
+                    .await?,
+                    |result| {
+                        println!(
+                            "Ran {} on {}; console ended: {}",
+                            text(&result["run"]["bundleIdentifier"]),
+                            text(&result["run"]["device"]["name"]),
+                            text(&result["run"]["consoleEnd"])
+                        )
+                    },
+                )
+            }
+        }
         Command::Env(EnvCommand::List) => report(json, &e::list_env_sets(engine).await?, |sets| {
             let rows = sets
                 .as_array()
@@ -1527,6 +1816,33 @@ async fn run(cli: Cli) -> Result<(), String> {
             json,
             &e::attach_env_set(engine, machine, input(json!({ "setId": set }))?).await?,
             |view| println!("Attached {}", text(&view["envSet"]["name"])),
+        ),
+        Command::Usage => report(json, &e::get_usage(engine).await?, print_usage),
+        Command::Settings(SettingsCommand::Show) => {
+            report(json, &e::get_host_settings(engine).await?, print_settings)
+        }
+        Command::Settings(SettingsCommand::Set {
+            browser,
+            remote_builds,
+        }) => {
+            let mut settings = e::get_host_settings(engine).await?;
+            if let Some(browser) = browser {
+                settings.browser = Some(browser);
+            }
+            if let Some(remote_builds) = remote_builds {
+                settings.remote_builds = remote_builds;
+            }
+            report(
+                json,
+                &e::save_host_settings(engine, settings).await?,
+                print_settings,
+            )
+        }
+        // The engine refuses these on its own; asking here as well means `runner status`, which
+        // only reads local files, answers the same way as the commands that reach a server.
+        Command::Runner(_) if !e::get_host_settings(engine).await?.remote_builds => Err(
+            "Remote builds are off on this host. Turn them on with: buildbridge settings set --remote-builds on"
+                .to_string(),
         ),
         Command::Runner(RunnerCommand::Status) => {
             report(json, &e::get_runner_status(engine).await?, |status| {

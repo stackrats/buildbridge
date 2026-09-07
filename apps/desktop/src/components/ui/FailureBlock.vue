@@ -11,7 +11,7 @@ defineProps<{
 
 <template>
     <div
-        class="rounded-md border border-l-2 border-zinc-200 border-l-red-500 bg-white p-3 dark:border-zinc-800 dark:border-l-red-500 dark:bg-zinc-900"
+        class="rounded-md border border-l-2 border-zinc-200 border-l-red-500 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900"
         role="alert"
     >
         <p class="text-xs font-semibold text-zinc-900 dark:text-zinc-50">{{ title }}</p>

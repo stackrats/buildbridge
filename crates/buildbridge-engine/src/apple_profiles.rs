@@ -10,10 +10,10 @@ pub async fn verify_apple_developer_team(
         "Approve an Apple project before verifying its developer team.".to_string()
     })?;
     let development_team = workspace.development_team.ok_or_else(|| {
-        "BuildBridge could not detect DEVELOPMENT_TEAM in the approved project.".to_string()
+        "buildbridge could not detect DEVELOPMENT_TEAM in the approved project.".to_string()
     })?;
     let bundle_identifier = workspace.bundle_identifier.ok_or_else(|| {
-        "BuildBridge could not detect PRODUCT_BUNDLE_IDENTIFIER in the approved project."
+        "buildbridge could not detect PRODUCT_BUNDLE_IDENTIFIER in the approved project."
             .to_string()
     })?;
     let secrets = resolve_signing_kit_for(app, &machine_id).await?;
@@ -52,7 +52,7 @@ pub async fn create_apple_replacement_profile(
         "Approve an Apple project before creating a provisioning profile.".to_string()
     })?;
     let bundle_identifier = workspace.bundle_identifier.ok_or_else(|| {
-        "BuildBridge could not detect PRODUCT_BUNDLE_IDENTIFIER in the approved project."
+        "buildbridge could not detect PRODUCT_BUNDLE_IDENTIFIER in the approved project."
             .to_string()
     })?;
     let mut secrets = resolve_signing_kit_for(app, &machine_id).await?;
@@ -90,7 +90,7 @@ pub async fn create_apple_replacement_profile(
     let saved_path = save_managed_apple_profile(app, &created.profile, &created.content).map_err(
         |error| {
             format!(
-                "Apple created profile {}, but BuildBridge could not retain it locally: {error}. The Apple profile was not revoked; verify again before retrying.",
+                "Apple created profile {}, but buildbridge could not retain it locally: {error}. The Apple profile was not revoked; verify again before retrying.",
                 created.profile.name
             )
         },
@@ -117,7 +117,7 @@ pub async fn create_apple_replacement_profile(
         .await
         .map_err(|error| {
             format!(
-                "Apple created profile {} and saved it at {}, but BuildBridge could not add it to the OS vault: {error}. The Apple profile was not revoked; verify again before retrying.",
+                "Apple created profile {} and saved it at {}, but buildbridge could not add it to the OS vault: {error}. The Apple profile was not revoked; verify again before retrying.",
                 created.profile.name, saved_path_string
             )
         })?;
@@ -133,7 +133,7 @@ pub async fn create_apple_replacement_profile(
 
 /// Downloads an existing Apple profile into this host's managed store and adds it to the kit.
 ///
-/// Apple keeps the profile; BuildBridge only holds a copy. Losing that copy — a cleared vault, a
+/// Apple keeps the profile; buildbridge only holds a copy. Losing that copy — a cleared vault, a
 /// new host — should not mean hunting for the file, so an active profile can be taken back with
 /// one action instead of being re-downloaded by hand.
 pub async fn download_apple_profile(
@@ -259,7 +259,7 @@ pub(crate) fn save_managed_apple_profile(
     Ok(path)
 }
 
-/// Removes an identity BuildBridge created for this kit. Its password lived only in the kit
+/// Removes an identity buildbridge created for this kit. Its password lived only in the kit
 /// that was just deleted, so the file could not be used again anyway.
 pub(crate) fn remove_managed_certificate_for(
     app: &Engine,

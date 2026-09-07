@@ -33,6 +33,7 @@ const uploading = computed(
         </p>
         <div class="flex flex-wrap gap-2">
             <Button
+                size="sm"
                 :disabled="!!blocker || upload?.status === 'uploaded'"
                 @click="machines.uploadAppleArchive(session.id)"
             >
@@ -43,6 +44,7 @@ const uploading = computed(
             <Button
                 v-if="blocker?.action === 'start'"
                 variant="outline"
+                size="sm"
                 :disabled="!session.view?.runtime.prerequisites.ready"
                 @click="machines.launch(session.id)"
                 >Start machine</Button
@@ -50,6 +52,7 @@ const uploading = computed(
             <Button
                 v-else-if="blocker?.action === 'credentials'"
                 variant="outline"
+                size="sm"
                 @click="ui.openMachine(session.id, 'signing-kit')"
                 >{{
                     session.view?.signingKit
@@ -60,6 +63,7 @@ const uploading = computed(
             <Button
                 v-else-if="blocker?.action === 'guest'"
                 variant="outline"
+                size="sm"
                 @click="
                     ui.openMachine(
                         session.id,

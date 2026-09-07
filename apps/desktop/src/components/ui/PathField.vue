@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// One control for every path BuildBridge asks for: type it, drop it on the window, or browse.
+// One control for every path buildbridge asks for: type it, drop it on the window, or browse.
 // Browsing is the primary route, so nobody has to know a path by heart.
 import { FolderOpen } from '@lucide/vue';
 import { computed, ref, watch } from 'vue';
@@ -81,7 +81,9 @@ async function browse(): Promise<void> {
         <div
             class="relative rounded-md transition-colors"
             :class="
-                highlighted ? 'outline-2 -outline-offset-2 outline-zinc-400 outline-dashed' : ''
+                highlighted
+                    ? 'outline-2 -outline-offset-2 outline-zinc-400 outline-dashed dark:outline-zinc-600'
+                    : ''
             "
         >
             <Input

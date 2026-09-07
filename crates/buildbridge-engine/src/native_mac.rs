@@ -42,7 +42,7 @@ pub struct NativeMacProject {
 pub struct NativeMacSigning {
     pub identity_sha1: String,
     pub identity_name: String,
-    /// An owner-selected local profile, copied into BuildBridge's private configuration.
+    /// An owner-selected local profile, copied into buildbridge's private configuration.
     pub profile_path: String,
     pub profile: NativeMacProfile,
 }
@@ -286,7 +286,7 @@ pub(crate) fn begin_native_operation(app: &Engine) -> Result<NativeOperation, St
         return Err("Another native Mac operation is still running.".to_string());
     }
     lock.try_lock().map_err(|_| {
-        "Another BuildBridge process is using this Mac. Wait for it to finish.".to_string()
+        "Another buildbridge process is using this Mac. Wait for it to finish.".to_string()
     })?;
     busy.insert(NATIVE_MAC_TARGET_ID.to_string(), "native_building");
     drop(busy);
@@ -770,7 +770,7 @@ pub async fn reveal_native_mac_artifacts(app: &Engine, path: String) -> Result<(
         .map_err(|e| e.to_string())?
 }
 
-const LOGIN_MARKER: &str = "<!-- Managed by BuildBridge: open the desktop at login. -->";
+const LOGIN_MARKER: &str = "<!-- Managed by buildbridge: open the desktop at login. -->";
 
 fn login_path() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME")
@@ -788,7 +788,7 @@ pub async fn native_mac_login_enabled(_app: &Engine) -> Result<bool, String> {
         Ok(contents) => Ok(contents.contains(LOGIN_MARKER)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(format!(
-            "Could not read the BuildBridge login setting: {error}"
+            "Could not read the buildbridge login setting: {error}"
         )),
     }
 }
@@ -825,7 +825,7 @@ pub async fn set_native_mac_login(_app: &Engine, enabled: bool) -> Result<(), St
             .contains(LOGIN_MARKER)
     {
         return Err(
-            "Another login item uses BuildBridge's filename. It was left unchanged.".to_string(),
+            "Another login item uses buildbridge's filename. It was left unchanged.".to_string(),
         );
     }
     if !enabled {
@@ -849,7 +849,7 @@ pub async fn set_native_mac_login(_app: &Engine, enabled: bool) -> Result<(), St
             .and_then(Path::parent)
             .is_some_and(|p| p.extension().is_some_and(|ext| ext == "app"));
     if !bundled {
-        return Err("Open an installed BuildBridge.app to enable opening at login. A development or CLI executable cannot be registered as the desktop.".to_string());
+        return Err("Open an installed buildbridge.app to enable opening at login. A development or CLI executable cannot be registered as the desktop.".to_string());
     }
     let executable = executable
         .to_str()

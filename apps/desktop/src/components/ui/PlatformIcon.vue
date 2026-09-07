@@ -1,4 +1,6 @@
 <script setup lang="ts">
+// Apple is ink, so it follows the mode; Android is one green in both modes, the one closest to
+// the platform's own, so the same machine is the same colour wherever the window is.
 import type { MachinePlatform } from '../../types/backend';
 
 defineProps<{ platform: MachinePlatform }>();
@@ -12,11 +14,7 @@ defineProps<{ platform: MachinePlatform }>();
         :aria-label="platform === 'android' ? 'Android' : 'Apple'"
         focusable="false"
         class="shrink-0"
-        :class="
-            platform === 'android'
-                ? 'text-emerald-700 dark:text-emerald-400'
-                : 'text-zinc-900 dark:text-white'
-        "
+        :class="platform === 'android' ? 'text-emerald-400' : 'text-zinc-900 dark:text-white'"
     >
         <g v-if="platform === 'android'">
             <path

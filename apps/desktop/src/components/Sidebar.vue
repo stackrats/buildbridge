@@ -12,7 +12,9 @@ import { busyKeyLabel, useMachinesStore } from '../stores/machines';
 import { useSigningStore } from '../stores/signing';
 import { useUi } from '../stores/ui';
 import { useRunnerStore } from '../stores/runner';
+import { useSettingsStore } from '../stores/settings';
 import type { MachineSummary } from '../types/backend';
+import Button from './ui/Button.vue';
 import Spinner from './ui/Spinner.vue';
 import StatusDot from './ui/StatusDot.vue';
 import PlatformIcon from './ui/PlatformIcon.vue';
@@ -23,6 +25,9 @@ const machineOrder = useMachineOrder();
 const signing = useSigningStore();
 const envs = useEnvSetsStore();
 const runner = useRunnerStore();
+
+// A host without a buildbridge server to pair with has no remote builds item at all.
+const remoteBuilds = useSettingsStore().remoteBuilds;
 
 // What each shared resource holds, so the count is answered without opening the page.
 const kitCount = computed(() => signing.kits.value.length);
@@ -292,7 +297,7 @@ onBeforeUnmount(() => {
     >
         <nav
             ref="navigation"
-            class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-2"
+            class="relative min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-2"
             @scroll="updateMachineDrop"
         >
             <button
@@ -319,15 +324,15 @@ onBeforeUnmount(() => {
                     Machines
                     <span v-if="machineCount" class="tabular-nums">· {{ machineCount }}</span>
                 </span>
-                <button
-                    type="button"
-                    class="flex h-5 w-5 items-center justify-center rounded-[5px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50 dark:focus-visible:outline-zinc-300"
-                    v-tip="'New machine'"
+                <Button
+                    variant="ghost"
+                    size="iconXs"
+                    title="New machine"
                     aria-label="New machine"
                     @click="ui.state.newMachineOpen = true"
                 >
                     <Plus class="h-3.5 w-3.5" />
-                </button>
+                </Button>
             </div>
 
             <p id="machine-reorder-help" class="sr-only">
@@ -354,7 +359,7 @@ onBeforeUnmount(() => {
                     <span
                         v-if="machineDrop?.id === machine.id"
                         aria-hidden="true"
-                        class="pointer-events-none absolute right-0 left-0 z-10 h-0.5 rounded-full bg-emerald-500"
+                        class="pointer-events-none absolute right-0 left-0 z-10 h-0.5 rounded-full bg-zinc-700 dark:bg-zinc-300"
                         :class="machineDrop.after ? '-bottom-0.5' : '-top-0.5'"
                     />
                     <button
@@ -454,6 +459,7 @@ onBeforeUnmount(() => {
                 >
             </button>
             <button
+                v-if="remoteBuilds"
                 type="button"
                 :class="[itemBase, ui.state.route.kind === 'runner' ? itemActive : itemIdle]"
                 @click="ui.navigate({ kind: 'runner' })"
@@ -464,7 +470,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div
-            class="absolute top-0 -right-0.5 z-10 h-full w-1.5 cursor-col-resize hover:bg-zinc-100/25"
+            class="absolute top-0 -right-0.5 z-10 h-full w-1.5 cursor-col-resize hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60"
             @mousedown.prevent="startDrag"
         />
     </aside>

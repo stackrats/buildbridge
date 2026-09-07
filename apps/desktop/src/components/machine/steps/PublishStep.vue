@@ -3,7 +3,6 @@ import { computed } from 'vue';
 
 import { isAndroid } from '../../../model/providers';
 import type { JourneyStep } from '../../../model/steps';
-import { useBuildFlowStore } from '../../../stores/build-flow';
 import { useMachinesStore, type MachineSession } from '../../../stores/machines';
 import { useUi } from '../../../stores/ui';
 import PublishingGuide from '../PublishingGuide.vue';
@@ -11,22 +10,15 @@ import AppleArchiveUpload from '../AppleArchiveUpload.vue';
 import GooglePlayUpload from '../GooglePlayUpload.vue';
 import StepPanel from '../../ui/StepPanel.vue';
 
-const { session, embedded = false } = defineProps<{
-    session: MachineSession;
-    step: JourneyStep;
-    /** Rendered in a step card, whose row already carries the title. */
-    embedded?: boolean;
-}>();
+const { session } = defineProps<{ session: MachineSession; step: JourneyStep }>();
 const machines = useMachinesStore();
 const ui = useUi();
-const flows = useBuildFlowStore();
 const view = computed(() => session.view!);
 const android = computed(() => isAndroid(view.value.profile.provider));
 const release = computed(() => view.value.android?.release);
 const archive = computed(() => view.value.archive);
 function build(): void {
-    flows.draft(session.id).outcome = 'release';
-    ui.state.machineSections[session.id] = 'build';
+    ui.selectStep(session.id, android.value ? 'release' : 'archive');
 }
 </script>
 
@@ -36,7 +28,7 @@ function build(): void {
              draw a hairline above it with nothing to separate. -->
         <template #status>
             <PublishingGuide
-                :embedded="embedded"
+                embedded
                 :platform="android ? 'android' : 'ios'"
                 :aab="release?.aab"
                 :apk="release?.apk"

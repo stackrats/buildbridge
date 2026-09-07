@@ -13,6 +13,7 @@ const APP_STORE_CONNECT_CERTIFICATES_URL: &str =
     "https://api.appstoreconnect.apple.com/v1/certificates";
 const APP_STORE_CONNECT_PROFILES_URL: &str = "https://api.appstoreconnect.apple.com/v1/profiles";
 const APP_STORE_CONNECT_DEVICES_URL: &str = "https://api.appstoreconnect.apple.com/v1/devices";
+const APP_STORE_CONNECT_BUILDS_URL: &str = "https://api.appstoreconnect.apple.com/v1/builds";
 const APP_STORE_CONNECT_AUDIENCE: &str = "appstoreconnect-v1";
 const TOKEN_LIFETIME_SECONDS: u64 = 5 * 60;
 const DEVICE_FIELDS: &str = "name,udid,platform,status,deviceClass,model,addedDate";
@@ -59,8 +60,8 @@ impl CertificateKind {
 
     pub(crate) fn common_name(self) -> &'static str {
         match self {
-            Self::Distribution => "BuildBridge Distribution",
-            Self::Development => "BuildBridge Development",
+            Self::Distribution => "buildbridge Distribution",
+            Self::Development => "buildbridge Development",
         }
     }
 
@@ -432,7 +433,7 @@ pub(crate) async fn verify_developer_team(
     let token = create_token(key_id, issuer_id, private_key, now)?;
     let client = Client::builder()
         .timeout(Duration::from_secs(20))
-        .user_agent(concat!("BuildBridge/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("buildbridge/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|error| format!("Could not prepare the Apple API connection: {error}"))?;
 
@@ -527,10 +528,154 @@ pub(crate) async fn verify_developer_team(
     })
 }
 
+/// A build App Store Connect holds for the app, TestFlight included: its build number, the
+/// marketing version it was uploaded under, when, and whether Apple has finished with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppleStoreBuild {
+    pub build: String,
+    pub version: Option<String>,
+    pub uploaded_at: Option<String>,
+    pub processing_state: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BuildsResponse {
+    #[serde(default)]
+    data: Vec<BuildResource>,
+    #[serde(default)]
+    included: Vec<IncludedResource>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BuildResource {
+    #[serde(default)]
+    attributes: BuildAttributes,
+    #[serde(default)]
+    relationships: BuildRelationships,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BuildAttributes {
+    version: Option<String>,
+    #[serde(rename = "uploadedDate")]
+    uploaded_date: Option<String>,
+    #[serde(rename = "processingState")]
+    processing_state: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BuildRelationships {
+    #[serde(rename = "preReleaseVersion")]
+    pre_release_version: Option<RelationshipOne>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelationshipOne {
+    data: Option<ResourceIdentifier>,
+}
+
+/// The builds Apple holds for the app with this bundle identifier, newest first, at most the
+/// latest 200. The app record is looked up first; an app that has never been created in App
+/// Store Connect has no builds to speak of.
+pub(crate) async fn fetch_builds(
+    key_id: &str,
+    issuer_id: &str,
+    private_key: &str,
+    bundle_identifier: &str,
+) -> Result<Vec<AppleStoreBuild>, String> {
+    let now = unix_timestamp()?;
+    let token = create_token(key_id, issuer_id, private_key, now)?;
+    let client = api_client()?;
+    let apps_response = client
+        .get(APP_STORE_CONNECT_APPS_URL)
+        .bearer_auth(&token)
+        .query(&[
+            ("filter[bundleId]", bundle_identifier),
+            ("fields[apps]", "name,bundleId"),
+            ("limit", "1"),
+        ])
+        .send()
+        .await
+        .map_err(|error| connection_error("App Store app", &error))?;
+    let apps_status = apps_response.status();
+    let apps_body = apps_response
+        .text()
+        .await
+        .map_err(|error| format!("Could not read Apple's app-record response: {error}"))?;
+    if !apps_status.is_success() {
+        return Err(apple_error_message(
+            apps_status,
+            &apps_body,
+            "App Store app",
+        ));
+    }
+    let app = parse_app_response(&apps_body, bundle_identifier)?.ok_or_else(|| {
+        format!(
+            "App Store Connect has no app record for {bundle_identifier}, so it holds no builds yet. Create the app in App Store Connect first."
+        )
+    })?;
+
+    let response = client
+        .get(APP_STORE_CONNECT_BUILDS_URL)
+        .bearer_auth(&token)
+        .query(&[
+            ("filter[app]", app.id.as_str()),
+            ("sort", "-uploadedDate"),
+            ("limit", "200"),
+            (
+                "fields[builds]",
+                "version,uploadedDate,processingState,preReleaseVersion",
+            ),
+            ("include", "preReleaseVersion"),
+            ("fields[preReleaseVersions]", "version"),
+        ])
+        .send()
+        .await
+        .map_err(|error| connection_error("uploaded builds", &error))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Could not read Apple's builds response: {error}"))?;
+    if !status.is_success() {
+        return Err(apple_error_message(status, &body, "uploaded builds"));
+    }
+    let response: BuildsResponse = serde_json::from_str(&body)
+        .map_err(|_| "Apple returned an unreadable builds response.".to_string())?;
+    let versions: std::collections::HashMap<String, String> = response
+        .included
+        .into_iter()
+        .filter(|resource| resource.kind == "preReleaseVersions")
+        .filter_map(|resource| {
+            let version = resource.attributes.get("version")?.as_str()?.to_string();
+            Some((resource.id, version))
+        })
+        .collect();
+
+    Ok(response
+        .data
+        .into_iter()
+        .filter_map(|build| {
+            let number = build.attributes.version?;
+            let version = build
+                .relationships
+                .pre_release_version
+                .and_then(|relationship| relationship.data)
+                .and_then(|identifier| versions.get(&identifier.id).cloned());
+            Some(AppleStoreBuild {
+                build: number,
+                version,
+                uploaded_at: build.attributes.uploaded_date,
+                processing_state: build.attributes.processing_state,
+            })
+        })
+        .collect())
+}
+
 fn api_client() -> Result<Client, String> {
     Client::builder()
         .timeout(Duration::from_secs(20))
-        .user_agent(concat!("BuildBridge/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("buildbridge/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|error| format!("Could not prepare the Apple API connection: {error}"))
 }
@@ -1168,7 +1313,7 @@ pub(crate) async fn find_development_profile(
 /// The team's usable App Store profiles for a bundle, split by whether they list one
 /// certificate: `matching` is what provisioning downloads; `other_usable` names the live
 /// profiles for other certificates, which are why a new one cannot simply be created (Apple keeps
-/// one active App Store profile per bundle, and BuildBridge never replaces a live profile it did
+/// one active App Store profile per bundle, and buildbridge never replaces a live profile it did
 /// not make).
 #[derive(Debug, Default)]
 pub struct AppStoreProfileSearch {
@@ -1292,7 +1437,7 @@ pub(crate) async fn create_development_profile(
         );
     }
 
-    let profile_name = format!("BuildBridge Development {now}");
+    let profile_name = format!("buildbridge Development {now}");
     let request =
         development_profile_request(&profile_name, &bundle.id, &certificate.id, device_ids);
     let response = client
@@ -1360,7 +1505,7 @@ async fn finish_created_profile(
             .await
             .map_err(|error| {
                 format!(
-                    "Apple created profile {profile_name}, but BuildBridge could not download it: {error}. It was not revoked; verify again before retrying."
+                    "Apple created profile {profile_name}, but buildbridge could not download it: {error}. It was not revoked; verify again before retrying."
                 )
             })?;
     }
@@ -1464,7 +1609,7 @@ pub(crate) async fn create_certificate(
     kind: CertificateKind,
 ) -> Result<CreatedAppleCertificate, String> {
     if !valid_csr_pem(csr_pem) {
-        return Err("BuildBridge generated an unreadable certificate signing request.".to_string());
+        return Err("buildbridge generated an unreadable certificate signing request.".to_string());
     }
     let now = unix_timestamp()?;
     let token = create_token(key_id, issuer_id, private_key, now)?;
@@ -1692,7 +1837,7 @@ pub(crate) async fn create_replacement_profile(
     let token = create_token(key_id, issuer_id, private_key, now)?;
     let client = Client::builder()
         .timeout(Duration::from_secs(20))
-        .user_agent(concat!("BuildBridge/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("buildbridge/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|error| format!("Could not prepare the Apple API connection: {error}"))?;
 
@@ -1747,7 +1892,7 @@ pub(crate) async fn create_replacement_profile(
         );
     }
 
-    let profile_name = format!("BuildBridge App Store {now}");
+    let profile_name = format!("buildbridge App Store {now}");
     let request = replacement_profile_request(&profile_name, &bundle.id, &certificate.id);
     let response = client
         .post(APP_STORE_CONNECT_PROFILES_URL)
@@ -1788,7 +1933,7 @@ pub(crate) async fn create_replacement_profile(
             .await
             .map_err(|error| {
                 format!(
-                    "Apple created profile {profile_name}, but BuildBridge could not download it: {error}. It was not revoked; verify again before retrying."
+                    "Apple created profile {profile_name}, but buildbridge could not download it: {error}. It was not revoked; verify again before retrying."
                 )
             })?;
     }
@@ -1906,7 +2051,7 @@ pub(crate) async fn download_profile(
     let token = create_token(key_id, issuer_id, private_key, now)?;
     let client = Client::builder()
         .timeout(Duration::from_secs(20))
-        .user_agent(concat!("BuildBridge/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("buildbridge/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|error| format!("Could not prepare the Apple API connection: {error}"))?;
     let resource = fetch_created_profile(&client, &token, profile_id).await?;
@@ -2041,7 +2186,7 @@ fn create_token(
     })?;
 
     encode(&header, &claims, &encoding_key)
-        .map_err(|_| "BuildBridge could not sign the Apple API verification token.".to_string())
+        .map_err(|_| "buildbridge could not sign the Apple API verification token.".to_string())
 }
 
 fn parse_app_response(body: &str, bundle_identifier: &str) -> Result<Option<AppResource>, String> {
@@ -2440,7 +2585,7 @@ mod tests {
     #[test]
     fn replacement_profile_request_uses_only_the_confirmed_relationships() {
         let request = replacement_profile_request(
-            "BuildBridge App Store 1788324836",
+            "buildbridge App Store 1788324836",
             "bundle-resource-id",
             "certificate-resource-id",
         );

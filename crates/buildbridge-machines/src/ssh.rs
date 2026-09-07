@@ -115,7 +115,7 @@ pub(crate) fn run_guest_command(
     } else {
         let message = clean_output(&output.stderr);
         Err(ProviderError::GuestBridge(if message.is_empty() {
-            "SSH authentication failed; add the BuildBridge public key to the guest user"
+            "SSH authentication failed; add the buildbridge public key to the guest user"
                 .to_string()
         } else {
             message
@@ -226,7 +226,7 @@ impl Drop for GuestAskpassHelper {
     }
 }
 
-/// Returns whether a public key is the one BuildBridge generated: a single `ssh-ed25519` line
+/// Returns whether a public key is the one buildbridge generated: a single `ssh-ed25519` line
 /// with base64 material and at most a plain comment, so it can be quoted into a guest command.
 pub fn valid_guest_public_key(public_key: &str) -> bool {
     let mut fields = public_key.split(' ');

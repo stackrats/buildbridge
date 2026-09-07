@@ -1,30 +1,18 @@
 <script setup lang="ts">
-// The BuildBridge mark: two B's, the lower bowl of the first sweeping across to become the
-// lower bowl of the second. Strokes inherit currentColor so the mark is ink on either theme.
-// The mask opens the gap where the sweep crosses the letters; the geometry is the one in
-// assets/icons/BuildBridge-appicon.svg, and the mark is sized by its height (the width follows).
-import { useId } from 'vue';
-
-// Several marks can share a page, so each one masks with its own id.
-const gapId = useId();
+// The buildbridge mark: two bridge spans, the deck of the upper one carrying across and down
+// into the lower. Filled with currentColor so the mark is ink on either theme; the geometry is
+// the one in assets/icons/buildbridge-appicon.svg, and the mark is sized by its height (the
+// width follows).
 </script>
 
 <template>
-    <svg viewBox="0 0 818 516" fill="none" aria-hidden="true" class="shrink-0">
-        <defs>
-            <mask :id="gapId" maskUnits="userSpaceOnUse" x="0" y="0" width="818" height="516">
-                <rect width="818" height="516" fill="#fff" />
-                <path d="M296.43,266.33 L556.27,485.79" stroke="#000" stroke-width="129" />
-            </mask>
-        </defs>
-        <g stroke="currentColor" stroke-width="53" stroke-linejoin="miter" stroke-miterlimit="10">
-            <path
-                :mask="`url(#${gapId})`"
-                d="M287.91,290.98 A90.5,117.5 0 0 1 222,489.5 H116.5 A90,90 0 0 1 26.5,399.5 V63.5 L63.5,26.5 H241 A71.5,113.5 0 0 1 241,253.5 M505.5,452.5 V63.5 L542.5,26.5 H720 A71.5,113.5 0 0 1 720,253.5 M505.5,253.5 H720"
-            />
-            <path
-                d="M26.5,253.5 H241 A110,110 0 0 1 311.98,279.46 L535.51,468.26 A90,90 0 0 0 593.58,489.5 H701 A90.5,117.5 0 0 0 701,253.5"
-            />
-        </g>
+    <svg viewBox="0 0 195 150" fill="currentColor" aria-hidden="true" class="shrink-0">
+        <path
+            d="M0 0 L16 18.4 V128 A6 6 0 0 0 22 134 H59 A9 9 0 0 0 68 125 V96.43 L84 114.83 V125 A25 25 0 0 1 59 150 H22 A22 22 0 0 1 0 128 Z"
+        />
+        <path
+            d="M0 66 H58.33 A30 30 0 0 1 80.98 76.3 L126.94 129.19 A14 14 0 0 0 137.51 134 H171 A8 8 0 0 0 179 126 V90 A8 8 0 0 0 171 82 H111 V66 H171 A24 24 0 0 1 195 90 V126 A24 24 0 0 1 171 150 H137.51 A30 30 0 0 1 114.86 139.7 L68.9 86.81 A14 14 0 0 0 58.33 82 H0 Z"
+        />
+        <path d="M111 0 L127 18.4 V118.59 L111 100.19 Z" />
     </svg>
 </template>

@@ -1,4 +1,4 @@
-//! The machines BuildBridge builds on, from the host's side: two macOS providers (Docker-OSX and
+//! The machines buildbridge builds on, from the host's side: two macOS providers (Docker-OSX and
 //! dockur/macos) with everything spoken to their guest over SSH, and the Android toolchain
 //! container with everything spoken to it over `docker exec`.
 //!
@@ -37,6 +37,7 @@ mod smoke_build;
 mod ssh;
 mod templates;
 mod transporter;
+mod usage;
 mod usb;
 mod versions;
 mod workspace;
@@ -65,6 +66,7 @@ pub use smoke_build::*;
 pub use ssh::*;
 pub use templates::*;
 pub use transporter::upload_apple_ipa;
+pub use usage::*;
 pub use versions::*;
 pub use workspace::*;
 pub use xcode::*;
@@ -97,7 +99,7 @@ pub use usb::{
     valid_usb_port_path,
 };
 
-/// Identifier of the builder that existed before BuildBridge kept a machine registry.
+/// Identifier of the builder that existed before buildbridge kept a machine registry.
 pub const DEFAULT_MACHINE_ID: &str = "default";
 /// Container name of the legacy single builder; newer machines derive their own name.
 pub const DEFAULT_CONTAINER_NAME: &str = "buildbridge-macos-builder";
@@ -140,7 +142,7 @@ pub fn container_name_for(provider: MachineProvider, machine_id: &str) -> String
         MachineProvider::AndroidToolchain => format!("buildbridge-android-{machine_id}"),
     }
 }
-const XCODE_ARCHIVE_NAME: &str = "BuildBridge-Xcode.xip";
+const XCODE_ARCHIVE_NAME: &str = "buildbridge-Xcode.xip";
 const XCODE_PACKAGE_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const SIGNING_CERTIFICATE_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const PROVISIONING_PROFILE_MAX_BYTES: u64 = 8 * 1024 * 1024;
@@ -758,6 +760,8 @@ pub struct AppleSmokeBuildResult {
     pub target: UnsignedBuildTarget,
     pub xcode_version: String,
     pub native_lockfile_updated: bool,
+    /// The version the built app reports, when its Info.plist could be read.
+    pub version: Option<ProjectVersion>,
     pub output_tail: Vec<String>,
 }
 
@@ -1047,7 +1051,7 @@ pub fn guest_diagnostics(
                 selected_path,
                 first_launch_ready,
                 (!first_launch_ready).then(|| {
-                    "Xcode is selected but first-launch setup is incomplete. Resume activation from BuildBridge."
+                    "Xcode is selected but first-launch setup is incomplete. Resume activation from buildbridge."
                         .to_string()
                 }),
             )
@@ -1069,7 +1073,7 @@ pub fn guest_diagnostics(
                     Some(installed_path),
                     false,
                     Some(
-                        "Xcode is installed but not selected. Activate it from BuildBridge."
+                        "Xcode is installed but not selected. Activate it from buildbridge."
                             .to_string(),
                     ),
                 ),

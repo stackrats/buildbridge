@@ -149,7 +149,7 @@ pub(crate) async fn create_apple_certificate_for_kit(
     .map_err(|error| {
         let _ = fs::remove_dir_all(&directory);
         format!(
-            "Apple issued certificate {}, but BuildBridge could not package it: {error}. Nothing at Apple was revoked; download it from the developer portal, or revoke it there and try again.",
+            "Apple issued certificate {}, but buildbridge could not package it: {error}. Nothing at Apple was revoked; download it from the developer portal, or revoke it there and try again.",
             created.certificate.name
         )
     })?;
@@ -168,7 +168,7 @@ pub(crate) async fn create_apple_certificate_for_kit(
     }
     save_signing_kit_record(kit.clone()).await.map_err(|error| {
         format!(
-            "Apple issued certificate {} and it was packaged at {}, but BuildBridge could not update the credentials in the OS vault: {error}. Nothing at Apple was revoked.",
+            "Apple issued certificate {} and it was packaged at {}, but buildbridge could not update the credentials in the OS vault: {error}. Nothing at Apple was revoked.",
             created.certificate.name, packaged.p12_path
         )
     })?;
@@ -176,7 +176,7 @@ pub(crate) async fn create_apple_certificate_for_kit(
     Ok((created.certificate, packaged.p12_path))
 }
 
-/// Apple's serial number for the kit's development `.p12`: recorded when BuildBridge created
+/// Apple's serial number for the kit's development `.p12`: recorded when buildbridge created
 /// it, read out of the file with OpenSSL otherwise.
 pub(crate) fn development_certificate_serial(kit: &StoredSigningKit) -> Result<String, String> {
     if let Some(serial) = &kit.development_certificate_serial_number {
@@ -304,7 +304,7 @@ pub(crate) async fn ensure_distribution_set(
         (Some(key_id), Some(issuer_id), Some(private_key)) => (key_id, issuer_id, private_key),
         _ => {
             return Err(
-                "These credentials have no App Store Connect key, so BuildBridge cannot create signing material for them. Store a distribution identity with its profile, or add a Team key."
+                "These credentials have no App Store Connect key, so buildbridge cannot create signing material for them. Store a distribution identity with its profile, or add a Team key."
                     .to_string(),
             );
         }
@@ -345,7 +345,7 @@ pub(crate) async fn ensure_distribution_set(
     .await?
     .ok_or_else(|| {
         format!(
-            "The stored distribution certificate (serial {serial}) is not an unexpired Apple Distribution certificate on this team. Store the .p12 of a current certificate in the credentials, or store them again with only the Team key so BuildBridge creates one."
+            "The stored distribution certificate (serial {serial}) is not an unexpired Apple Distribution certificate on this team. Store the .p12 of a current certificate in the credentials, or store them again with only the Team key so buildbridge creates one."
         )
     })?;
 
@@ -380,7 +380,7 @@ pub(crate) async fn ensure_distribution_set(
         }
         None if !search.other_usable.is_empty() => {
             return Err(format!(
-                "An active App Store profile for {bundle_identifier} exists at Apple ({}) but is for a different certificate, and BuildBridge does not replace a live profile it did not create. Store that certificate's .p12 in the credentials, or let the profile expire or delete it in the developer portal, then provision again.",
+                "An active App Store profile for {bundle_identifier} exists at Apple ({}) but is for a different certificate, and buildbridge does not replace a live profile it did not create. Store that certificate's .p12 in the credentials, or let the profile expire or delete it in the developer portal, then provision again.",
                 search.other_usable.join(", ")
             ));
         }
@@ -588,7 +588,7 @@ pub(crate) fn pkcs12_needs_repackaging(info: &str) -> bool {
     })
 }
 
-/// A kit file BuildBridge packaged before it knew what macOS reads is rewritten in place with
+/// A kit file buildbridge packaged before it knew what macOS reads is rewritten in place with
 /// the same key, certificate and passphrase, so nothing at Apple is touched and the kit keeps
 /// its path. The key crosses only a pipe between two OpenSSL processes; the passphrase rides the
 /// environment, never an argument. Files macOS can already read — every Mac export — are left

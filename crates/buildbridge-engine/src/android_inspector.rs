@@ -264,10 +264,46 @@ fn open_in_browsers(browsers: &[Browser], startup_wait: Duration) -> Result<Stri
     })
 }
 
-/// Opens only the fixed Android devices page in a supported host browser. The browser
-/// selects the device and WebView; this does not change ADB state or enable a CDP server.
-pub fn open_android_inspector() -> Result<String, String> {
-    open_in_browsers(&host_browsers(), Duration::from_millis(350))
+/// The browser chosen in Settings, when it is one that has the inspector page: it is tried
+/// first, ahead of whatever else is installed. A browser without the page is left out rather
+/// than refused, so the setting never breaks the inspector.
+fn preferred_browser(configured: Option<&str>) -> Option<Browser> {
+    let executable = PathBuf::from(crate::opener::resolve_browser(configured?).ok()?);
+    if !executable.is_absolute() {
+        return None;
+    }
+    let file_name = executable
+        .file_name()?
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let url = if file_name.contains("edge") {
+        EDGE_INSPECTOR
+    } else if ["chrome", "chromium", "brave", "vivaldi"]
+        .iter()
+        .any(|name| file_name.contains(name))
+    {
+        CHROME_INSPECTOR
+    } else {
+        return None;
+    };
+    Some(Browser { executable, url })
+}
+
+/// Opens only the fixed Android devices page in a supported host browser, the one chosen in
+/// Settings first. The browser selects the device and WebView; this does not change ADB
+/// state or enable a CDP server.
+pub async fn open_android_inspector(app: &crate::Engine) -> Result<String, String> {
+    let configured = crate::settings::load_settings(app)?.browser;
+    tokio::task::spawn_blocking(move || {
+        let mut browsers = host_browsers();
+        if let Some(preferred) = preferred_browser(configured.as_deref()) {
+            browsers.retain(|browser| browser.executable != preferred.executable);
+            browsers.insert(0, preferred);
+        }
+        open_in_browsers(&browsers, Duration::from_millis(350))
+    })
+    .await
+    .map_err(|error| format!("Could not open the Android inspector: {error}"))?
 }
 
 #[cfg(all(test, unix))]

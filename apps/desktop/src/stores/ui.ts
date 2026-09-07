@@ -15,7 +15,6 @@ import {
 } from '../lib/prefs';
 
 export type LogSource = 'activity' | 'build' | 'archive' | 'device' | 'console';
-export type MachineSection = 'build' | 'preview' | 'publish' | 'setup' | 'steps';
 
 export type Route =
     | { kind: 'home' }
@@ -63,16 +62,27 @@ function initialNewMachineOpen(): boolean {
     return devParams()?.has('newMachine') ?? false;
 }
 
+/** `?settings=1` opens the settings dialog in the browser preview. */
+function initialSettingsOpen(): boolean {
+    return devParams()?.has('settings') ?? false;
+}
+
 const state = reactive({
     route: parseSelection(initialSelection()) as Route,
     sidebarWidth: loadSidebarWidth(),
     /** The step each machine page is showing; the focus step when unset. */
     machineSteps: initialSteps(),
-    machineSections: {} as Record<string, MachineSection>,
+    /**
+     * Which sections of each machine page a person opened or closed — the timeline's phases and
+     * the sections after it — so a page comes back as it was left. Unset means the page's own
+     * default for that section.
+     */
+    machineSections: {} as Record<string, Record<string, boolean>>,
     logOpen: initialLogOpen(),
     logSource: {} as Record<string, LogSource>,
     logHeight: loadLogHeight(),
     newMachineOpen: initialNewMachineOpen(),
+    settingsOpen: initialSettingsOpen(),
     /** The template the new machine dialog opens with chosen, from the templates page. */
     newMachineTemplateId: null as string | null,
 });
@@ -113,16 +123,12 @@ export function useUi() {
             }
         },
         /**
-         * Show a machine, optionally on one step. A named step opens on the All steps tab;
-         * without one the machine keeps the tab it was on and lands on its focus step, so
-         * clicking between machines and pages never loses the tab a person chose.
+         * Show a machine, optionally on one step. Without one the page comes back as it was
+         * left: the step a person had open, or the focus step when they had chosen none.
          */
         openMachine(id: string, stepId?: string): void {
             if (stepId) {
                 state.machineSteps[id] = stepId;
-                state.machineSections[id] = 'steps';
-            } else {
-                delete state.machineSteps[id];
             }
             state.route = { kind: 'machine', id };
             saveSelection(serializeRoute(state.route));
@@ -134,6 +140,13 @@ export function useUi() {
         },
         selectStep(id: string, stepId: string | null): void {
             state.machineSteps[id] = stepId ?? '';
+        },
+        /** A person's choice for one section of a machine page, or null for the page's default. */
+        sectionOpen(id: string, section: string): boolean | null {
+            return state.machineSections[id]?.[section] ?? null;
+        },
+        setSectionOpen(id: string, section: string, open: boolean): void {
+            state.machineSections[id] = { ...state.machineSections[id], [section]: open };
         },
         isLogOpen(id: string): boolean {
             return state.logOpen[id] ?? false;

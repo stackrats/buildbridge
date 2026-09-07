@@ -29,7 +29,7 @@ export function createSharingPreview(events: Events, query: URLSearchParams) {
                   identitySha1: 'a'.repeat(40),
                   identityName: 'Apple Distribution: Example',
                   profilePath:
-                      '/Users/matt/Library/Application Support/BuildBridge/profile.mobileprovision',
+                      '/Users/matt/Library/Application Support/buildbridge/profile.mobileprovision',
                   profile: {
                       uuid: 'profile-preview',
                       teamIdentifier: 'TEAM123456',
@@ -177,7 +177,7 @@ export function createSharingPreview(events: Events, query: URLSearchParams) {
                     artifacts:
                         input.outcome === 'archive'
                             ? ['App-AppStore.ipa', 'App.xcarchive.zip'].map((name) => ({
-                                  path: `/Users/matt/Library/Application Support/BuildBridge/native-mac/builds/example/${name}`,
+                                  path: `/Users/matt/Library/Application Support/buildbridge/native-mac/builds/example/${name}`,
                                   bytes: 42_000_000,
                                   sha256: 'b'.repeat(64),
                               }))

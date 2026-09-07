@@ -13,11 +13,14 @@ import TemplatesPane from './components/templates/TemplatesPane.vue';
 import TooltipLayer from './components/ui/TooltipLayer.vue';
 import TopBar from './components/TopBar.vue';
 import NewMachineDialog from './components/dialogs/NewMachineDialog.vue';
+import SettingsDialog from './components/dialogs/SettingsDialog.vue';
 import { useEnvSetsStore } from './stores/envs';
 import { useMachinesStore } from './stores/machines';
 import { useRunnerStore } from './stores/runner';
+import { useSettingsStore } from './stores/settings';
 import { useSigningStore } from './stores/signing';
 import { useUi } from './stores/ui';
+import { useUsageStore } from './stores/usage';
 
 const ui = useUi();
 const runner = useRunnerStore();
@@ -25,14 +28,37 @@ const machines = useMachinesStore();
 const signing = useSigningStore();
 const envs = useEnvSetsStore();
 const nativeMac = useNativeMacStore();
+const usage = useUsageStore();
+const settings = useSettingsStore();
+/** Off until the settings say otherwise, so the pane never flashes up during the first load. */
+const remoteBuilds = settings.remoteBuilds;
+
+// Measuring what the machines cost is worth nothing while nobody can see it, so the engine
+// samples only while this window is showing.
+function syncUsageToVisibility(): void {
+    void usage.watch(!document.hidden);
+}
 
 const selectedMachineId = computed(() =>
     ui.state.route.kind === 'machine' ? ui.state.route.id : null,
 );
 
 onMounted(async () => {
-    await machines.listenForEvents();
-    await Promise.all([runner.initialize(), machines.loadList(), signing.load(), envs.load()]);
+    // The settings come first because they say whether this host offers remote builds at all,
+    // and the runner store, the sidebar and the route all read that answer.
+    await Promise.all([machines.listenForEvents(), usage.listen(), settings.load()]);
+    syncUsageToVisibility();
+    document.addEventListener('visibilitychange', syncUsageToVisibility);
+    // A remembered remote-builds page on a host that no longer offers them falls back too.
+    if (!settings.remoteBuilds.value && ui.state.route.kind === 'runner') {
+        ui.navigate({ kind: 'home' });
+    }
+    await Promise.all([
+        runner.initialize(settings.remoteBuilds.value),
+        machines.loadList(),
+        signing.load(),
+        envs.load(),
+    ]);
     if (runner.state.status?.platform === 'macos') await nativeMac.initialize();
     // A remembered machine that no longer exists falls back to the overview.
     if (
@@ -44,6 +70,9 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+    document.removeEventListener('visibilitychange', syncUsageToVisibility);
+    void usage.watch(false);
+    usage.dispose();
     runner.dispose();
     machines.dispose();
     nativeMac.dispose();
@@ -55,9 +84,11 @@ onBeforeUnmount(() => {
         <TopBar />
         <div class="flex min-h-0 flex-1">
             <Sidebar />
-            <!-- A machine page manages its own scrolling so its log drawer can stay in view. -->
+            <!-- A machine page manages its own scrolling so its log drawer can stay in view. Scroll
+                 containers are positioned so hidden helper elements (sr-only) scroll with their pane
+                 instead of stretching the window, which focusing one would then scroll. -->
             <main
-                class="min-w-0 flex-1"
+                class="relative min-w-0 flex-1"
                 :class="selectedMachineId !== null ? 'overflow-hidden' : 'overflow-y-auto'"
             >
                 <MachinePane
@@ -65,7 +96,7 @@ onBeforeUnmount(() => {
                     :key="selectedMachineId"
                     :machine-id="selectedMachineId"
                 />
-                <RunnerPane v-else-if="ui.state.route.kind === 'runner'" />
+                <RunnerPane v-else-if="ui.state.route.kind === 'runner' && remoteBuilds" />
                 <NativeMacPane v-else-if="ui.state.route.kind === 'native_mac'" />
                 <SigningKitPane v-else-if="ui.state.route.kind === 'signing'" />
                 <EnvSetPane v-else-if="ui.state.route.kind === 'envs'" />
@@ -74,6 +105,7 @@ onBeforeUnmount(() => {
             </main>
         </div>
         <NewMachineDialog v-model:open="ui.state.newMachineOpen" />
+        <SettingsDialog v-model:open="ui.state.settingsOpen" />
         <TooltipLayer />
     </div>
 </template>

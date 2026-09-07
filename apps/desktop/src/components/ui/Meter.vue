@@ -9,12 +9,13 @@ const {
 } = defineProps<{
     /** 0–1 when known; null renders an indeterminate sweep. */
     value?: number | null;
-    tone?: 'primary' | 'ok' | 'warn' | 'danger';
+    tone?: 'primary' | 'neutral' | 'ok' | 'warn' | 'danger';
     width?: string;
 }>();
 
 const fills = {
     primary: 'bg-zinc-900 dark:bg-zinc-100',
+    neutral: 'bg-zinc-400 dark:bg-zinc-500',
     ok: 'bg-emerald-500',
     warn: 'bg-amber-500',
     danger: 'bg-red-500',

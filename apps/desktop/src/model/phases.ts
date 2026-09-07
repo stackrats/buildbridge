@@ -3,6 +3,7 @@
 
 import type {
     AndroidBuildPhase,
+    AndroidDeviceRunPhase,
     AndroidReleasePhase,
     AppleArchivePhase,
     AppleDeviceRunPhase,
@@ -61,6 +62,15 @@ export const devicePhaseLabel: Record<AppleDeviceRunPhase, string> = {
     installing: 'Installing on the iPhone',
     launching: 'Launching',
     running: 'Live; console streaming',
+    completed: 'Stopped',
+};
+
+export const androidDevicePhaseLabel: Record<AndroidDeviceRunPhase, string> = {
+    checking: 'Checking the device',
+    staging: 'Verifying the APK',
+    installing: 'Installing on the device',
+    launching: 'Launching',
+    running: 'Live; log streaming',
     completed: 'Stopped',
 };
 

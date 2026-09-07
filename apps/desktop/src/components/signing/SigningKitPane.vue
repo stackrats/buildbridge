@@ -353,13 +353,13 @@ const orphaned = computed(() =>
 
         <EmptyState
             v-if="!signing.kits.value.length && !signing.state.loading"
-            title="No signing credentials stored"
-            description="Choose Apple or Android when adding credentials. For iOS, a Team key is enough and BuildBridge generates the guest keychain password. For Android, import an upload key or create one after saving."
+            title="No signing credentials yet"
+            description="Choose Apple or Android when adding credentials. For iOS, a Team key is enough and buildbridge generates the guest keychain password. For Android, import an upload key or create one after saving."
         >
             <template #icon><KeyRound class="h-4 w-4" /></template>
             <Button size="sm" @click="createKit">
                 <Plus class="h-3.5 w-3.5" />
-                Store credentials
+                New credentials
             </Button>
         </EmptyState>
 
@@ -375,7 +375,7 @@ const orphaned = computed(() =>
             </template>
             <Button size="sm" @click="createKit">
                 <Plus class="h-3.5 w-3.5" />
-                Store credentials
+                New credentials
             </Button>
         </EmptyState>
 
@@ -464,11 +464,7 @@ const orphaned = computed(() =>
             />
 
             <details class="group rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
-                <DisclosureSummary
-                    class="cursor-pointer text-xs font-medium text-zinc-700 dark:text-zinc-200"
-                >
-                    Credential details
-                </DisclosureSummary>
+                <DisclosureSummary> Credential details </DisclosureSummary>
                 <KeyValue class="mt-3" :items="detailsFor(kit)" :columns="3" />
             </details>
             <p
@@ -495,11 +491,7 @@ const orphaned = computed(() =>
                 v-if="platform !== 'android' && hasAppleMaterial(kit)"
                 class="mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-800"
             >
-                <DisclosureSummary
-                    class="cursor-pointer text-xs font-medium text-zinc-700 dark:text-zinc-200"
-                >
-                    Profiles and optional signing actions
-                </DisclosureSummary>
+                <DisclosureSummary> Profiles and optional signing actions </DisclosureSummary>
                 <div class="my-3 flex flex-wrap gap-2">
                     <!-- Provisioning and the device step create these themselves; the buttons
                      are for creating one ahead of time, so they go once the identity exists. -->
@@ -561,7 +553,7 @@ const orphaned = computed(() =>
                             :text="name"
                             what="Copy the profile file name"
                             size="iconXs"
-                            class="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                            class="opacity-45 group-hover:opacity-100 focus-visible:opacity-100"
                         />
                     </li>
                 </ul>
@@ -617,9 +609,9 @@ const orphaned = computed(() =>
                 >. Google Play takes it as the upload key of a new app.
             </p>
             <p>
-                The password goes into the vault for BuildBridge to sign with, but neither Google
-                Play nor BuildBridge can recover an upload key whose password is lost, so keep a
-                copy and back the keystore up. Let BuildBridge invent one and copy it, or type your
+                The password goes into the vault for buildbridge to sign with, but neither Google
+                Play nor buildbridge can recover an upload key whose password is lost, so keep a
+                copy and back the keystore up. Let buildbridge invent one and copy it, or type your
                 own.
             </p>
             <div class="grid gap-3 sm:grid-cols-2">
@@ -651,7 +643,11 @@ const orphaned = computed(() =>
                         autocomplete="new-password"
                     />
                     <div v-else class="flex h-full items-center">
-                        <CopyButton :text="keystoreForm.password" label="Copy password" />
+                        <CopyButton
+                            :text="keystoreForm.password"
+                            what="Copy the password"
+                            size="iconSm"
+                        />
                     </div>
                 </Field>
                 <Field label="Key alias" hint="The key's name inside the keystore.">
@@ -663,7 +659,8 @@ const orphaned = computed(() =>
             </div>
             <p
                 v-if="keystoreProblem && (keystoreForm.password || keystoreForm.confirm)"
-                class="text-[11px] text-amber-700 dark:text-amber-400"
+                class="text-[11px] text-red-700 dark:text-red-400"
+                role="alert"
             >
                 {{ keystoreProblem }}
             </p>
@@ -677,16 +674,12 @@ const orphaned = computed(() =>
             v-if="platform !== 'android'"
             class="rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-950"
         >
-            <DisclosureSummary
-                class="cursor-pointer text-xs font-medium text-zinc-700 dark:text-zinc-200"
-            >
-                Optional: signing in through Xcode
-            </DisclosureSummary>
+            <DisclosureSummary> Optional: signing in through Xcode </DisclosureSummary>
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
                 You can open Xcode inside a machine, sign in under Settings, then Accounts, and let
                 it manage certificates. Apple often rejects account sign-in inside a virtual
                 machine, so treat it as best effort: cancel rather than retrying a generic
-                verification failure. BuildBridge never collects an Apple Account password or a
+                verification failure. buildbridge never collects an Apple Account password or a
                 two-factor code, so it cannot verify this route or use it for a signed build.
             </p>
         </details>
@@ -721,7 +714,7 @@ const orphaned = computed(() =>
             @confirm="createCertificate"
         >
             <p>
-                BuildBridge generates a private key on this host, asks Apple to sign it with the
+                buildbridge generates a private key on this host, asks Apple to sign it with the
                 Team key in <b>{{ certifying?.kit.name }}</b
                 >, and stores the result in the credentials as a password-protected .p12. No Mac is
                 involved and nothing at Apple is revoked.
@@ -753,7 +746,7 @@ const orphaned = computed(() =>
                 <b>{{ removing?.name }}</b> is deleted from the operating-system vault: the
                 certificate path and password, the profile paths, the guest keychain password, any
                 Team API key, and the Android upload key's path, alias and passwords. An upload key
-                BuildBridge created for them is deleted from this host as well.
+                buildbridge created for them is deleted from this host as well.
             </p>
             <p>
                 <span class="inline-flex items-center gap-1 font-medium">

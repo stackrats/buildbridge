@@ -3,6 +3,7 @@ import { X } from '@lucide/vue';
 import { nextTick, onBeforeUnmount, provide, ref, useId, watch } from 'vue';
 
 import { containDialogTab, dialogKey } from '../../lib/dialog';
+import Button from './Button.vue';
 
 const open = defineModel<boolean>('open', { default: false });
 const { wide = false, busy = false } = defineProps<{
@@ -96,15 +97,17 @@ onBeforeUnmount(close);
                 <h2 :id="titleId" class="text-base font-semibold">
                     {{ title }}
                 </h2>
-                <button
-                    type="button"
-                    class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-700 disabled:pointer-events-none disabled:opacity-45 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50 dark:focus-visible:outline-zinc-300"
+                <Button
+                    variant="ghost"
+                    size="icon"
+                    class="shrink-0"
+                    :title="busy ? 'Waits until the work in this dialog finishes' : 'Close'"
                     aria-label="Close dialog"
                     :disabled="busy"
                     @click="dismiss"
                 >
                     <X class="h-4 w-4" aria-hidden="true" />
-                </button>
+                </Button>
             </div>
             <!-- Keep the content's intrinsic height: a zero flex basis collapses auto-sized
                  dialogs in WebKit. The body can still shrink and scroll at the viewport cap. -->

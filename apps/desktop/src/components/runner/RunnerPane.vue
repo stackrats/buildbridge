@@ -50,7 +50,7 @@ const realtimeBadge = computed(() => {
         case 'connected':
             return { tone: 'ok' as const, label: 'Connected' };
         case 'connecting':
-            return { tone: 'warn' as const, label: 'Connecting…' };
+            return { tone: 'warn' as const, label: 'Connecting' };
         case 'unavailable':
             return { tone: 'danger' as const, label: 'Dashboard unreachable' };
         default:
@@ -97,7 +97,7 @@ async function openDashboard(): Promise<void> {
         const address = browseServer.value.trim() || status.value?.serverUrl || '';
         const parsed = new URL(address);
         if (!['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password)
-            throw new Error('Enter your BuildBridge server address.');
+            throw new Error('Enter your buildbridge server address.');
         await useBackend().openUrl(parsed.toString());
     } catch (error) {
         browseError.value = describeError(error);
@@ -107,12 +107,14 @@ async function openDashboard(): Promise<void> {
 
 <template>
     <div class="mx-auto max-w-4xl space-y-4 p-5">
-        <header>
-            <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">Remote builds</h1>
-            <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-                Build on another computer, or let trusted people build on this one. Local builds
-                work without a connection.
-            </p>
+        <header class="flex items-start justify-between gap-4">
+            <div>
+                <h1 class="text-lg font-bold text-zinc-900 dark:text-zinc-50">Remote builds</h1>
+                <p class="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                    Build on another computer, or let trusted people build on this one. Local builds
+                    work without a connection.
+                </p>
+            </div>
         </header>
 
         <Card v-if="!paired">
@@ -123,7 +125,7 @@ async function openDashboard(): Promise<void> {
             >
             <form class="space-y-3" @submit.prevent="openDashboard">
                 <Field
-                    label="BuildBridge server address"
+                    label="buildbridge server address"
                     required
                     hint="Use the address included with the sharing invitation."
                     ><Input
@@ -193,18 +195,14 @@ async function openDashboard(): Promise<void> {
                 <KeyValue
                     :items="[
                         { label: 'Runner ID', value: status.runnerId, mono: true },
-                        { label: 'BuildBridge server', value: status.serverUrl, mono: true },
+                        { label: 'buildbridge server', value: status.serverUrl, mono: true },
                         { label: 'Version', value: status.version, mono: true },
                         { label: 'Host', value: `${status.platform} / ${status.architecture}` },
                         { label: 'Token storage', value: 'Operating-system credential vault' },
                     ]"
                 />
                 <details class="mt-3">
-                    <DisclosureSummary
-                        class="cursor-pointer text-xs font-medium text-zinc-700 dark:text-zinc-200"
-                    >
-                        How remote builds work
-                    </DisclosureSummary>
+                    <DisclosureSummary> How remote builds work </DisclosureSummary>
                     <p class="mt-2 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                         Queue builds for projects you have approved on this computer. Native Mac
                         builds require a full commit SHA. Virtual Mac and Android builders can use
@@ -222,7 +220,7 @@ async function openDashboard(): Promise<void> {
                 </template>
                 <form class="space-y-3" @submit.prevent="pair">
                     <Field
-                        label="BuildBridge server address"
+                        label="buildbridge server address"
                         required
                         hint="Use the same address where you generated the pairing code."
                     >
@@ -300,7 +298,7 @@ async function openDashboard(): Promise<void> {
                 </ul>
                 <EmptyState
                     v-else
-                    title="Nothing yet"
+                    title="No activity yet"
                     description="Queued builds and their results appear here as they are claimed."
                 />
             </Card>

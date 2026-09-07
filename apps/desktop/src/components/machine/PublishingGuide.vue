@@ -97,7 +97,7 @@ async function open(url: string): Promise<void> {
                 <PlatformIcon :platform="platform" class="h-4 w-4" />Publish the release
             </h2>
             <p
-                class="text-sm leading-6 text-zinc-500 dark:text-zinc-400"
+                class="text-xs leading-5 text-zinc-500 dark:text-zinc-400"
                 :class="{ 'mt-1': !embedded }"
             >
                 Choose where this release will go.
@@ -123,49 +123,53 @@ async function open(url: string): Promise<void> {
                 >Choose release outputs</Button
             >
         </Callout>
-        <template v-else>
-            <div
-                class="space-y-3 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900"
-            >
-                <h3 class="flex items-center gap-2 text-sm font-semibold">
-                    <Package class="h-4 w-4" />Retained {{ format }}
-                </h3>
-                <KeyValue
-                    :items="[
-                        { label: 'App identifier', value: appIdentifier, mono: true },
-                        { label: 'Version', value: version },
-                        { label: 'Environment', value: environment || 'Not recorded' },
-                        { label: 'File size', value: formatBytes(artifact.bytes) },
-                        { label: 'Artifact SHA-256', value: artifact.sha256, mono: true },
-                        ...(certificateSha256
-                            ? [
-                                  {
-                                      label: 'Signing certificate SHA-256',
-                                      value: certificateSha256,
-                                      mono: true,
-                                  },
-                              ]
-                            : []),
-                    ]"
-                />
-                <p class="font-mono text-[11px] break-all text-zinc-500 dark:text-zinc-400">
-                    {{ artifact.path }}
-                </p>
-                <div class="flex flex-wrap gap-2">
-                    <Button variant="outline" size="sm" @click="emit('reveal', artifact.path)"
-                        ><FolderOpen class="h-3.5 w-3.5" />Show in folder</Button
-                    >
-                    <CopyButton :text="artifact.path" label="Copy path" />
-                </div>
-                <p class="text-[11px] leading-5 text-zinc-500 dark:text-zinc-400">
-                    This is the retained release, which may predate your latest source or
-                    environment changes. Review it before uploading.
-                </p>
+        <div
+            v-else
+            class="space-y-3 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900"
+        >
+            <h3 class="flex items-center gap-2 text-sm font-semibold">
+                <Package class="h-4 w-4" />Retained {{ format }}
+            </h3>
+            <KeyValue
+                :items="[
+                    { label: 'App identifier', value: appIdentifier, mono: true },
+                    { label: 'Version', value: version },
+                    { label: 'Environment', value: environment || 'Not recorded' },
+                    { label: 'File size', value: formatBytes(artifact.bytes) },
+                    { label: 'Artifact SHA-256', value: artifact.sha256, mono: true },
+                    ...(certificateSha256
+                        ? [
+                              {
+                                  label: 'Signing certificate SHA-256',
+                                  value: certificateSha256,
+                                  mono: true,
+                              },
+                          ]
+                        : []),
+                ]"
+            />
+            <p class="font-mono text-[11px] break-all text-zinc-500 dark:text-zinc-400">
+                {{ artifact.path }}
+            </p>
+            <div class="flex flex-wrap gap-2">
+                <Button variant="outline" size="sm" @click="emit('reveal', artifact.path)"
+                    ><FolderOpen class="h-3.5 w-3.5" />Show in folder</Button
+                >
+                <CopyButton :text="artifact.path" what="Copy the file path" size="iconSm" />
             </div>
-            <slot v-if="destination === 'play'" name="google-play-upload" />
-            <slot v-else-if="platform !== 'android'" name="upload" />
+            <p class="text-[11px] leading-5 text-zinc-500 dark:text-zinc-400">
+                This is the retained release, which may predate your latest source or environment
+                changes. Review it before uploading.
+            </p>
+        </div>
+        <!-- The Google Play card holds the service-account key as well as the upload, so it
+             stays on the step before a release is retained: the connection is made once, and
+             the upload button names whatever is still missing. -->
+        <slot v-if="destination === 'play'" name="google-play-upload" />
+        <slot v-else-if="artifact && platform !== 'android'" name="upload" />
+        <template v-if="artifact">
             <ol
-                class="list-decimal space-y-3 pl-5 text-sm leading-6 text-zinc-700 dark:text-zinc-300"
+                class="list-decimal space-y-3 pl-5 text-xs leading-5 text-zinc-700 dark:text-zinc-300"
             >
                 <template v-if="destination === 'play'">
                     <li>
@@ -229,11 +233,11 @@ async function open(url: string): Promise<void> {
                 </template>
             </ol>
             <div v-if="destination !== 'apk'" class="flex flex-wrap gap-2">
-                <Button @click="open(portal)"
+                <Button size="sm" @click="open(portal)"
                     ><ExternalLink class="h-3.5 w-3.5" />Open
                     {{ platform === 'android' ? 'Play Console' : 'App Store Connect' }}</Button
                 >
-                <Button variant="outline" @click="open(help)">Upload instructions</Button>
+                <Button variant="outline" size="sm" @click="open(help)">Upload instructions</Button>
             </div>
         </template>
     </section>

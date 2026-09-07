@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { computed } from 'vue';
 
 import { createMockBackend } from '../lib/backend-mock';
 import type { AndroidDeviceRun } from '../model/android-device';
@@ -45,7 +46,10 @@ describe('Android release file selection', () => {
                 null,
             );
 
-            expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', false);
+            expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', false, {
+                version: '3.2.0',
+                build: '12',
+            });
             // The release carries the version the project declares, so the artifact matches
             // what the panel showed even when the snapshot is older.
             expect(machines.signedRelease).toHaveBeenCalledWith('pixel-builder', null, outputs, {
@@ -72,8 +76,9 @@ describe('Android build and run', () => {
             error: null as string | null,
             androidDevices: {
                 available: true,
-                devices: [{ serial: 'phone', state: 'device', model: null }],
+                devices: [{ serial: 'phone', state: 'device', model: null, network: null }],
                 issue: null,
+                hostNetworks: [],
             },
             androidDeviceApk: 'release',
             androidDeviceRun: null as AndroidDeviceRun | null,
@@ -96,7 +101,10 @@ describe('Android build and run', () => {
         const { store, session } = await fixture();
         await store.startAndroidPreview('pixel-builder', 'phone');
         expect(machines.sync).toHaveBeenCalledWith('pixel-builder');
-        expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', false);
+        expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', false, {
+            version: '3.2.0',
+            build: '12',
+        });
         expect(machines.runAndroidDevice).toHaveBeenCalledWith('pixel-builder', {
             kind: 'debug',
             serial: 'phone',
@@ -113,7 +121,10 @@ describe('Android build and run', () => {
         expect(draft.androidAllowHttp).toBe(false);
         draft.androidAllowHttp = true;
         await store.startAndroidPreview('pixel-builder', 'phone');
-        expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', true);
+        expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', true, {
+            version: '3.2.0',
+            build: '12',
+        });
         expect(store.builds['pixel-builder']?.request.androidAllowHttp).toBe(true);
         expect(session.view.android!.workspace!.lastBuild!.allowHttp).toBe(true);
         expect(machines.runAndroidDevice).toHaveBeenCalledWith('pixel-builder', {
@@ -137,7 +148,10 @@ describe('Android build and run', () => {
             },
             null,
         );
-        expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', true);
+        expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', true, {
+            version: '3.2.0',
+            build: '12',
+        });
         expect(store.builds['pixel-builder']?.status).toBe('complete');
         expect(machines.runAndroidDevice).not.toHaveBeenCalled();
     });
@@ -151,7 +165,10 @@ describe('Android build and run', () => {
         expect(store.draft('pixel-builder').androidAllowHttp).toBe(false);
         expect(draft.androidAllowHttp).toBe(false);
         await store.startAndroidPreview('pixel-builder', 'phone');
-        expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', false);
+        expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', false, {
+            version: '3.2.0',
+            build: '12',
+        });
     });
 
     it('clears the HTTP opt-in when a paused preview continues with another project', async () => {
@@ -163,7 +180,10 @@ describe('Android build and run', () => {
         session.view.android!.workspace!.localPath = '/home/you/different-project';
         session.view.runtime.state = 'running';
         await store.resume('pixel-builder');
-        expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', false);
+        expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', false, {
+            version: '3.2.0',
+            build: '12',
+        });
         expect(store.builds['pixel-builder']?.request.androidAllowHttp).toBe(false);
     });
 
@@ -317,5 +337,28 @@ describe('Android build and run', () => {
         expect(store.builds['pixel-builder']?.status).toBe('complete');
         expect(store.builds['pixel-builder']?.failure).toBeNull();
         expect(previous?.failure?.message).toBe('The device rejected the APK.');
+    });
+});
+
+describe('the build draft', () => {
+    beforeEach(() => {
+        vi.resetModules();
+        vi.clearAllMocks();
+    });
+
+    it('hands out the reactive draft the store keeps, so a step sees the choices made on it', async () => {
+        const view = await createMockBackend().getMachine('pixel-builder');
+        machines.session.mockReturnValue({ view, operation: null, error: null });
+        const { useBuildFlowStore } = await import('./build-flow');
+        const store = useBuildFlowStore();
+
+        // A build step captures the draft once in its setup and binds its controls to it.
+        const draft = store.draft('pixel-builder');
+        const source = computed(() => draft.source);
+        expect(source.value).toBe('latest');
+
+        draft.source = 'snapshot';
+        expect(source.value).toBe('snapshot');
+        expect(store.draft('pixel-builder')).toBe(draft);
     });
 });
