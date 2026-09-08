@@ -329,9 +329,47 @@ mod tests {
 
         fn browser(&self, name: &str, script: &str, url: &'static str) -> Browser {
             let executable = self.0.join(name);
-            fs::write(&executable, script).unwrap();
+            // Every fixture script answers the probe by doing nothing, so the wait below can
+            // ask whether the kernel will run this file without touching what the test then
+            // asserts the script did.
+            let script = script.replacen(
+                "#!/bin/sh\n",
+                "#!/bin/sh\nif [ \"$1\" = --buildbridge-probe ]; then exit 0; fi\n",
+                1,
+            );
+            fs::write(&executable, &script).unwrap();
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            wait_until_runnable(&executable);
             Browser { executable, url }
+        }
+    }
+
+    /// Waits until the kernel will actually run the script that was just written. This binary's
+    /// tests run on many threads and several of them spawn child processes; a fork between the
+    /// write above and a later exec leaves the forked child holding the write descriptor until
+    /// it execs its own program, and the kernel refuses to run a file that any process still
+    /// has open for writing. Nothing buildbridge ships execs a file it has just written, so the
+    /// wait belongs with the fixture rather than in `launch`.
+    fn wait_until_runnable(executable: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let attempt = Command::new(executable)
+                .arg("--buildbridge-probe")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            match attempt {
+                Ok(_) => return,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && Instant::now() < deadline => {}
+                Err(error) => panic!(
+                    "the fixture browser {} could not be run: {error}",
+                    executable.display()
+                ),
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 

@@ -47,11 +47,9 @@ impl Drop for HttpFixture {
 #[cfg(unix)]
 #[test]
 fn debug_http_recipe_keeps_job_completion_and_failure_status_and_cleans_init() {
-    use std::os::unix::fs::PermissionsExt;
-
     let fixture = HttpFixture::new();
     let gradlew = fixture.0.join("gradlew");
-    fs::write(
+    crate::test_scripts::write_runnable(
         &gradlew,
         r#"#!/bin/sh
 set -eu
@@ -67,9 +65,7 @@ for argument do
 done
 exit "$FIXTURE_GRADLE_STATUS"
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&gradlew, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     for (allow_http, code) in [(true, 0), (true, 7), (false, 0)] {
         let job_name = format!("fixture-{allow_http}-{code}");
         let body = android_gradle_command(

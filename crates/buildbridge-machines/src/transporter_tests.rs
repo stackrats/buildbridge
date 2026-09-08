@@ -13,7 +13,6 @@ struct UploadFixture {
 
 impl UploadFixture {
     fn new() -> Self {
-        use std::os::unix::fs::PermissionsExt;
         let directory = std::env::temp_dir().join(format!(
             "buildbridge-upload-test-{}-{}",
             std::process::id(),
@@ -26,8 +25,7 @@ impl UploadFixture {
         let ipa = directory.join("retained ' $(shell) IPA.ipa");
         fs::write(&ipa, IPA).unwrap();
         let mock = directory.join("iTMSTransporter");
-        fs::write(&mock, MOCK_TRANSPORTER).unwrap();
-        fs::set_permissions(&mock, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_scripts::write_runnable(&mock, MOCK_TRANSPORTER);
         Self {
             directory,
             digest: native_sha256(&ipa).unwrap(),

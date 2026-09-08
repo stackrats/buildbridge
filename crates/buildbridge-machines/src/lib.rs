@@ -39,6 +39,8 @@ mod signing;
 mod smoke_build;
 mod ssh;
 mod templates;
+#[cfg(test)]
+mod test_scripts;
 mod transporter;
 mod usage;
 mod usb;

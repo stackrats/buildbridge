@@ -1133,7 +1133,6 @@ fn adb_output(command: &mut Command, timeout: Duration) -> Result<AdbOutput, Str
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     const SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
     static TEST_DEVICE: Mutex<()> = Mutex::new(());
@@ -1158,7 +1157,9 @@ mod tests {
             ));
             fs::create_dir(&root).unwrap();
             let adb = root.join("adb");
-            fs::write(&adb, r#"#!/bin/sh
+            crate::test_scripts::write_runnable(
+                &adb,
+                r#"#!/bin/sh
 printf '%s\n' "$@" >> "$0.args"
 printf '%s\n' '__END__' >> "$0.args"
 scenario=$(cat "$0.scenario")
@@ -1221,8 +1222,8 @@ else
     printf '%s\n' 'unexpected command' >&2
     exit 2
 fi
-"#).unwrap();
-            fs::set_permissions(&adb, fs::Permissions::from_mode(0o700)).unwrap();
+"#,
+            );
             fs::write(root.join("adb.scenario"), scenario).unwrap();
             let apk = root.join("App $(touch never) preview.apk");
             fs::write(&apk, b"abc").unwrap();
