@@ -83,6 +83,11 @@ impl Server {
                     }
                     Err(error) => panic!("test service failed: {error}"),
                 };
+                // macOS and the BSDs give an accepted socket the listener's non-blocking
+                // flag; Linux always hands back a blocking one. Without this the first read
+                // returns WouldBlock before the client has sent anything, and the read
+                // timeout below would never apply either.
+                stream.set_nonblocking(false).unwrap();
                 let request = read_request(&stream);
                 let (status, response) = reply(index, &request);
                 stored.lock().unwrap().push(request);
