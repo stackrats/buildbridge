@@ -204,7 +204,28 @@ pub async fn configure_machine(
     let mut registry = machines::load_registry(app)?;
     let index = registry.position(&machine_id)?;
     registry.ensure_unique_ssh_port(&profile, Some(&machine_id))?;
-    ensure_machine_profile_can_change(&paths, &registry.machines[index].config, &profile).await?;
+    let change =
+        ensure_machine_profile_can_change(&paths, &registry.machines[index].config, &profile)
+            .await?;
+    if matches!(change, ProfileChange::RecreateContainer) {
+        // The container goes before the profile is saved: a removal that fails leaves the
+        // machine exactly as it was, rather than storing hardware its container does not
+        // have. Only the container is removed — the disk, the NVRAM, the control directory
+        // and a toolchain's home are bound from this host and stay, so the next start builds
+        // the new hardware around the macOS or the SDK that is already there.
+        let guard = begin_machine_operation(app, &machine_id, "reconfiguring")?;
+        let container_name = paths.container_name.clone();
+        let scope = guard.scope();
+        let removal = tokio::task::spawn_blocking(move || {
+            let _operation = buildbridge_machines::enter_operation(scope);
+            buildbridge_machines::remove(&container_name).map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|result| result);
+        drop(guard);
+        removal?;
+    }
     registry.machines[index].config = profile;
     machines::save_registry(app, &registry)?;
     app.notify_machines_changed();

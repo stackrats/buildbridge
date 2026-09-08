@@ -23,9 +23,16 @@ watch(open, (value) => {
     }
 });
 
-const hardwareLocked = computed(
+// Memory, cores and the SSH port reach a machine through the argv its container was created
+// with, so they are fixed only while it runs; saving them on a stopped machine removes the
+// container and the next start creates it again with the new profile.
+const hardwareLocked = computed(() =>
+    ['running', 'paused', 'restarting'].includes(view.runtime.state),
+);
+const containerExists = computed(
     () => view.runtime.state !== 'missing' && view.runtime.state !== 'unavailable',
 );
+const android = computed(() => view.profile.provider === 'android_toolchain');
 
 async function save(): Promise<void> {
     saving.value = true;
@@ -43,18 +50,22 @@ async function save(): Promise<void> {
 <template>
     <Modal v-model:open="open" title="Machine profile" :busy="saving">
         <form :id="formId" class="space-y-3" @submit.prevent="save">
-            <Callout
-                v-if="hardwareLocked && view.profile.provider === 'android_toolchain'"
-                tone="neutral"
-            >
-                The memory and CPU limits are fixed while the container exists. To change them, stop
-                the toolchain and discard its container from the machine menu; the first build
-                afterwards downloads the SDK again.
+            <Callout v-if="hardwareLocked && android" tone="neutral">
+                The memory and CPU limits are fixed while the toolchain runs. Stop it to change
+                them; its home with the SDK, the caches and the synchronized project stays on this
+                host, so nothing is downloaded again.
             </Callout>
             <Callout v-else-if="hardwareLocked" tone="neutral">
-                Memory, cores, the SSH port, and the installer are fixed while the container exists.
-                To change them, stop the machine and discard its container from the machine menu;
-                that deletes its macOS disk.
+                Memory, cores, the SSH port, and the installer are fixed while the machine runs.
+                Stop it to change them; its macOS disk stays on this host.
+            </Callout>
+            <Callout v-else-if="containerExists && android" tone="neutral">
+                Saving new limits recreates the toolchain container the next time it starts. Its
+                home with the SDK, the caches and the synchronized project stays on this host.
+            </Callout>
+            <Callout v-else-if="containerExists" tone="neutral">
+                Saving new memory, cores or an SSH port recreates the container the next time the
+                machine starts. Its macOS disk stays on this host, so nothing is installed again.
             </Callout>
             <MachineProfileForm
                 v-model="profile"

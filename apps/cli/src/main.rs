@@ -33,7 +33,7 @@ struct Cli {
 enum Command {
     /// The host's readiness and every machine's state.
     Status,
-    /// Machines: create, start, stop, inspect, discard, delete.
+    /// Machines: create, configure, start, stop, inspect, discard, delete.
     #[command(subcommand)]
     Machine(MachineCommand),
     /// Templates: prepared machines saved once and cloned in seconds.
@@ -127,6 +127,24 @@ enum MachineCommand {
         /// memory and cores are limits on its builds.
         #[arg(long, value_enum)]
         provider: Option<ProviderArg>,
+    },
+    /// Change a machine's profile, moving only what is named here. The name changes at any
+    /// time; memory, cores and the SSH port need the machine stopped, and saving one of them
+    /// removes its container so the next start creates it again with the new profile — the
+    /// macOS disk and a toolchain's home are on this host and stay. The installer can only be
+    /// chosen while the disk is still empty.
+    Configure {
+        machine: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        memory: Option<u32>,
+        #[arg(long)]
+        cores: Option<u32>,
+        #[arg(long)]
+        port: Option<u16>,
+        #[arg(long)]
+        macos: Option<String>,
     },
     Start {
         machine: String,
@@ -469,6 +487,40 @@ fn engine(json: bool) -> Result<Engine, String> {
 /// The inputs the engine takes are the desktop's JSON shapes; built here the same way.
 fn input<T: DeserializeOwned>(value: Value) -> Result<T, String> {
     serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+/// The stored profile with only the named fields moved. `configure_machine` is handed a whole
+/// profile and replaces the stored one with it, so everything the command leaves out has to
+/// come back exactly as it is stored, and naming nothing is a mistake rather than a no-op.
+fn configured_profile(
+    stored: &Value,
+    name: Option<String>,
+    memory: Option<u32>,
+    cores: Option<u32>,
+    port: Option<u16>,
+    macos: Option<String>,
+) -> Result<Value, String> {
+    let changes: Vec<(&str, Value)> = [
+        name.map(|value| ("name", Value::from(value))),
+        memory.map(|value| ("memoryGib", Value::from(value))),
+        cores.map(|value| ("cpuCores", Value::from(value))),
+        port.map(|value| ("sshPort", Value::from(value))),
+        macos.map(|value| ("macosRelease", Value::from(value))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if changes.is_empty() {
+        return Err(
+            "Name what to change: --name, --memory, --cores, --port or --macos.".to_string(),
+        );
+    }
+    let mut profile = stored.clone();
+    for (key, value) in changes {
+        profile[key] = value;
+    }
+
+    Ok(profile)
 }
 
 /// The version a build was asked to carry: either flag alone keeps the other half as the
@@ -1041,6 +1093,43 @@ async fn run(cli: Cli) -> Result<(), String> {
                 |list| {
                     print_machine_list(list);
                     println!("Created. `buildbridge machine start <id>` starts it.");
+                },
+            )
+        }
+        Command::Machine(MachineCommand::Configure {
+            machine,
+            name,
+            memory,
+            cores,
+            port,
+            macos,
+        }) => {
+            let stored = serde_json::to_value(e::get_machine(engine, machine.clone()).await?)
+                .map_err(|error| error.to_string())?;
+            // Whether the machine has a container to lose: a hardware change removes it, and
+            // the line below says so rather than leaving a machine that was there and is now
+            // missing unexplained.
+            let had_container = !matches!(
+                stored["runtime"]["state"].as_str(),
+                Some("missing") | Some("unavailable") | None
+            );
+            let profile = configured_profile(&stored["profile"], name, memory, cores, port, macos)?;
+            report(
+                json,
+                &e::configure_machine(engine, machine, input(profile)?).await?,
+                |view| {
+                    print_machine(view);
+                    println!(
+                        "{:<12} {} GiB · {} cores",
+                        "hardware",
+                        text(&view["profile"]["memoryGib"]),
+                        text(&view["profile"]["cpuCores"])
+                    );
+                    if had_container && view["runtime"]["state"].as_str() == Some("missing") {
+                        println!(
+                            "The container was removed; starting the machine creates it again with this profile."
+                        );
+                    }
                 },
             )
         }
@@ -1967,6 +2056,43 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configuring_a_machine_moves_only_what_is_named() {
+        let stored = json!({
+            "name": "Android builder",
+            "provider": "android_toolchain",
+            "macosRelease": "sequoia",
+            "memoryGib": 8,
+            "cpuCores": 4,
+            "sshPort": 50922,
+        });
+
+        let profile = configured_profile(&stored, None, Some(12), None, None, None).unwrap();
+        assert_eq!(profile["memoryGib"], json!(12));
+        // The engine replaces the stored profile with this one, so a field the command did
+        // not name must come back as it was rather than as a default.
+        assert_eq!(profile["cpuCores"], json!(4));
+        assert_eq!(profile["name"], json!("Android builder"));
+        assert_eq!(profile["sshPort"], json!(50922));
+        assert_eq!(profile["provider"], json!("android_toolchain"));
+        assert_eq!(profile["macosRelease"], json!("sequoia"));
+
+        let renamed = configured_profile(
+            &stored,
+            Some("Pixel builder".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(renamed["name"], json!("Pixel builder"));
+        assert_eq!(renamed["memoryGib"], json!(8));
+
+        // Naming nothing would silently rewrite the profile with itself.
+        assert!(configured_profile(&stored, None, None, None, None, None).is_err());
+    }
 
     #[test]
     fn the_macos_release_follows_the_provider_unless_named() {

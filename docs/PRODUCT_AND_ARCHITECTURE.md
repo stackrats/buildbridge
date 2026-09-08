@@ -1505,6 +1505,33 @@ The following decisions should be treated as settled until this document is deli
     itself is a model function with its own tests rather than a closure inside the component,
     because what a machine answers to is a product decision and will grow.
 
+66. A machine's hardware is editable once it is stopped (2026-09-08). Memory, cores and the SSH
+    port used to be fixed for the life of a container, and the only way to change them was to
+    discard the container — which deletes the macOS disk, or the toolchain's home with the SDK
+    and the caches. That was the wrong price: none of those numbers is stored in the container,
+    they only reach the machine through the argv it was created with. So the rule is now the
+    machine's state rather than the container's existence. While it runs, the hardware fields
+    are fixed and the name is not; stopped, all of them change, and saving a changed one removes
+    the container so the next start creates it again from the saved profile. Everything a
+    machine keeps is bound from this host — the disk and its NVRAM, the control directory, a
+    toolchain's home — so a recreate costs a boot, never an install or an SDK download. Two
+    things still refuse. The macOS installer is not hardware: it names the release that is on
+    the disk, not one that could be installed over it, so it closes as soon as that disk is
+    ready, whether or not a container exists — the check is the disk, not the container,
+    because a recreate leaves a machine with a disk and no container. And a machine made before
+    the disk moved to this host keeps macOS inside its container, where removing the container
+    would take the installation with it; that one is refused with the same instruction the USB
+    rebuild gives, to enable USB first and move the disk out. The removal happens under the
+    machine's operation lock and before the registry is written, so a removal that fails leaves
+    the machine exactly as it was rather than storing hardware its container does not have.
+    Editing a profile is `configure_machine` in the engine, so it is `buildbridge machine
+    configure <machine> [--name] [--memory] [--cores] [--port] [--macos]` on the command line
+    as well as the desktop's profile dialog: the command reads the stored profile and moves
+    only what it names, since the engine is handed a whole profile and anything left out would
+    otherwise be reset. Both clients disable or refuse the same fields, but neither decides —
+    the engine refuses a running machine, an installed release and a disk still inside its
+    container whichever client asks.
+
 ### Credential loss and recovery
 
 The host's operating-system keyring holds two things: the runner token and every signing kit. A

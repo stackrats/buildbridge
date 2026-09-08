@@ -356,11 +356,25 @@ pub(crate) fn build_mac_guest_view(
     })
 }
 
+/// What saving a profile has to do to the container a machine already has.
+pub(crate) enum ProfileChange {
+    /// Nothing the container was created with moved, so it stays exactly as it is.
+    KeepContainer,
+    /// Memory, cores and the SSH port reach a machine only through the argv its container was
+    /// created with, so the stopped container is removed and the next start creates it again
+    /// from the saved profile. Everything the machine keeps is bound from this host — the
+    /// macOS disk and its NVRAM, a toolchain's home with the SDK, the caches and the
+    /// synchronized project — and none of it goes with the container.
+    RecreateContainer,
+}
+
+/// Whether this profile may replace the stored one, and what that costs the container. The
+/// name is free to change at any time; the hardware is fixed only while the machine runs.
 pub(crate) async fn ensure_machine_profile_can_change(
     paths: &MachinePaths,
     stored: &MachineConfig,
     profile: &MachineConfig,
-) -> Result<(), String> {
+) -> Result<ProfileChange, String> {
     if stored.provider != profile.provider {
         return Err(
             "The provider is fixed when a machine is created; make a new machine to try another one."
@@ -372,11 +386,26 @@ pub(crate) async fn ensure_machine_profile_can_change(
         && stored.cpu_cores == profile.cpu_cores
         && stored.ssh_port == profile.ssh_port;
     if unchanged_hardware {
-        return Ok(());
+        return Ok(ProfileChange::KeepContainer);
+    }
+
+    let provider = stored.provider;
+    // The release names the macOS that is on the disk, not one that could be installed over
+    // it: a container recreated for another release still boots the disk that is already
+    // there. The choice closes as soon as that installation exists, whether or not a
+    // container does.
+    if provider.is_macos() && stored.macos_release != profile.macos_release {
+        let disk = buildbridge_machines::MachineDisk::for_machine(stored, &paths.disk_dir(), None)
+            .map_err(|error| error.to_string())?;
+        if disk.ready() {
+            return Err(
+                "This machine has already installed macOS; the installer is only a choice while its disk is empty. Discard the container to install a different release, which deletes that disk."
+                    .to_string(),
+            );
+        }
     }
 
     let container_name = paths.container_name.clone();
-    let provider = stored.provider;
     let runtime = tokio::task::spawn_blocking(move || {
         buildbridge_machines::status_for(&container_name, provider)
     })
@@ -384,18 +413,39 @@ pub(crate) async fn ensure_machine_profile_can_change(
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
 
-    if !matches!(
-        runtime.state,
-        ContainerState::Missing | ContainerState::Unavailable
-    ) {
+    if is_live(runtime.state) {
         return Err(if provider.is_macos() {
-            "Stop the machine and discard its container before changing its hardware profile. The name can be changed at any time."
+            "Stop the machine before changing its hardware profile; starting it again gives it the new one. The name can be changed while it runs."
                 .to_string()
         } else {
-            "Stop the toolchain and discard its container before changing its limits. The name can be changed at any time."
+            "Stop the toolchain before changing its limits; starting it again gives it the new ones. The name can be changed while it runs."
                 .to_string()
         });
     }
+    if matches!(
+        runtime.state,
+        ContainerState::Missing | ContainerState::Unavailable
+    ) {
+        return Ok(ProfileChange::KeepContainer);
+    }
 
-    Ok(())
+    // A machine made before the disk moved to this host keeps macOS inside its container, so
+    // removing that container would take the installation with it.
+    if provider.is_macos() {
+        let container_name = paths.container_name.clone();
+        let layout = tokio::task::spawn_blocking(move || {
+            buildbridge_machines::inspect_container_layout(&container_name)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+        if !layout.is_some_and(|layout| layout.disk_on_host) {
+            return Err(
+                "This machine still keeps its macOS disk inside its container, so the container cannot be recreated for a new hardware profile; enable USB on this machine first, which moves the disk to this host."
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(ProfileChange::RecreateContainer)
 }

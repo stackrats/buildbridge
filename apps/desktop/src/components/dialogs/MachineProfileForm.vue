@@ -36,7 +36,7 @@ const {
     templateName = null,
     templateVersion = null,
 } = defineProps<{
-    /** True while a container exists: memory, cores, port, and release cannot change. */
+    /** True while the machine runs: memory, cores, port, and release change only when it is stopped. */
     hardwareLocked?: boolean;
     /** True for an existing machine: its directory belongs to the provider that made it. */
     providerLocked?: boolean;
@@ -291,7 +291,7 @@ const releaseWarning = computed(() => {
                     label="macOS installer"
                     :hint="
                         hardwareLocked
-                            ? 'Fixed once the container exists.'
+                            ? 'Stop the machine to change this.'
                             : 'Fetched from Apple during the first boot; Xcode 26 needs Sequoia or newer.'
                     "
                 >
