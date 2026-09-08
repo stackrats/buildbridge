@@ -3,6 +3,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -262,19 +263,59 @@ cleanup:
     return status;
 }
 
+/*
+ * Set when the operation is cut short rather than finishing: the desktop cancelled it and the
+ * bridge closed, so this process is being hung up on, or it was asked to stop. The handler does
+ * nothing but record that, because a signal handler may not call into Security or Core
+ * Foundation; the wait below notices, stops the tool it is running, and returns failure, which
+ * takes every caller through the cleanup that puts the keychain back.
+ */
+static volatile sig_atomic_t interrupted = 0;
+
+static void note_interrupt(int signal_number) {
+    (void)signal_number;
+    interrupted = 1;
+}
+
+static void catch_interruptions(void) {
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = note_interrupt;
+    sigemptyset(&action.sa_mask);
+    /* No SA_RESTART: the wait below must return so the interruption is noticed. */
+    action.sa_flags = 0;
+    /* SIGPIPE arrives first when the bridge drops, since progress is written to it. */
+    int signals[] = {SIGHUP, SIGINT, SIGTERM, SIGPIPE};
+    for (size_t index = 0; index < sizeof(signals) / sizeof(*signals); index++) {
+        sigaction(signals[index], &action, NULL);
+    }
+}
+
 static int run_tool(const char *path, char *const arguments[]) {
+    if (interrupted) return 0;
+
     pid_t child = fork();
     if (child < 0) return 0;
     if (child == 0) {
+        /* Its own group, so one signal stops the tool and everything it started. */
+        setpgid(0, 0);
         execv(path, arguments);
         _exit(127);
     }
+    setpgid(child, child);
 
     int wait_status = 0;
     while (waitpid(child, &wait_status, 0) < 0) {
         if (errno != EINTR) return 0;
+        if (interrupted) {
+            kill(-child, SIGTERM);
+            /* Reap it so it is not left behind, then report the operation as failed. */
+            while (waitpid(child, &wait_status, 0) < 0 && errno == EINTR) {
+            }
+            return 0;
+        }
     }
-    return WIFEXITED(wait_status) && WEXITSTATUS(wait_status) == 0;
+    return !interrupted && WIFEXITED(wait_status) && WEXITSTATUS(wait_status) == 0;
 }
 
 static char *make_build_setting(const char *name, const char *value) {
@@ -296,26 +337,61 @@ static char *make_build_setting(const char *name, const char *value) {
  * fails with errSecInternalComponent even though the identity is sitting unlocked in
  * buildbridge's own keychain.
  *
- * So for the length of the operation the signing keychain becomes the only keychain the user
- * has, and the default; both are put back afterwards, whichever way the operation ends. This
- * is the same thing Apple's own guidance has continuous integration do, and it is what makes
- * an export work without anyone signing in to the machine.
+ * So for the length of the operation the signing keychain goes to the front of the search list
+ * and becomes the default one; both are put back afterwards, whichever way the operation ends,
+ * including when it is cancelled and this process is hung up on. This is the same thing
+ * Apple's own guidance has continuous integration do, and it is what makes an export work
+ * without anyone signing in to the machine.
  */
 static int take_over_keychain(
     SecKeychainRef keychain,
     SecKeychainRef *previous_default,
     CFArrayRef *previous_search_list
 ) {
-    OSStatus status = SecKeychainCopyDefault(previous_default);
-    if (status != errSecSuccess) *previous_default = NULL;
-    status = SecKeychainCopySearchList(previous_search_list);
+    OSStatus status = SecKeychainCopySearchList(previous_search_list);
     if (status != errSecSuccess) *previous_search_list = NULL;
 
-    CFMutableArrayRef only = CFArrayCreateMutable(NULL, 1, &kCFTypeArrayCallBacks);
-    if (only == NULL) return 0;
-    CFArrayAppendValue(only, keychain);
-    status = SecKeychainSetSearchList(only);
-    CFRelease(only);
+    status = SecKeychainCopyDefault(previous_default);
+    if (status != errSecSuccess) *previous_default = NULL;
+    /*
+     * Restoring the default to this same keychain would make a takeover that was never undone
+     * permanent: the run after it would find ours already in place, record that as what to go
+     * back to, and hand it on. When the default is already ours, the machine's own first
+     * keychain is what to put back instead, so one clean run repairs the state.
+     */
+    if (*previous_default != NULL && CFEqual(*previous_default, keychain)) {
+        CFRelease(*previous_default);
+        *previous_default = NULL;
+        if (*previous_search_list != NULL) {
+            CFIndex count = CFArrayGetCount(*previous_search_list);
+            for (CFIndex index = 0; index < count; index++) {
+                SecKeychainRef entry =
+                    (SecKeychainRef)CFArrayGetValueAtIndex(*previous_search_list, index);
+                if (!CFEqual(entry, keychain)) {
+                    *previous_default = (SecKeychainRef)CFRetain(entry);
+                    break;
+                }
+            }
+        }
+    }
+
+    /* Ours goes first so it is found first, and the machine's own keychains stay reachable:
+     * if this process is killed outright and the restore below never runs, the guest is left
+     * with a search list it can still use rather than one holding nothing but ours. */
+    CFMutableArrayRef ordered = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+    if (ordered == NULL) return 0;
+    CFArrayAppendValue(ordered, keychain);
+    if (*previous_search_list != NULL) {
+        CFIndex count = CFArrayGetCount(*previous_search_list);
+        for (CFIndex index = 0; index < count; index++) {
+            const void *entry = CFArrayGetValueAtIndex(*previous_search_list, index);
+            if (!CFEqual(entry, keychain)) {
+                CFArrayAppendValue(ordered, entry);
+            }
+        }
+    }
+    status = SecKeychainSetSearchList(ordered);
+    CFRelease(ordered);
     if (status != errSecSuccess) return 0;
 
     return SecKeychainSetDefault(keychain) == errSecSuccess;
@@ -638,6 +714,8 @@ cleanup:
 }
 
 int main(int argc, char **argv) {
+    /* Every mode puts something back on the way out, so none of them may die on a signal. */
+    catch_interruptions();
     if (argc > 1 && strcmp(argv[1], "--probe") == 0) {
         return run_code_signing_probe(argc, argv);
     }

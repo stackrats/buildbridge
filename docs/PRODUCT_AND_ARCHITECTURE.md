@@ -1477,6 +1477,21 @@ The following decisions should be treated as settled until this document is deli
     on a real machine: the same project that failed to export now produces a verified IPA, and
     the guest's default keychain and search list are unchanged afterwards.
 
+    Being put back matters more than the taking over, so three things guarantee it. The helper
+    catches the hangup, interrupt, termination and broken-pipe signals rather than dying on
+    them: the handler only records that it happened, since a signal handler may not call into
+    Security, and the wait around the running tool notices, stops that tool and everything it
+    started, and returns failure, which takes the same cleanup path a finished run takes. The
+    tool it runs is given its own process group so one signal reaches all of it. And the keychain
+    it goes back to is never buildbridge's own — a run that finds its own keychain already the
+    default treats the machine's first other keychain as what to restore, so a state left behind
+    by a run that was killed outright repairs itself on the next one rather than being handed on.
+    The search list keeps the machine's own keychains and only puts buildbridge's in front,
+    which is what makes such a state harmless in the meantime. Verified on the machine: an
+    archive cancelled while it was signing left the default keychain as the machine's own and
+    no `xcodebuild` behind it, and a clean run afterwards both exported and repaired a default
+    that an earlier interrupted run had left pointing at buildbridge's keychain.
+
 ### Credential loss and recovery
 
 The host's operating-system keyring holds two things: the runner token and every signing kit. A
