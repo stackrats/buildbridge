@@ -1461,6 +1461,22 @@ The following decisions should be treated as settled until this document is deli
     immediately before the Gradle invocation, in both the debug build and the release, so it
     sees whatever the framework just wrote.
 
+64. A headless export needs the keychain to be the machine's own (2026-09-08). Signing an
+    archive and exporting it are told about the keychain differently. The archive is signed with
+    `--keychain` in its settings file, so `codesign` is pointed straight at buildbridge's
+    keychain and never has to look. `xcodebuild -exportArchive` re-signs the app itself and
+    looks the identity up through the user's *default* keychain and search list instead. On a
+    machine nobody has signed in to, the login keychain is the default and it is locked, so that
+    lookup failed with `errSecInternalComponent` even though the identity was sitting unlocked
+    in buildbridge's own keychain a line above. The archive succeeded and the export failed on
+    the same run, which is why it had gone unnoticed: it only ever worked on a machine whose
+    screen someone had logged into, and the first export after a headless start would fail.
+    The signing helper now makes buildbridge's keychain the only keychain and the default one
+    for the length of the operation, and puts the previous default and search list back however
+    the operation ends — the same thing Apple's guidance has continuous integration do. Verified
+    on a real machine: the same project that failed to export now produces a verified IPA, and
+    the guest's default keychain and search list are unchanged afterwards.
+
 ### Credential loss and recovery
 
 The host's operating-system keyring holds two things: the runner token and every signing kit. A

@@ -288,6 +288,51 @@ static char *make_build_setting(const char *name, const char *value) {
     return setting;
 }
 
+/*
+ * Xcode's archive is told which keychain to sign from, because the settings file carries
+ * `--keychain`. Its export is not: `xcodebuild -exportArchive` re-signs the app itself and
+ * looks the identity up through the user's default keychain and search list. On a machine
+ * nobody has logged into, the login keychain is both the default and locked, and that lookup
+ * fails with errSecInternalComponent even though the identity is sitting unlocked in
+ * buildbridge's own keychain.
+ *
+ * So for the length of the operation the signing keychain becomes the only keychain the user
+ * has, and the default; both are put back afterwards, whichever way the operation ends. This
+ * is the same thing Apple's own guidance has continuous integration do, and it is what makes
+ * an export work without anyone signing in to the machine.
+ */
+static int take_over_keychain(
+    SecKeychainRef keychain,
+    SecKeychainRef *previous_default,
+    CFArrayRef *previous_search_list
+) {
+    OSStatus status = SecKeychainCopyDefault(previous_default);
+    if (status != errSecSuccess) *previous_default = NULL;
+    status = SecKeychainCopySearchList(previous_search_list);
+    if (status != errSecSuccess) *previous_search_list = NULL;
+
+    CFMutableArrayRef only = CFArrayCreateMutable(NULL, 1, &kCFTypeArrayCallBacks);
+    if (only == NULL) return 0;
+    CFArrayAppendValue(only, keychain);
+    status = SecKeychainSetSearchList(only);
+    CFRelease(only);
+    if (status != errSecSuccess) return 0;
+
+    return SecKeychainSetDefault(keychain) == errSecSuccess;
+}
+
+static void restore_keychain(
+    SecKeychainRef previous_default,
+    CFArrayRef previous_search_list
+) {
+    if (previous_search_list != NULL) {
+        SecKeychainSetSearchList(previous_search_list);
+    }
+    if (previous_default != NULL) {
+        SecKeychainSetDefault(previous_default);
+    }
+}
+
 static int run_signed_archive(int argc, char **argv) {
     if (argc != 11) {
         fprintf(stderr, "invalid_archive_arguments\n");
@@ -303,6 +348,9 @@ static int run_signed_archive(int argc, char **argv) {
 
     int result = 1;
     SecKeychainRef keychain = NULL;
+    SecKeychainRef previous_default = NULL;
+    CFArrayRef previous_search_list = NULL;
+    int took_over_keychain = 0;
     char *keychain_flags = NULL;
     OSStatus status = SecKeychainOpen(argv[2], &keychain);
     if (status != errSecSuccess || keychain == NULL) {
@@ -317,6 +365,14 @@ static int run_signed_archive(int argc, char **argv) {
     );
     if (status != errSecSuccess) {
         result = security_failure("unlock_keychain", status);
+        goto cleanup;
+    }
+
+    took_over_keychain = take_over_keychain(
+        keychain, &previous_default, &previous_search_list
+    );
+    if (!took_over_keychain) {
+        fprintf(stderr, "claim_keychain\n");
         goto cleanup;
     }
 
@@ -392,6 +448,11 @@ static int run_signed_archive(int argc, char **argv) {
     result = 0;
 
 cleanup:
+    if (took_over_keychain) {
+        restore_keychain(previous_default, previous_search_list);
+    }
+    if (previous_default != NULL) CFRelease(previous_default);
+    if (previous_search_list != NULL) CFRelease(previous_search_list);
     if (keychain != NULL) {
         SecKeychainLock(keychain);
         CFRelease(keychain);
