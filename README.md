@@ -7,13 +7,13 @@
   </picture>
 </h1>
 
-### Build, sign, and ship iOS and Android apps locally.
+### Build iOS and Android apps. Right from Linux.
 
-A desktop app for local mobile builds on Linux and macOS. Go from local code to signed releases, with on-device previews, signing, and store uploads in one place.
+No Mac required. One workspace to build for both platforms.
 
 Your hardware. Your signing keys. No cloud build service required.
 
-[Features](#features) · [How it works](#how-it-works) · [Requirements](#requirements) · [Development](#development)
+[Features](#features) · [How it works](#how-it-works) · [Supported projects](#supported-projects) · [Requirements](#requirements) · [Command line](#command-line) · [Development](#development)
 
 <br>
 
@@ -25,129 +25,154 @@ Your hardware. Your signing keys. No cloud build service required.
 
 ## Features
 
-- **Set up once.** Reuse macOS and Android build machines across projects, or use Xcode on your Mac.
-- **Build as you work.** Sync your project and run test builds before setting up release signing.
-- **Test on devices.** Run debug builds on iPhone or Android and inspect your app with Safari or Chrome.
-- **Keep your keys.** Create, import, and reuse Apple signing credentials and Android upload keys in your OS credential vault.
-- **Export signed releases.** Get verified App Store Connect IPAs, Android App Bundles, and APKs.
-- **Publish from the desktop.** Upload IPAs from a managed Mac or create Google Play internal-testing drafts, with guided release steps.
-- **Use the app or CLI.** Manage the same machines and builds from either.
+- **Set up once, build across projects.** Keep your iOS and Android build environments ready for the next app.
+- **Start with a test build.** Compile your iOS app or build an Android debug APK before setting up release signing.
+- **Try it on a phone.** Install Android builds and inspect WebViews in Chrome. iPhone previews through a virtual Mac are experimental.
+- **Keep signing in one place.** Create, import, and reuse credentials stored in your operating system's credential vault.
+- **Get the files you need.** Export signed iOS IPAs and Xcode archives, Android App Bundles for Google Play, and APKs for direct installation.
+- **Upload from the desktop.** Send iOS builds to App Store Connect from your virtual Mac, or create Google Play internal-testing drafts.
+- **Switch between desktop and CLI.** Both use the same machines, projects, and signing credentials.
 
 ## How it works
 
-```text
-                                          Tauri desktop ─┐
-Approved projects ───────────────────┬─ buildbridge engine ◄─ buildbridge CLI
-Credential vault ────────────────────┘   trusted host
-                                          ├─ macOS machine lifecycle ─┐
-                                          ├─ pinned SSH bridge ────────┴─ macOS / Xcode ── archive / IPA
-                                          ├─ docker exec ─────────────── Android toolchain ── bundle / APK
-                                          └─ native Xcode ────────────── This Mac ── archive / IPA
-```
+buildbridge is a desktop app that manages both build environments on your computer. On Linux, iOS builds run in a local macOS virtual machine with Xcode; Android builds run in a Docker container with the Android toolchain.
 
-The engine is the trusted side, running inside the desktop app or the `buildbridge` command line on your host. It owns the machines, approved project folders, signing credentials, and pinned SSH connection to each guest. Everything happens on your own host; buildbridge needs no account and no server.
+1. **Prepare your build environment.** Choose iOS or Android. The app guides you through installing macOS and Xcode for iOS; Android tools prepare themselves. Reuse the environment for future builds and projects.
+2. **Choose your project and build.** Approve a local folder, choose a scheme or module when needed, and run a test build. Follow progress and logs in the app.
+3. **Sign and export.** Add signing credentials when you are ready for a release. Save the IPA, app bundle, or APK to your computer, then upload through the guided publishing steps if you choose.
 
-The desktop guides each machine through two workflows, and the command line drives the same steps:
-
-1. **Setup:** Check the host and create the machine. For a managed macOS machine, install macOS, configure SSH, and download Xcode from Apple in a window of the app, signed in with your own Apple ID; an Android toolchain has nothing else to set up; **This Mac** reports the Xcode and signing identity it found.
-2. **Build:** Set up the project, run the unsigned test build or the debug build, attach signing credentials, and export the signed archive and IPA or the signed app bundle and APK. **On a real device** runs the debug build on a phone, and **Publishing** hands the retained file to its store.
+Local builds need no buildbridge account or server. Sign in to Apple directly inside macOS; buildbridge never collects your Apple Account password or two-factor codes.
 
 |  |  |
 | :-- | :-- |
 | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshot-overview-dark.png"><img alt="The overview listing a macOS builder, a fresh machine and an Android toolchain, each with its progress and last build" src="docs/images/screenshot-overview-light.png"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshot-setup-dark.png"><img alt="A new machine's setup steps, numbered from checking the host through installing macOS, pinning the guest and importing Xcode" src="docs/images/screenshot-setup-light.png"></picture> |
-| **Every machine, at a glance.** What each one is, how far it has got, and what it built last. | **Setup, one step at a time.** Each step says what it needs and what it did; nothing runs behind your back. |
+| **See every build environment.** Check setup progress, status, and the latest build. | **Follow the setup steps.** See what is needed and what to do next. |
 | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshot-archive-dark.png"><img alt="The signed iOS archive step, showing the exported IPA and Xcode archive with their sizes and checksum" src="docs/images/screenshot-archive-light.png"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshot-android-dark.png"><img alt="The signed Android release step, showing the app bundle and APK with their signing certificate fingerprint" src="docs/images/screenshot-android-light.png"></picture> |
-| **Signed iOS archives.** The IPA and the Xcode archive land on your host, with sizes and a checksum. | **Signed Android releases.** The app bundle for Play and the APK for direct installation, with the certificate they were signed by. |
+| **Export for iOS.** Keep the signed IPA and Xcode archive on your computer. | **Export for Android.** Choose an app bundle, an APK, or both. |
 
-buildbridge never collects an Apple Account password or two-factor code. The local macOS login password is asked for once, to install the SSH key into a guest whose fingerprint is already pinned, and is discarded after that one session; the same step can be done by typing commands in the guest Terminal instead. For more detail, see [Product and Architecture](docs/PRODUCT_AND_ARCHITECTURE.md).
+## Supported projects
+
+Bring a **Capacitor, Cordova, React Native, Expo, Flutter, or NativePHP** app, or a native **Xcode or Gradle** project. buildbridge detects the project type from your folder and shows the available schemes or application modules.
+
+| Project | Before your first build |
+| :-- | :-- |
+| Capacitor, Cordova, React Native | Add the framework's iOS or Android project before approving the folder. |
+| Expo | Native projects can be generated in the build environment with `expo prebuild`. |
+| Flutter | Include the platform folders. buildbridge installs a pinned Flutter SDK on first use. |
+| NativePHP | Run `php artisan native:install` locally first. buildbridge builds the generated projects in `nativephp/`. |
+| Native Xcode or Gradle | Include an application target or module. Android uses your Gradle wrapper when present, or a pinned Gradle installation otherwise. |
+
+JavaScript dependencies use the package manager selected by your project's lockfile: pnpm, npm, Yarn, or Bun. CocoaPods runs for iOS projects that use it.
 
 ## Requirements
 
-Any iOS or Android app works out of the box. buildbridge reads the approved folder and recognises what is in front of the native projects: Capacitor, Cordova, React Native, Expo (prebuilding the native projects where the build runs when they are not committed), Flutter (installing the pinned Flutter SDK on first use), or nothing at all for a plain Xcode workspace or project and a plain Gradle project. Dependencies install with the package manager the project locks with (pnpm, npm, Yarn or Bun); CocoaPods runs where the Podfile is; a project offering several schemes or application modules lets you choose. What is required of the folder: a committed Gradle wrapper for Android, and an application target in the Xcode project for iOS.
+### On Linux
 
-For the desktop on Linux:
+Both platforms need Docker Engine accessible to your user.
 
-- Docker Engine reachable by your user
-- For a macOS machine: x86_64 Linux with KVM (`/dev/kvm` readable and writable by your user), an X11 display for the one-time macOS installer console (Docker-OSX) or `/dev/net/tun` (dockur/macos), and OpenSSH client tools
-- Room under `~/.local/share` for each machine: a sparse 200 GB macOS disk (tens of GB used), or a few GB of Android SDK and Gradle caches
+| | iOS | Android |
+| :-- | :-- | :-- |
+| Host | x86_64 Linux with read/write access to `/dev/kvm` | Linux with Docker; no KVM required |
+| Additional tools | OpenSSH client tools; an X11 display for Docker-OSX, or `/dev/net/tun` for dockur/macos | Toolchain installed in the container |
+| Storage per environment | A sparse 200 GB macOS disk, using tens of GB initially | A few GB for the Android SDK and Gradle caches |
 
-An Android toolchain needs only Docker: no KVM, no display, no ports. To run a debug APK on a real Android device, ADB must be installed on the host.
+Machine data is stored under `~/.local/share` by default. To run the desktop from source, see [Development](#development).
 
-For the desktop on a Mac: Xcode with the iOS platform, and an Apple Distribution identity and App Store profile already in the login keychain for signed exports; Docker Desktop for Android machines, which run as `linux/amd64` and so need working amd64 emulation on Apple silicon. Native Mac execution is implemented and covered by automated tests, but has not yet been accepted on physical Apple hardware.
+### On macOS
 
-Optional, to run a Debug build on a real iPhone from a managed macOS machine: the phone on USB, polkit (`pkexec`) to install one udev rule that releases iPhones from `usbmuxd`, and a `plugdev` group. Host-side iPhone sync is off while that rule is installed; the desktop can remove it again. This route is experimental.
+On a Mac, choose **This Mac** to build iOS apps with your installed Xcode and iOS platform. Signed exports also need an Apple Distribution identity and App Store provisioning profile installed on the Mac.
+
+Android builds use Docker Desktop. The container runs as `linux/amd64`, so Apple silicon needs working amd64 emulation. Native Mac execution is covered by automated tests and still awaits validation on physical Apple hardware.
+
+### Device previews
+
+- **Android:** Install ADB on the host to run APKs on a phone or emulator.
+- **iPhone (experimental):** Connect over USB to a managed macOS machine. This needs polkit (`pkexec`) and a `plugdev` group. The app installs a removable udev rule that disables host-side iPhone sync while in place.
+
+### macOS virtualization
 
 Running macOS on hardware that is not Apple's is a self-hosted, experimental route, and Apple's software licence ties macOS virtualization to Apple-branded hardware. That applies to both macOS providers, Docker-OSX and dockur/macos; review it before using buildbridge for production builds. Building with **This Mac** on Apple hardware carries no such condition — it uses the Xcode and the signing identity already installed there. buildbridge signs with your own Apple Developer credentials through Xcode's own tooling either way; it circumvents nothing, and it is not a route around Apple's terms.
 
 ## Command line
 
-The same engine as the desktop, in a terminal, on the same machines:
+The `buildbridge` CLI shares the desktop's machines, projects, and credentials. Run `buildbridge status` to see your host and machines, or `buildbridge --help` for all commands.
+
+**iOS:** Start a prepared macOS machine in the desktop, then build from the terminal. Replace `team-mac` and `ios-signing` with your machine and signing credential IDs, listed by `buildbridge machine list` and `buildbridge signing kits`.
 
 ```sh
-cargo run -p buildbridge-cli -- status
-buildbridge machine create "Team Mac" --from-template xcode-26-ready
-buildbridge machine start team-mac
-buildbridge machine screen team-mac --open     # dockur/macos serves the screen as a web page
 buildbridge project approve team-mac /path/to/app
 buildbridge project sync team-mac
 buildbridge build test team-mac --target device_sdk
-buildbridge signing attach team-mac dist-kit && buildbridge signing provision team-mac
+buildbridge signing attach team-mac ios-signing
+buildbridge signing provision team-mac
 buildbridge build archive team-mac
-buildbridge device attach team-mac 3 9 && buildbridge device run team-mac <udid>
-
-buildbridge machine create "Android builder" --platform android
-buildbridge machine start android-builder
-buildbridge project approve android-builder /path/to/app && buildbridge project sync android-builder
-buildbridge build test android-builder --allow-http   # HTTP APIs in this debug APK only
-buildbridge signing keystore dist-kit --password-stdin < keystore-password.txt
-buildbridge signing attach android-builder dist-kit
-buildbridge build release android-builder --outputs both   # or aab, or apk
 ```
 
-Progress goes to stderr as it happens and results to stdout; `--json` makes both machine
-readable. A machine the desktop is working on is refused with the reason, and the other way
-round. `buildbridge --help` lists every verb.
+**Android:** Create an environment and make a debug APK. For the signed release, the example uses existing Android signing credentials with an upload key and the ID `android-signing`.
+
+```sh
+buildbridge machine create "Android builder" --platform android
+buildbridge machine start android-builder
+buildbridge project approve android-builder /path/to/app
+buildbridge project sync android-builder
+buildbridge build test android-builder
+buildbridge signing attach android-builder android-signing
+buildbridge build release android-builder --outputs both
+```
+
+Use `--outputs aab` or `--outputs apk` to export only one Android format. Progress streams to stderr and results go to stdout; add `--json` for structured output. The desktop and CLI prevent concurrent operations on the same machine.
 
 ## Development
 
-This is a monorepo:
+The desktop uses Tauri and Vue. The CLI and desktop share a Rust engine; the remote control plane is a separate service outside this repository.
 
-```text
-apps/desktop    Tauri and Vue desktop, a thin client of the engine
-apps/cli        The buildbridge command line, the other client
-crates/         Rust: the engine, the machines (Docker-OSX, dockur/macos, the Android toolchain, and the native Mac), and the wire protocol contract
-```
+| Path | Purpose |
+| :-- | :-- |
+| `apps/desktop` | Tauri desktop app and Vue interface |
+| `apps/cli` | `buildbridge` command line |
+| `crates/buildbridge-engine` | Build workflows, machines, signing, and local state |
+| `crates/buildbridge-machines` | macOS providers, Android toolchain, and native Mac execution |
+| `crates/buildbridge-contract` | Versioned protocol for the remote control plane |
+| `crates/buildbridge-runner` | Runner client for that protocol |
 
-Requirements are Rust, Docker, and the Node.js version managed by Vite+.
+See [Product and Architecture](docs/PRODUCT_AND_ARCHITECTURE.md) for the system design, credential handling, and known limitations.
+
+### Run from source
+
+Install Rust, Vite+ (which manages Node.js), and the desktop system dependencies listed in [CI](.github/workflows/ci.yml). Docker is needed to run managed build environments.
 
 ```bash
 vp install
+vp run dev
 ```
 
-Run the apps:
+Run the CLI from source:
 
 ```bash
-vp run dev                              # Tauri desktop
-cargo run -p buildbridge-cli -- status  # the command line, on the same machines
+cargo run -p buildbridge-cli -- status
 ```
 
-The desktop interface can be developed in a plain browser: `vp dev` inside `apps/desktop` serves it against a mock backend with one prepared macOS machine, one fresh machine and one Android builder, no Docker required.
+For interface development, run `vp dev` inside `apps/desktop`. It opens the UI in a browser with sample machines and a mock backend; Docker is not needed.
 
-Run the checks:
+### Checks and builds
+
+Run from the repository root:
 
 ```bash
-vp check                 # format and lint (vp fmt, vp lint on their own); --fix applies
-vp run -r typecheck      # desktop type check
-vp test --run            # desktop unit tests, inside apps/desktop
-cargo test --workspace   # Rust workspace tests
+vp check
+vp run --filter @buildbridge/desktop typecheck
+vp run --filter @buildbridge/desktop test
+cargo fmt --all --check
+cargo test --workspace
 cargo clippy --workspace
-vp run types:generate    # regenerate the TypeScript contract from the Rust DTOs
-cargo test -p buildbridge-engine --test provider_boot -- --ignored   # boots a throwaway machine per provider; run before changing an image digest
-vp run -r build          # build the desktop front end
 ```
 
-GitHub Actions runs the same checks on every push and pull request, with a macOS job compiling the workspace for the native Mac paths. Pushing a tag named after the workspace version, `v0.1.0`, builds the Linux and macOS bundles and the command line and attaches them to a draft release.
+After changing Rust types exposed to the desktop, run `vp run types:generate`; never edit the generated TypeScript files by hand. Before changing a provider image digest, run `cargo test -p buildbridge-engine --test provider_boot -- --ignored`, which boots a throwaway machine per provider.
+
+Use `vp run -r build` to build the frontend, or `vp run build:desktop` to create a desktop bundle.
+
+GitHub Actions checks pushes to `main` and pull requests, including a macOS job for native Mac code. A version tag matching the workspace version, such as `v0.1.0`, builds Linux and macOS bundles and the CLI, then attaches them to a draft release.
 
 ## License
 
-MIT.
+[MIT](LICENSE).
