@@ -193,6 +193,12 @@ def stopped(signum, frame):
 def main():
     for signum in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT, signal.SIGALRM):
         signal.signal(signum, stopped)
+        # Python installs handlers with SA_RESTART, and the BSDs honour it for select():
+        # the kernel restarts the wait instead of failing it with EINTR, so the handler
+        # above does not run until the syscall it interrupted returns on its own. Every
+        # guest is macOS, so without this the upload deadline never fired there, and a
+        # Stop waited on a transporter that had stopped answering.
+        signal.siginterrupt(signum, True)
     signal.alarm(UPLOAD_TIMEOUT_SECONDS)
     try:
         # Unbuffered input is essential: select must observe EOF only after the

@@ -1146,7 +1146,12 @@ mod tests {
 
     impl Fixture {
         fn new(scenario: &str) -> Self {
-            let serial_guard = TEST_DEVICE.lock().unwrap();
+            // A panicking test poisons this, and the five that follow would then fail with
+            // PoisonError instead of whatever is actually wrong. The guard only serialises
+            // these tests; there is no state behind it for a panic to have corrupted.
+            let serial_guard = TEST_DEVICE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let nonce = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -1254,10 +1259,12 @@ fi
             )
         }
 
-        /// Runs under a scope that is cancelled after `after`, as a Stop from the desktop is.
+        /// Runs under a scope that is cancelled once the log session has actually started, as a
+        /// Stop from the desktop is. It waits for the call rather than sleeping for a guessed
+        /// delay: a fixed wait is a race on a slower machine, where the cancellation landed
+        /// before the launch was even confirmed and failed the run instead of stopping it.
         fn run_then_stop(
             &self,
-            after: Duration,
         ) -> (
             Result<AndroidDeviceRunResult, String>,
             Vec<AndroidDeviceRunProgress>,
@@ -1265,8 +1272,15 @@ fi
             let scope = OperationScope::new();
             let cancellation = Arc::clone(&scope);
             let _entered = enter_operation(scope);
+            let calls = self.root.join("adb.args");
             let cancel = thread::spawn(move || {
-                thread::sleep(after);
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                while std::time::Instant::now() < deadline {
+                    if fs::read_to_string(&calls).is_ok_and(|logged| logged.contains("logcat")) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
                 cancellation.cancel();
             });
             let mut events = Vec::new();
@@ -1488,7 +1502,7 @@ fi
     #[test]
     fn install_and_launch_use_the_exact_selected_device_and_verified_private_apk() {
         let fixture = Fixture::new("success");
-        let (result, events) = fixture.run_then_stop(Duration::from_millis(600));
+        let (result, events) = fixture.run_then_stop();
         let result = result.unwrap();
         assert!(result.installed && result.launched);
         assert_eq!(result.serial, "phone-123");
@@ -1596,7 +1610,7 @@ fi
     #[test]
     fn without_a_process_id_the_log_is_narrowed_by_tag_instead() {
         let fixture = Fixture::new("no_pid");
-        let (result, events) = fixture.run_then_stop(Duration::from_millis(2_500));
+        let (result, events) = fixture.run_then_stop();
         let result = result.unwrap();
         assert_eq!(result.pid, None);
         assert_eq!(result.console_end, ConsoleEnd::Stopped);
