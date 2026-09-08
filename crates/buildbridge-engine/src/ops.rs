@@ -231,10 +231,28 @@ fn operation_lock_path(app: &Engine, machine_id: &str) -> Result<PathBuf, String
     Ok(MachinePaths::resolve(app, machine_id)?.operation_lock())
 }
 
+/// Whether the process that wrote a lock is still running, so a dead owner's lock can be
+/// replaced rather than holding its machine for good. Linux answers from `/proc` without
+/// spawning anything. Elsewhere it asks `ps`, which reports a process whoever owns it, where
+/// signal 0 would refuse on another user's live process and report it as gone — and a lock
+/// wrongly called dead is the dangerous direction, since it hands one guest to two processes.
 fn process_alive(pid: u32) -> bool {
-    if cfg!(target_os = "linux") {
+    #[cfg(target_os = "linux")]
+    {
         std::path::Path::new("/proc").join(pid.to_string()).exists()
-    } else {
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        std::process::Command::new("/bin/ps")
+            .args(["-p", &pid.to_string(), "-o", "pid="])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
         true
     }
 }
@@ -400,16 +418,27 @@ mod lock_tests {
         );
         assert!(acquire_operation_lock(&path, "archiving").is_ok());
 
-        let alive = OperationLock {
-            pid: 1,
-            label: "archiving".to_string(),
-            started_at_epoch_seconds: 0,
-        };
-        fs::write(&path, serde_json::to_vec(&alive).unwrap()).unwrap();
-        if cfg!(target_os = "linux") {
+        // A process this test owns rather than pid 1: `ps` would report init on either
+        // platform, but a child proves the live case for a pid nothing special is true of.
+        #[cfg(unix)]
+        {
+            let mut child = std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("a sleep to hold a pid");
+            let alive = OperationLock {
+                pid: child.id(),
+                label: "archiving".to_string(),
+                started_at_epoch_seconds: 0,
+            };
+            fs::write(&path, serde_json::to_vec(&alive).unwrap()).unwrap();
             assert_eq!(foreign_operation(&path), Some("archiving".to_string()));
             let refused = acquire_operation_lock(&path, "archiving").unwrap_err();
             assert!(refused.contains("Another buildbridge process holds this machine"));
+            let _ = child.kill();
+            let _ = child.wait();
         }
         let _ = fs::remove_dir_all(&dir);
     }
