@@ -9,7 +9,7 @@ pub fn run_signed_apple_archive<F>(
     identity_path: &Path,
     known_hosts_path: &Path,
     signing: &SigningProvisioningResult,
-    scheme: &str,
+    layout: &ProjectLayout,
     keychain_password: &str,
     env: Option<&GuestEnvFiles>,
     version: Option<&ProjectVersion>,
@@ -21,6 +21,14 @@ where
 {
     validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
     validate_signing_target(&signing.development_team, &signing.bundle_identifier)?;
+    validate_layout(layout)?;
+    let scheme: &str = layout
+        .ios
+        .as_ref()
+        .map(|ios| ios.scheme.as_str())
+        .ok_or_else(|| {
+            ProviderError::GuestBridge("the approved project has no iOS project".to_string())
+        })?;
     if let Some(version) = version {
         validate_apple_version(version).map_err(ProviderError::GuestBridge)?;
     }
@@ -86,7 +94,10 @@ where
     let helper_binary = format!("{guest_tools}/signing-helper");
     let xcodebuild =
         format!("{guest_home}/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild");
-    let workspace = format!("{guest_home}/BuildBridge/workspaces/active/ios/App/App.xcworkspace");
+    let workspace_root = format!("{guest_home}/BuildBridge/workspaces/active");
+    let workspace = ios_container_path(layout, &workspace_root);
+    let container_args = ios_container_args(layout, &workspace_root);
+    let env_source = guest_env_source(&workspace_root);
     let operation_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -138,6 +149,7 @@ where
         if let Some(env) = env {
             rebuild_web_assets_with_env(
                 env,
+                layout,
                 ssh_port,
                 username,
                 identity_path,
@@ -153,7 +165,7 @@ where
             identity_path,
             known_hosts_path,
             &xcodebuild,
-            &workspace,
+            &container_args,
             scheme,
             &signing.bundle_identifier,
         )?;
@@ -218,6 +230,7 @@ where
             &guest_signing_settings,
             &guest_export_options,
             &guest_export,
+            &env_source,
             keychain_password,
             started_at,
             &mut on_progress,
@@ -502,14 +515,14 @@ pub(crate) fn resolve_archive_app_target(
     identity_path: &Path,
     known_hosts_path: &Path,
     xcodebuild_path: &str,
-    workspace_path: &str,
+    container_args: &str,
     scheme: &str,
     expected_bundle_identifier: &str,
 ) -> Result<String, ProviderError> {
     let command = format!(
-        "set -o pipefail; {} -workspace {} -scheme {} -configuration Release -destination 'generic/platform=iOS' -showBuildSettings | /usr/bin/awk '$1 == \"TARGET_NAME\" || $1 == \"PRODUCT_BUNDLE_IDENTIFIER\" {{ print }}'",
+        "set -o pipefail; {} {} -scheme {} -configuration Release -destination 'generic/platform=iOS' -showBuildSettings | /usr/bin/awk '$1 == \"TARGET_NAME\" || $1 == \"PRODUCT_BUNDLE_IDENTIFIER\" {{ print }}'",
         shell_single_quote(xcodebuild_path),
-        shell_single_quote(workspace_path),
+        container_args,
         shell_single_quote(scheme),
     );
     let output = run_guest_command(
@@ -591,6 +604,7 @@ pub(crate) fn run_archive_helper<F>(
     signing_settings_path: &str,
     export_options_path: &str,
     export_path: &str,
+    env_source: &str,
     keychain_password: &str,
     started_at: Instant,
     on_progress: &mut F,
@@ -599,7 +613,7 @@ where
     F: FnMut(AppleArchiveProgress),
 {
     let remote_command = format!(
-        "{} --archive {} {} {} {} {} {} {} {} {} 2>&1",
+        "{env_source}{} --archive {} {} {} {} {} {} {} {} {} 2>&1",
         shell_single_quote(helper_path),
         shell_single_quote(keychain_path),
         shell_single_quote(xcodebuild_path),

@@ -149,7 +149,8 @@ pub async fn check_store_builds(
         })?;
         let version = requested_version(
             input,
-            read_apple_project_version(&workspace.local_path).map(|version| version.version),
+            read_apple_project_version(&workspace.local_path, &workspace.layout)
+                .map(|version| version.version),
         )?;
         let secrets = resolve_signing_kit_for(app, &machine_id).await?;
         let key_id = secrets.app_store_connect_key_id.ok_or_else(|| {
@@ -200,7 +201,8 @@ pub async fn check_store_builds(
     })?;
     let version = requested_version(
         input,
-        read_android_project_version(&workspace.local_path).map(|version| version.version),
+        read_android_project_version(&workspace.local_path, &workspace.layout)
+            .map(|version| version.version),
     )?;
     let codes: Vec<StoreBuild> = google_play::fetch_version_codes(app, &machine_id, &package_name)
         .await?

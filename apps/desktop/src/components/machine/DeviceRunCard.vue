@@ -106,7 +106,7 @@ const blocker = computed(() => (session.view ? buildPrerequisite(session.view) :
                 <DisclosureSummary quiet>Build recipe</DisclosureSummary>
                 <div class="mt-2 space-y-3">
                     <p class="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                        Builds the App scheme in Debug with the development identity. Xcode's
+                        Builds the project's scheme in Debug with the development identity. Xcode's
                         <code class="font-mono">devicectl</code> installs and launches the app on
                         the attached phone; its console streams until you stop the session.
                     </p>

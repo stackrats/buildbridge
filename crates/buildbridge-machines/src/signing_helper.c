@@ -26,6 +26,23 @@ extern OSStatus SecKeychainItemSetAccessWithPassword(
     const void *password
 );
 
+/*
+ * xcodebuild opens a workspace with -workspace and a bare project with -project; the
+ * container path names which one it is by its extension.
+ */
+static const char *xcode_container_flag(const char *path) {
+    size_t length = strlen(path);
+    const char *suffix = ".xcodeproj";
+    size_t suffix_length = strlen(suffix);
+    while (length > 0 && path[length - 1] == '/') {
+        length--;
+    }
+    if (length >= suffix_length && strncmp(path + length - suffix_length, suffix, suffix_length) == 0) {
+        return "-project";
+    }
+    return "-workspace";
+}
+
 static int read_exact(void *buffer, size_t length) {
     unsigned char *cursor = buffer;
 
@@ -328,7 +345,7 @@ static int run_signed_archive(int argc, char **argv) {
     fflush(stdout);
     char *archive_arguments[] = {
         argv[3],
-        "-workspace",
+        (char *)xcode_container_flag(argv[4]),
         argv[4],
         "-scheme",
         argv[5],
@@ -522,7 +539,7 @@ static int run_device_build(int argc, char **argv) {
     fflush(stdout);
     char *build_arguments[] = {
         argv[3],
-        "-workspace",
+        (char *)xcode_container_flag(argv[4]),
         argv[4],
         "-scheme",
         argv[5],

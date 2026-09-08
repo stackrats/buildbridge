@@ -101,7 +101,12 @@ export interface Backend {
     activateXcode(machineId: string, password: string | null): Promise<T.MachineView>;
     provisionSigning(machineId: string): Promise<T.MachineView>;
     clearGuestSigning(machineId: string): Promise<T.MachineView>;
-    approveWorkspace(machineId: string, path: string): Promise<T.MachineView>;
+    /** Approves the folder; `scheme` picks one of the shared schemes when the project offers several. */
+    approveWorkspace(
+        machineId: string,
+        path: string,
+        scheme?: string | null,
+    ): Promise<T.MachineView>;
     clearWorkspace(machineId: string): Promise<T.MachineView>;
     syncWorkspace(machineId: string): Promise<T.SyncAppleWorkspaceResult>;
     runSmokeBuild(
@@ -140,7 +145,12 @@ export interface Backend {
     clearArchive(machineId: string): Promise<T.MachineView>;
 
     /** The Android machine's project: the same verbs, into the toolchain container. */
-    approveAndroidWorkspace(machineId: string, path: string): Promise<T.MachineView>;
+    /** Approves the folder; `module` picks an application module, as `:app`, when the project has several. */
+    approveAndroidWorkspace(
+        machineId: string,
+        path: string,
+        module?: string | null,
+    ): Promise<T.MachineView>;
     clearAndroidWorkspace(machineId: string): Promise<T.MachineView>;
     syncAndroidWorkspace(machineId: string): Promise<T.SyncAndroidWorkspaceResult>;
     /** The debug APK; the first run also prepares the toolchain inside the container. */
@@ -389,8 +399,8 @@ async function createTauriBackend(): Promise<Backend> {
             invoke('activate_mac_xcode', { machineId, input: { password } }),
         provisionSigning: (machineId) => invoke('provision_mac_signing', { machineId }),
         clearGuestSigning: (machineId) => invoke('clear_mac_guest_signing', { machineId }),
-        approveWorkspace: (machineId, path) =>
-            invoke('approve_apple_workspace', { machineId, input: { path } }),
+        approveWorkspace: (machineId, path, scheme = null) =>
+            invoke('approve_apple_workspace', { machineId, input: { path, scheme } }),
         clearWorkspace: (machineId) => invoke('clear_apple_workspace', { machineId }),
         syncWorkspace: (machineId) => invoke('sync_apple_workspace', { machineId }),
         runSmokeBuild: (machineId, target, version = null) =>
@@ -408,8 +418,8 @@ async function createTauriBackend(): Promise<Backend> {
             invoke('upload_apple_archive', { machineId, expectedSha256 }),
         revealArchive: (machineId) => invoke('reveal_apple_archive', { machineId }),
         clearArchive: (machineId) => invoke('clear_apple_archive', { machineId }),
-        approveAndroidWorkspace: (machineId, path) =>
-            invoke('approve_android_workspace', { machineId, input: { path } }),
+        approveAndroidWorkspace: (machineId, path, module = null) =>
+            invoke('approve_android_workspace', { machineId, input: { path, module } }),
         clearAndroidWorkspace: (machineId) => invoke('clear_android_workspace', { machineId }),
         syncAndroidWorkspace: (machineId) => invoke('sync_android_workspace', { machineId }),
         runAndroidDebugBuild: (machineId, allowHttp = false, version = null) =>

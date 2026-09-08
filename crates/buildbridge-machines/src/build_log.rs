@@ -79,6 +79,19 @@ pub(crate) struct GuestToolchain {
     pub(crate) workspace: String,
 }
 
+impl GuestToolchain {
+    /// The same tools as the recipes see them.
+    pub(crate) fn recipe_tools(&self) -> crate::recipes::RecipeTools {
+        crate::recipes::RecipeTools {
+            tools: self.tools.clone(),
+            node_root: self.node_root.clone(),
+            pnpm: self.pnpm.clone(),
+            pod: Some(self.pod.clone()),
+            macos: true,
+        }
+    }
+}
+
 pub(crate) fn guest_toolchain(guest_home: &str) -> GuestToolchain {
     let tools = format!("{guest_home}/.buildbridge/tools");
     let node_root = format!("{tools}/node-v{NODE_VERSION}-darwin-x64");
@@ -105,7 +118,11 @@ pub(crate) fn guest_toolchain(guest_home: &str) -> GuestToolchain {
 /// idempotently, with every download pinned by SHA-256. Every guest script that runs the
 /// project's tools starts with this, so a guest prepared under an older layout, or a fresh
 /// clone, heals itself instead of failing where the tool is first used.
-pub(crate) fn guest_tools_preparation(toolchain: &GuestToolchain) -> String {
+pub(crate) fn guest_tools_preparation(
+    toolchain: &GuestToolchain,
+    javascript: bool,
+    cocoapods: bool,
+) -> String {
     let GuestToolchain {
         tools,
         node_root,
@@ -119,9 +136,12 @@ pub(crate) fn guest_tools_preparation(toolchain: &GuestToolchain) -> String {
     let node_name = format!("node-v{NODE_VERSION}-darwin-x64");
     let node_archive = format!("{tools}/{node_name}.tar.gz");
     let ruby_archive = format!("{tools}/portable-ruby-{PORTABLE_RUBY_VERSION}.tar.gz");
-    format!(
-        r#"/bin/mkdir -p "{tools}"
-if /bin/test ! -x "{node_root}/bin/node"; then
+    // Each tool is downloaded only for a project that uses it: a native Xcode project needs
+    // neither Node nor CocoaPods, and a project without a Podfile needs no Ruby. A download
+    // the recipe never calls is one more thing that can fail on a slow network.
+    let node = if javascript {
+        format!(
+            r#"if /bin/test ! -x "{node_root}/bin/node"; then
     /bin/rm -rf "{node_root}" "{node_archive}"
     /usr/bin/curl --fail --location --show-error --silent "https://nodejs.org/dist/v{NODE_VERSION}/{node_name}.tar.gz" --output "{node_archive}"
     /usr/bin/shasum -a 256 "{node_archive}" | /usr/bin/grep -q "^{NODE_DARWIN_X64_SHA256}  "
@@ -131,7 +151,14 @@ fi
 if /bin/test ! -x "{pnpm}"; then
     "{node_root}/bin/npm" install --prefix "{tools}/pnpm" "pnpm@{PNPM_VERSION}" --no-audit --no-fund
 fi
-if /bin/test ! -x "{ruby_root}/bin/ruby"; then
+"#
+        )
+    } else {
+        String::new()
+    };
+    let pods = if cocoapods {
+        format!(
+            r#"if /bin/test ! -x "{ruby_root}/bin/ruby"; then
     /bin/rm -rf "{ruby_root}" "{ruby_archive}"
     /usr/bin/curl --fail --location --show-error --silent "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/{PORTABLE_RUBY_VERSION}/portable-ruby-{PORTABLE_RUBY_VERSION}.el_capitan.bottle.tar.gz" --output "{ruby_archive}"
     /usr/bin/shasum -a 256 "{ruby_archive}" | /usr/bin/grep -q "^{PORTABLE_RUBY_DARWIN_X64_SHA256}  "
@@ -144,7 +171,14 @@ if /bin/test ! -x "{pod}"; then
     "{ruby_root}/bin/gem" install cocoapods --version "{COCOAPODS_VERSION}" --no-document
     /bin/test -x "{pod}"
 fi
-# Xcode's DerivedData and the env file live under the workspace's .buildbridge; a tool that
+"#
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"/bin/mkdir -p "{tools}"
+{node}{pods}# Xcode's DerivedData and the env file live under the workspace's .buildbridge; a tool that
 # honours ignore files, such as Tailwind's content scanner, must not crawl the build output.
 /bin/mkdir -p "{workspace}/.buildbridge"
 /usr/bin/printf '*\n' > "{workspace}/.buildbridge/.gitignore""#
@@ -168,14 +202,14 @@ pub(crate) fn phase_detail(phase: AppleProjectPhase) -> &'static str {
         AppleProjectPhase::Snapshotting => "Creating the source snapshot",
         AppleProjectPhase::Transferring => "Synchronizing source",
         AppleProjectPhase::Extracting => "Preparing the guest workspace",
-        AppleProjectPhase::PreparingTools => "Preparing Node, pnpm, Ruby, and CocoaPods",
+        AppleProjectPhase::PreparingTools => "Preparing the build tools",
         AppleProjectPhase::PreparingPlatform => {
             "Downloading and installing Apple's iOS Simulator platform"
         }
-        AppleProjectPhase::InstallingDependencies => "Installing locked project dependencies",
+        AppleProjectPhase::InstallingDependencies => "Installing the project's dependencies",
         AppleProjectPhase::BuildingWebAssets => "Building web assets",
-        AppleProjectPhase::SyncingIos => "Synchronizing the Capacitor iOS project",
-        AppleProjectPhase::ResolvingPods => "Resolving locked CocoaPods",
+        AppleProjectPhase::SyncingIos => "Preparing the iOS project",
+        AppleProjectPhase::ResolvingPods => "Resolving CocoaPods",
         AppleProjectPhase::Building => "Compiling the unsigned iOS app",
         AppleProjectPhase::Completed => "Unsigned test build complete",
     }

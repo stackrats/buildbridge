@@ -1,0 +1,17 @@
+// Bundles the JavaScript into the debug build, so the app on the phone runs by itself rather
+// than asking a Metro server on this host for its code. React Native's Gradle plugin leaves
+// every debuggable variant unbundled unless the project says otherwise; this says so for one
+// build, from outside the project, the way the HTTP override does.
+//
+// The value is set the moment the plugin is applied, which is before the plugin reads it to
+// configure its variants. Doing it from `afterProject` would be too late: the bundle tasks are
+// already wired by then. A project that sets `debuggableVariants` itself is left as it is —
+// its own choice is the more specific one, and it is evaluated after this.
+gradle.beforeProject { project ->
+    project.pluginManager.withPlugin('com.facebook.react') {
+        def react = project.extensions.findByName('react')
+        if (react != null && react.hasProperty('debuggableVariants')) {
+            react.debuggableVariants.set([])
+        }
+    }
+}

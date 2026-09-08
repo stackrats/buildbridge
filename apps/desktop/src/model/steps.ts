@@ -522,7 +522,7 @@ export function deriveBuildSteps(view: MachineView, context: StepContext): Build
                   ? `${builtWith(workspace)} · the guest refreshed Podfile.lock`
                   : builtWith(workspace)
               : approved
-                ? 'Copy the latest source and compile the App scheme without signing, against the device SDK or the Simulator'
+                ? `Copy the latest source and compile the ${workspace.scheme} scheme without signing, against the device SDK or the Simulator`
                 : unlockedBy['test-build'],
     });
 
@@ -748,7 +748,7 @@ export function deriveAndroidSteps(view: MachineView, context: StepContext): And
                     .filter(Boolean)
                     .join(' · ')
               : running
-                ? 'Choose the one host folder buildbridge may read: a Capacitor project with its Android platform'
+                ? 'Choose the one host folder buildbridge may read: any project with a Gradle application module, with or without a framework in front of it'
                 : 'after the toolchain starts',
     });
 
@@ -779,7 +779,7 @@ export function deriveAndroidSteps(view: MachineView, context: StepContext): And
                         .join(' · ')
                   : 'Debug build passed'
               : approved
-                ? 'Copy the latest source, install the locked dependencies, build the web assets, and compile the debug APK with Gradle'
+                ? "Copy the latest source, install its dependencies, run its framework's preparation, and compile the debug APK with Gradle"
                 : unlockedBy['test-build'],
     });
 

@@ -21,8 +21,9 @@ pub use buildbridge_machines::{
     AppleDeviceRunResult, AppleProjectProgress, AppleSmokeBuildResult, ContainerState,
     GuestDiagnostics, GuestEnvFiles, GuestOptimization, GuestSshStatus, GuestTrustState,
     HostPrerequisites, MacOsRelease, MachineConfig, MachinePlatform, MachineProvider,
-    OperationScope, PodfileLockChanges, ProjectVersion, RuntimeStatus, SigningProvisioningProgress,
-    SigningProvisioningResult, UnsignedBuildTarget, WorkspaceSyncResult, XcodeImportProgress,
+    OperationScope, PackageManager, PodfileLockChanges, ProjectKind, ProjectLayout, ProjectVersion,
+    RuntimeStatus, SigningProvisioningProgress, SigningProvisioningResult, UnsignedBuildTarget,
+    WorkspaceSyncResult, XcodeImportProgress,
 };
 use buildbridge_runner::{ApiClient, execute};
 use keyring::Entry;
@@ -584,6 +585,10 @@ pub struct ImportMacXcodeInput {
 #[serde(rename_all = "camelCase")]
 pub struct ApproveAppleWorkspaceInput {
     path: String,
+    /// The scheme to build when the project offers several; the application target's
+    /// otherwise.
+    #[serde(default)]
+    scheme: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -592,7 +597,12 @@ pub struct ApproveAppleWorkspaceInput {
 pub struct StoredAppleWorkspace {
     local_path: String,
     name: String,
-    ios_workspace: String,
+    /// What the folder holds, as detected when it was approved: the framework in front, the
+    /// workspace or project Xcode opens, the schemes offered. Records from before detection
+    /// existed were all Capacitor projects in the one layout that was assumed.
+    #[serde(default = "ProjectLayout::capacitor_default")]
+    layout: ProjectLayout,
+    /// The scheme the builds use, chosen from the layout's or generated for its app target.
     scheme: String,
     #[serde(default)]
     development_team: Option<String>,
@@ -744,17 +754,25 @@ pub struct AndroidMachineView {
 #[serde(rename_all = "camelCase")]
 pub struct ApproveAndroidWorkspaceInput {
     path: String,
+    /// The application module to build when the project has several, as a Gradle path such
+    /// as `:app`; the one called app, or the only one, otherwise.
+    #[serde(default)]
+    module: Option<String>,
 }
 
-/// The project approved on an Android machine: a Capacitor project with its Android platform
-/// committed, named by its package and by the application identifier its release build type
-/// declares.
+/// The project approved on an Android machine: any project with a Gradle application module,
+/// with or without a framework in front of it, named by its package or its Gradle settings
+/// and by the application identifier its module declares.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredAndroidWorkspace {
     local_path: String,
     name: String,
+    /// What the folder holds, as detected when it was approved. Records from before detection
+    /// existed were all Capacitor projects in the one layout that was assumed.
+    #[serde(default = "ProjectLayout::capacitor_default")]
+    layout: ProjectLayout,
     /// The `applicationId` of the app module, read from its Gradle script; `None` when the
     /// script computes it.
     application_id: Option<String>,
@@ -1345,6 +1363,24 @@ mod tests {
         );
         assert!(
             one_xcode_setting("DEVELOPMENT_TEAM = $(malicious);", "DEVELOPMENT_TEAM").is_none()
+        );
+        // A test target's identifier extends the app's, the way a debug build's does; the app
+        // is the one nothing else is a prefix of. Flutter and Xcode's own templates ship this.
+        let with_tests = r#"
+            PRODUCT_BUNDLE_IDENTIFIER = com.example.flutterApp;
+            PRODUCT_BUNDLE_IDENTIFIER = com.example.flutterApp.RunnerTests;
+            PRODUCT_BUNDLE_IDENTIFIER = com.example.flutterApp.debug;
+        "#;
+        assert_eq!(
+            release_bundle_identifier(with_tests).as_deref(),
+            Some("com.example.flutterApp")
+        );
+        // Two unrelated identifiers are two apps, and neither is the one to sign.
+        assert!(
+            release_bundle_identifier(
+                "PRODUCT_BUNDLE_IDENTIFIER = com.example.one;\nPRODUCT_BUNDLE_IDENTIFIER = com.example.two;"
+            )
+            .is_none()
         );
     }
 

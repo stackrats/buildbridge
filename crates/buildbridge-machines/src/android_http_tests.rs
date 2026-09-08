@@ -72,7 +72,12 @@ exit "$FIXTURE_GRADLE_STATUS"
     fs::set_permissions(&gradlew, fs::Permissions::from_mode(0o700)).unwrap();
     for (allow_http, code) in [(true, 0), (true, 7), (false, 0)] {
         let job_name = format!("fixture-{allow_http}-{code}");
-        let body = android_debug_gradle_command(allow_http);
+        let body = android_gradle_command(
+            &ProjectLayout::capacitor_default(),
+            "./gradlew",
+            ":app:assembleDebug",
+            allow_http,
+        );
         let script = crate::device_run::guest_job_script(
             &job_name,
             fixture.0.to_str().unwrap(),
@@ -126,7 +131,12 @@ exit "$FIXTURE_GRADLE_STATUS"
 /// created literally and the second build on a Mac fails with "File exists".
 #[test]
 fn debug_http_init_template_is_portable_to_bsd_mktemp() {
-    let body = android_debug_gradle_command(true);
+    let body = android_gradle_command(
+        &ProjectLayout::capacitor_default(),
+        "./gradlew",
+        ":app:assembleDebug",
+        true,
+    );
     let template = body
         .lines()
         .find_map(|line| line.split_once("/usr/bin/mktemp "))
@@ -134,7 +144,7 @@ fn debug_http_init_template_is_portable_to_bsd_mktemp() {
         .expect("the HTTP debug recipe creates its init script with mktemp");
     let template = template.rsplit(' ').next().unwrap();
     assert!(template.ends_with("XXXXXX"), "{template}");
-    assert!(body.contains(r#"http_init="$http_init_dir/init.gradle""#));
+    assert!(body.contains(r#"--init-script "$init_dir/http.gradle""#));
 }
 
 #[test]

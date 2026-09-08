@@ -7,6 +7,7 @@
 
 import type { Backend, DragDropEvent, Unlisten } from './backend';
 import type * as T from '../types/backend';
+import { capacitorLayout } from '../model/project-layout';
 import { isAndroid, machinePorts, providerLabel } from '../model/providers';
 import { createSharingPreview } from './backend-sharing-mock';
 import { createCredentialPreview } from './backend-credentials-mock';
@@ -210,7 +211,7 @@ function readyMachine(): MockMachine {
         workspace: {
             localPath: '/home/you/projects/example-app',
             name: 'com.example.app',
-            iosWorkspace: 'ios/App/App.xcworkspace',
+            layout: capacitorLayout(),
             scheme: 'App',
             developmentTeam: 'TEAM123456',
             bundleIdentifier: 'com.example.app',
@@ -371,6 +372,7 @@ function androidMachine(): MockMachine {
             workspace: {
                 localPath: '/home/you/projects/example-app',
                 name: 'com.example.app',
+                layout: capacitorLayout(),
                 applicationId: 'com.example.app',
                 lastSnapshotSha256:
                     '6c22009fda0b9467709394b5ae1c442af1da4544d63b5ac01b8778c03d7fcd7b',
@@ -1571,6 +1573,7 @@ export function createMockBackend(): Backend {
             machine.android.workspace = {
                 localPath: path,
                 name: path.split('/').filter(Boolean).pop() ?? 'project',
+                layout: capacitorLayout(),
                 applicationId: 'com.example.app',
                 lastSnapshotSha256: null,
                 lastSyncFileCount: null,

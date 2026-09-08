@@ -78,7 +78,7 @@ const phases = [
     },
     {
         title: 'Build and preview',
-        body: 'Choose your local Capacitor project and make a test build. Preview the app before preparing a release.',
+        body: 'Choose your local iOS or Android project and make a test build. Preview the app before preparing a release.',
     },
     {
         title: 'Sign and export',

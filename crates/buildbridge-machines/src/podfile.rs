@@ -35,9 +35,21 @@ pub fn read_guest_podfile_lock(
     username: &str,
     identity_path: &Path,
     known_hosts_path: &Path,
+    layout: &ProjectLayout,
 ) -> Result<String, ProviderError> {
     validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
-    let lock = format!("/Users/{username}/BuildBridge/workspaces/active/ios/App/Podfile.lock");
+    crate::recipes::validate_layout(layout)?;
+    let podfile_dir = layout
+        .ios
+        .as_ref()
+        .and_then(|ios| ios.podfile_dir.clone())
+        .ok_or_else(|| {
+            ProviderError::GuestBridge("the approved project has no Podfile".to_string())
+        })?;
+    let lock = join_relative(
+        &format!("/Users/{username}/BuildBridge/workspaces/active"),
+        &join_relative(&podfile_dir, "Podfile.lock"),
+    );
     let content = device_run::run_guest_command_capped(
         ssh_port,
         username,

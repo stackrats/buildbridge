@@ -67,7 +67,7 @@ const ANDROID_BUILD_DIAGNOSTIC_LINES: usize = 24;
 const AAB_NAME: &str = "app-release.aab";
 const APK_NAME: &str = "app-release.apk";
 const DEBUG_APK_NAME: &str = "app-debug.apk";
-const ANDROID_HTTP_DEBUG_INIT: &str = include_str!("android_http.gradle");
+pub(crate) const ANDROID_HTTP_DEBUG_INIT: &str = include_str!("android_http.gradle");
 
 /// The phases of everything that runs the project's tools in the container: the sync and the
 /// debug build share them, as the macOS project phases do.
@@ -263,6 +263,24 @@ pub(crate) struct AndroidToolchain {
     pub(crate) path: String,
 }
 
+impl AndroidToolchain {
+    /// The Gradle buildbridge supplies to a project that commits no wrapper.
+    pub(crate) fn gradle(&self) -> String {
+        format!("{}/gradle-{GRADLE_VERSION}/bin/gradle", self.tools)
+    }
+
+    /// The same tools as the recipes see them.
+    pub(crate) fn recipe_tools(&self) -> crate::recipes::RecipeTools {
+        crate::recipes::RecipeTools {
+            tools: self.tools.clone(),
+            node_root: self.node_root.clone(),
+            pnpm: self.pnpm.clone(),
+            pod: None,
+            macos: false,
+        }
+    }
+}
+
 pub(crate) fn android_toolchain(home: &str) -> AndroidToolchain {
     let tools = format!("{home}/.buildbridge/tools");
     let node_root = format!("{tools}/node-v{NODE_VERSION}-linux-x64");
@@ -291,7 +309,11 @@ pub(crate) fn android_toolchain(home: &str) -> AndroidToolchain {
 /// download checked against its pinned SHA-256. Platforms and further build tools the project
 /// asks for are installed by its own Gradle plugin into the same SDK, which the accepted
 /// licences allow. The image ships no `unzip`; the JDK's own `jar` opens the zip.
-pub(crate) fn android_tools_preparation(toolchain: &AndroidToolchain) -> String {
+pub(crate) fn android_tools_preparation(
+    toolchain: &AndroidToolchain,
+    javascript: bool,
+    gradle: bool,
+) -> String {
     let AndroidToolchain {
         home,
         tools,
@@ -305,6 +327,47 @@ pub(crate) fn android_tools_preparation(toolchain: &AndroidToolchain) -> String 
     } = toolchain;
     let node_name = format!("node-v{NODE_VERSION}-linux-x64");
     let node_archive = format!("{tools}/{node_name}.tar.gz");
+    let gradle_home = format!("{tools}/gradle-{GRADLE_VERSION}");
+    let gradle_archive = format!("{tools}/gradle-{GRADLE_VERSION}-bin.zip");
+    // Only for a project that commits no wrapper: a wrapper is the project's own choice of
+    // Gradle, and every project that has one uses it.
+    let gradle = if gradle {
+        format!(
+            r#"if /bin/test ! -x "{gradle_home}/bin/gradle"; then
+    /bin/rm -rf "{gradle_home}" "{gradle_archive}" "{tools}/gradle.incoming"
+    /usr/bin/curl --fail --location --show-error --silent "https://services.gradle.org/distributions/gradle-{GRADLE_VERSION}-bin.zip" --output "{gradle_archive}"
+    /usr/bin/printf '%s  %s\n' "{GRADLE_BIN_SHA256}" "{gradle_archive}" | /usr/bin/sha256sum --check --status
+    /bin/mkdir -p "{tools}/gradle.incoming"
+    (cd "{tools}/gradle.incoming" && "{JAVA_HOME}/bin/jar" xf "{gradle_archive}")
+    /bin/mv "{tools}/gradle.incoming/gradle-{GRADLE_VERSION}" "{gradle_home}"
+    /bin/chmod 755 "{gradle_home}/bin/gradle"
+    /bin/rm -rf "{gradle_archive}" "{tools}/gradle.incoming"
+fi
+"#
+        )
+    } else {
+        String::new()
+    };
+    // Node and pnpm are downloaded only for a project that installs JavaScript dependencies; a
+    // native Gradle project or a Flutter app needs neither, and a download it never uses is one
+    // more thing that can fail on a slow network.
+    let node = if javascript {
+        format!(
+            r#"if /bin/test ! -x "{node_root}/bin/node"; then
+    /bin/rm -rf "{node_root}" "{node_archive}"
+    /usr/bin/curl --fail --location --show-error --silent "https://nodejs.org/dist/v{NODE_VERSION}/{node_name}.tar.gz" --output "{node_archive}"
+    /usr/bin/printf '%s  %s\n' "{NODE_LINUX_X64_SHA256}" "{node_archive}" | /usr/bin/sha256sum --check --status
+    /usr/bin/tar -xzf "{node_archive}" -C "{tools}"
+    /bin/rm -f "{node_archive}"
+fi
+if /bin/test ! -x "{pnpm}"; then
+    "{node_root}/bin/npm" install --prefix "{tools}/pnpm" "pnpm@{PNPM_VERSION}" --no-audit --no-fund
+fi
+"#
+        )
+    } else {
+        String::new()
+    };
     let cmdline_archive = format!("{tools}/commandlinetools-linux-{CMDLINE_TOOLS_VERSION}.zip");
     let jdk_archive = format!("{tools}/OpenJDK21U-jdk_x64_linux_hotspot_{JDK_21_VERSION}.tar.gz");
     format!(
@@ -313,6 +376,7 @@ pub(crate) fn android_tools_preparation(toolchain: &AndroidToolchain) -> String 
     exit 1
 fi
 /bin/mkdir -p "{tools}" "{sdk}" "{home}/.gradle"
+{gradle}
 if /bin/test ! -x "{jdk_21}/bin/javac"; then
     /bin/rm -rf "{jdk_21}" "{jdk_archive}" "{tools}/jdk-21.incoming"
     /usr/bin/curl --fail --location --show-error --silent "https://github.com/adoptium/temurin21-binaries/releases/download/{JDK_21_RELEASE}/OpenJDK21U-jdk_x64_linux_hotspot_{JDK_21_VERSION}.tar.gz" --output "{jdk_archive}"
@@ -324,17 +388,7 @@ if /bin/test ! -x "{jdk_21}/bin/javac"; then
 fi
 # Gradle runs on the image's JDK 17 and may compile with either; the project decides which.
 /usr/bin/printf 'org.gradle.java.installations.auto-download=false\norg.gradle.java.installations.paths=%s,%s\n' "{JAVA_HOME}" "{jdk_21}" > "{home}/.gradle/gradle.properties"
-if /bin/test ! -x "{node_root}/bin/node"; then
-    /bin/rm -rf "{node_root}" "{node_archive}"
-    /usr/bin/curl --fail --location --show-error --silent "https://nodejs.org/dist/v{NODE_VERSION}/{node_name}.tar.gz" --output "{node_archive}"
-    /usr/bin/printf '%s  %s\n' "{NODE_LINUX_X64_SHA256}" "{node_archive}" | /usr/bin/sha256sum --check --status
-    /usr/bin/tar -xzf "{node_archive}" -C "{tools}"
-    /bin/rm -f "{node_archive}"
-fi
-if /bin/test ! -x "{pnpm}"; then
-    "{node_root}/bin/npm" install --prefix "{tools}/pnpm" "pnpm@{PNPM_VERSION}" --no-audit --no-fund
-fi
-if /bin/test ! -x "{sdk}/cmdline-tools/latest/bin/sdkmanager"; then
+{node}if /bin/test ! -x "{sdk}/cmdline-tools/latest/bin/sdkmanager"; then
     /bin/rm -rf "{sdk}/cmdline-tools" "{cmdline_archive}" "{tools}/cmdline-tools"
     /usr/bin/curl --fail --location --show-error --silent "https://dl.google.com/android/repository/commandlinetools-linux-{CMDLINE_TOOLS_VERSION}_latest.zip" --output "{cmdline_archive}"
     /usr/bin/printf '%s  %s\n' "{CMDLINE_TOOLS_LINUX_SHA256}" "{cmdline_archive}" | /usr/bin/sha256sum --check --status
@@ -362,30 +416,16 @@ fi
 
 /// The environment every recipe exports before it touches the project. The Gradle daemon is
 /// off: a build is one JVM that exits with it, so a stopped container holds no memory and a
-/// cancelled build leaves nothing behind. Which JDK Gradle runs on is the project's committed
-/// wrapper's decision: Gradle 8.5 and newer run on Java 21, which Capacitor 8's own library
-/// compiles with, while the Gradle that Capacitor 5 and 6 pin refuses anything past 17.
+/// cancelled build leaves nothing behind. The JDK starts as the image's and is settled just
+/// before Gradle runs, by [`android_jdk_selection`].
 pub(crate) fn android_recipe_environment(toolchain: &AndroidToolchain) -> String {
     let AndroidToolchain {
-        home,
-        sdk,
-        path,
-        jdk_21,
-        workspace,
-        ..
+        home, sdk, path, ..
     } = toolchain;
     format!(
         r#"export HOME="{home}"
 export PATH="{path}"
 export JAVA_HOME="{JAVA_HOME}"
-gradle_wrapper="{workspace}/android/gradle/wrapper/gradle-wrapper.properties"
-if /bin/test -f "$gradle_wrapper"; then
-    gradle_major=$(/usr/bin/sed -n 's/^distributionUrl=.*gradle-\([0-9]*\)\.\([0-9]*\).*/\1/p' "$gradle_wrapper" | /usr/bin/head -n 1)
-    gradle_minor=$(/usr/bin/sed -n 's/^distributionUrl=.*gradle-\([0-9]*\)\.\([0-9]*\).*/\2/p' "$gradle_wrapper" | /usr/bin/head -n 1)
-    if /bin/test "${{gradle_major:-0}}" -gt 8 || {{ /bin/test "${{gradle_major:-0}}" -eq 8 && /bin/test "${{gradle_minor:-0}}" -ge 5; }}; then
-        export JAVA_HOME="{jdk_21}"
-    fi
-fi
 export PATH="$JAVA_HOME/bin:$PATH"
 export ANDROID_HOME="{sdk}"
 export ANDROID_SDK_ROOT="{sdk}"
@@ -395,6 +435,32 @@ export GRADLE_OPTS="-Dorg.gradle.daemon=false"
 export LANG="C.UTF-8"
 export CI=1
 export CYPRESS_INSTALL_BINARY=0"#
+    )
+}
+
+/// Which JDK Gradle runs on: the project's committed wrapper's decision, since Gradle 8.5 and
+/// newer run on Java 21, which Capacitor 8's own library compiles with, while the Gradle that
+/// Capacitor 5 and 6 pin refuses anything past 17. The wrapper is read where the layout says
+/// the Gradle root is, and this runs immediately before Gradle rather than at the top of the
+/// recipe: an Expo project has no wrapper at all until `expo prebuild` writes one, so reading
+/// it any earlier would always find nothing and settle for the image's JDK.
+pub(crate) fn android_jdk_selection(
+    toolchain: &AndroidToolchain,
+    layout: &ProjectLayout,
+) -> String {
+    let AndroidToolchain { jdk_21, .. } = toolchain;
+    let gradle_root = android_gradle_dir(layout, &toolchain.workspace);
+    format!(
+        r#"gradle_wrapper="{gradle_root}/gradle/wrapper/gradle-wrapper.properties"
+if /bin/test -f "$gradle_wrapper"; then
+    gradle_major=$(/usr/bin/sed -n 's/^distributionUrl=.*gradle-\([0-9]*\)\.\([0-9]*\).*/\1/p' "$gradle_wrapper" | /usr/bin/head -n 1)
+    gradle_minor=$(/usr/bin/sed -n 's/^distributionUrl=.*gradle-\([0-9]*\)\.\([0-9]*\).*/\2/p' "$gradle_wrapper" | /usr/bin/head -n 1)
+    if /bin/test "${{gradle_major:-0}}" -gt 8 || {{ /bin/test "${{gradle_major:-0}}" -eq 8 && /bin/test "${{gradle_minor:-0}}" -ge 5; }}; then
+        export JAVA_HOME="{jdk_21}"
+        export PATH="$JAVA_HOME/bin:$PATH"
+    fi
+fi
+"#
     )
 }
 
@@ -662,49 +728,44 @@ pub(crate) fn run_container_command(
     }
 }
 
-/// Writes the requested version into the synced app module's Gradle script, whichever dialect
-/// the project uses. The script comes back whole rather than through the bounded command
-/// output, is rewritten here with the same function the host edit uses, and goes back the
-/// way env files do.
-fn set_container_gradle_version(
+/// Writes the requested version into the synced project where it declares one: the app
+/// module's Gradle script, whichever dialect it uses, or a Flutter app's pubspec. The file
+/// comes back whole rather than through the bounded command output, is rewritten here with
+/// the same function the host edit uses, and goes back the way env files do.
+fn set_container_project_version(
     container_name: &str,
     workspace: &str,
+    layout: &ProjectLayout,
     version: &ProjectVersion,
 ) -> Result<(), ProviderError> {
+    let (relative, label): (String, &str) = if layout.kind == ProjectKind::Flutter {
+        ("pubspec.yaml".to_string(), "pubspec")
+    } else {
+        (android_script_relative(layout), "app module Gradle script")
+    };
+    let path = join_relative(workspace, &relative);
     let script = format!(
-        "set -eu; for name in build.gradle build.gradle.kts; do path=\"{workspace}/android/app/$name\"; if /bin/test -f \"$path\"; then /usr/bin/printf '%s\\n' \"$name\"; /bin/cat \"$path\"; exit 0; fi; done; exit 1"
+        "set -eu; /bin/test -f {0}; /bin/cat {0}",
+        shell_single_quote(&path)
     );
     let output = container_exec_command(container_name, &script, &[])
         .tracked_output()
         .map_err(|error| ProviderError::DockerUnavailable(error.to_string()))?;
     if !output.status.success() {
-        return Err(ProviderError::AndroidToolchain(
-            "the synced project has no android/app/build.gradle to write the version into; synchronize the project again".to_string(),
-        ));
+        return Err(ProviderError::AndroidToolchain(format!(
+            "the synced project has no {relative} to write the version into; synchronize the project again"
+        )));
     }
     let contents = String::from_utf8(output.stdout).map_err(|_| {
-        ProviderError::AndroidToolchain(
-            "the synced app module's Gradle script is not UTF-8 text".to_string(),
-        )
+        ProviderError::AndroidToolchain(format!("the synced {label} is not UTF-8 text"))
     })?;
-    let (name, script) = contents.split_once('\n').ok_or_else(|| {
-        ProviderError::AndroidToolchain(
-            "the container did not return the app module's Gradle script".to_string(),
-        )
-    })?;
-    if !matches!(name, "build.gradle" | "build.gradle.kts") {
-        return Err(ProviderError::AndroidToolchain(
-            "the container named the Gradle script in an unexpected shape".to_string(),
-        ));
+    let rewritten = if layout.kind == ProjectKind::Flutter {
+        set_pubspec_project_version(&contents, version)
+    } else {
+        set_gradle_project_version(&contents, version)
     }
-    let rewritten =
-        set_gradle_project_version(script, version).map_err(ProviderError::AndroidToolchain)?;
-    stream_bytes_to_container(
-        container_name,
-        rewritten.as_bytes(),
-        &format!("{workspace}/android/app/{name}"),
-        "app module Gradle script",
-    )
+    .map_err(ProviderError::AndroidToolchain)?;
+    stream_bytes_to_container(container_name, rewritten.as_bytes(), &path, label)
 }
 
 /// Writes bytes into the container as an owner-only file, through the exec's stdin.
@@ -892,28 +953,53 @@ where
     Ok(())
 }
 
-/// The project shape the container can build: a Capacitor project with its Android platform
-/// added, whose Gradle wrapper is committed.
-pub(crate) fn validate_android_project(workspace_path: &Path) -> Result<PathBuf, ProviderError> {
+/// What runs Gradle: the project's own committed wrapper, or the pinned distribution the
+/// toolchain installs for a project that has none.
+fn android_gradle_program(toolchain: &AndroidToolchain, layout: &ProjectLayout) -> String {
+    if android_has_wrapper(layout) {
+        "./gradlew".to_string()
+    } else {
+        shell_single_quote(&toolchain.gradle())
+    }
+}
+
+/// The project as the layout describes it, on the host, before a snapshot is taken: the
+/// package for a JavaScript project, and the Gradle wrapper and the application module's
+/// script for every kind but Expo, whose Android project is written where the build runs.
+pub(crate) fn validate_android_project(
+    workspace_path: &Path,
+    layout: &ProjectLayout,
+) -> Result<PathBuf, ProviderError> {
+    validate_layout(layout).map_err(|error| ProviderError::AndroidToolchain(error.to_string()))?;
     let workspace_path = fs::canonicalize(workspace_path).map_err(|error| {
         ProviderError::AndroidToolchain(format!("the approved project is unavailable: {error}"))
     })?;
-    let has_settings = workspace_path.join("android/settings.gradle").is_file()
-        || workspace_path.join("android/settings.gradle.kts").is_file();
-    let has_app = workspace_path.join("android/app/build.gradle").is_file()
-        || workspace_path
-            .join("android/app/build.gradle.kts")
-            .is_file();
-    if !workspace_path.is_dir()
-        || !workspace_path.join("package.json").is_file()
-        || !workspace_path.join("android/gradlew").is_file()
-        || !has_settings
-        || !has_app
-    {
+    let android = layout.android.as_ref().ok_or_else(|| {
+        ProviderError::AndroidToolchain("the approved project has no Android project".to_string())
+    })?;
+    if !workspace_path.is_dir() {
         return Err(ProviderError::AndroidToolchain(
-            "the approved project must contain package.json and an android directory with its Gradle wrapper, settings and app module"
-                .to_string(),
+            "the approved project is not a directory".to_string(),
         ));
+    }
+    if layout.kind.uses_javascript() && !workspace_path.join("package.json").is_file() {
+        return Err(ProviderError::AndroidToolchain(
+            "the approved project must contain package.json".to_string(),
+        ));
+    }
+    if !layout.kind.generates_native_projects() {
+        let wrapper = join_relative(&android.root, "gradlew");
+        if android.wrapper && !workspace_path.join(&wrapper).is_file() {
+            return Err(ProviderError::AndroidToolchain(format!(
+                "the approved project must contain the committed Gradle wrapper {wrapper}"
+            )));
+        }
+        if !workspace_path.join(&android.script).is_file() {
+            return Err(ProviderError::AndroidToolchain(format!(
+                "the approved project must contain the application module's script {}",
+                android.script
+            )));
+        }
     }
 
     Ok(workspace_path)
@@ -973,10 +1059,10 @@ pub(crate) fn android_build_phase_detail(phase: AndroidBuildPhase) -> &'static s
         AndroidBuildPhase::Snapshotting => "Creating the source snapshot",
         AndroidBuildPhase::Transferring => "Synchronizing source",
         AndroidBuildPhase::Extracting => "Preparing the container workspace",
-        AndroidBuildPhase::PreparingTools => "Preparing Node, pnpm, and the Android SDK",
-        AndroidBuildPhase::InstallingDependencies => "Installing locked project dependencies",
+        AndroidBuildPhase::PreparingTools => "Preparing the build tools and the Android SDK",
+        AndroidBuildPhase::InstallingDependencies => "Installing the project's dependencies",
         AndroidBuildPhase::BuildingWebAssets => "Building web assets",
-        AndroidBuildPhase::SyncingAndroid => "Synchronizing the Capacitor Android project",
+        AndroidBuildPhase::SyncingAndroid => "Preparing the Android project",
         AndroidBuildPhase::Building => "Compiling the debug APK with Gradle",
         AndroidBuildPhase::Inspecting => "Reading the built app back",
         AndroidBuildPhase::Completed => "Debug build complete",
@@ -1031,13 +1117,14 @@ pub(crate) fn android_build_log_is_diagnostic(line: &str) -> bool {
 pub fn sync_android_workspace<F>(
     container_name: &str,
     workspace_path: &Path,
+    layout: &ProjectLayout,
     env: Option<&GuestEnvFiles>,
     mut on_progress: F,
 ) -> Result<WorkspaceSyncResult, ProviderError>
 where
     F: FnMut(AndroidBuildProgress),
 {
-    let workspace_path = validate_android_project(workspace_path)?;
+    let workspace_path = validate_android_project(workspace_path, layout)?;
     // A detached worker can outlive the desktop's operation lock. Do not replace the
     // files it is building, or replay its completed result against this new snapshot.
     prepare_android_jobs(
@@ -1054,9 +1141,11 @@ where
         "Inspecting the approved project and excluding local dependencies and secrets.",
         None,
     ));
-    let (source_file_count, source_bytes) = inspect_snapshot_tree(&workspace_path)?;
+    let mut exclusions = SnapshotExclusions::for_layout(layout);
+    let (source_file_count, source_bytes) =
+        inspect_snapshot_tree(&workspace_path, &mut exclusions)?;
     let temporary_archive = TemporaryArchive::new();
-    create_workspace_archive(&workspace_path, &temporary_archive.0)?;
+    create_workspace_archive(&workspace_path, &temporary_archive.0, &exclusions)?;
     let archive_bytes = fs::metadata(&temporary_archive.0)
         .map_err(|error| {
             ProviderError::AndroidToolchain(format!(
@@ -1110,8 +1199,9 @@ where
         "Extracting the bounded snapshot into the container workspace.",
         None,
     ));
+    let checks = crate::workspace::extraction_checks(layout, &staging);
     let extract = format!(
-        "set -eu; /bin/mkdir -p '{staging}'; /usr/bin/tar -xzf '{archive}' -C '{staging}'; /bin/test -f '{staging}/package.json'; /bin/test -f '{staging}/android/gradlew'; /bin/chmod 755 '{staging}/android/gradlew'; /bin/rm -rf '{workspace}.previous'; if /bin/test -d '{workspace}'; then /bin/mv '{workspace}' '{workspace}.previous'; fi; /bin/mv '{staging}' '{workspace}'; if /bin/test -f '{env_file}'; then /bin/mv '{env_file}' '{workspace}/.env.production.local'; /bin/chmod 600 '{workspace}/.env.production.local'; fi; if /bin/test -f '{env_shell}'; then /bin/mkdir -p '{workspace}/.buildbridge'; /bin/mv '{env_shell}' '{workspace}/.buildbridge/env.sh'; /bin/chmod 600 '{workspace}/.buildbridge/env.sh'; fi; /bin/rm -f '{archive}'; /bin/rm -rf '{workspace}.previous'"
+        "set -eu; /bin/mkdir -p '{staging}'; /usr/bin/tar -xzf '{archive}' -C '{staging}'; {checks}/bin/rm -rf '{workspace}.previous'; if /bin/test -d '{workspace}'; then /bin/mv '{workspace}' '{workspace}.previous'; fi; /bin/mv '{staging}' '{workspace}'; if /bin/test -f '{env_file}'; then /bin/mv '{env_file}' '{workspace}/.env.production.local'; /bin/chmod 600 '{workspace}/.env.production.local'; fi; if /bin/test -f '{env_shell}'; then /bin/mkdir -p '{workspace}/.buildbridge'; /bin/mv '{env_shell}' '{workspace}/.buildbridge/env.sh'; /bin/chmod 600 '{workspace}/.buildbridge/env.sh'; fi; /bin/rm -f '{archive}'; /bin/rm -rf '{workspace}.previous'"
     );
     run_container_command(container_name, &extract)?;
 
@@ -1207,11 +1297,13 @@ where
     Ok((output_tail, diagnostic_lines, status.success()))
 }
 
-/// The debug build: prepares the toolchain, installs the locked dependencies, builds the web
-/// assets, synchronizes Capacitor's Android project and compiles the debug APK, reads the app
-/// back from it, and brings the APK to `output_directory` with its size and checksum agreed.
+/// The debug build: prepares the toolchain, installs the project's dependencies, runs the
+/// framework's own preparation when it has one, compiles the application module's debug APK
+/// with Gradle, reads the app back from it, and brings the APK to `output_directory` with its
+/// size and checksum agreed.
 pub fn run_android_debug_build<F>(
     container_name: &str,
+    layout: &ProjectLayout,
     output_directory: &Path,
     allow_http: bool,
     version: Option<&ProjectVersion>,
@@ -1220,6 +1312,7 @@ pub fn run_android_debug_build<F>(
 where
     F: FnMut(AndroidBuildProgress),
 {
+    validate_layout(layout).map_err(|error| ProviderError::AndroidToolchain(error.to_string()))?;
     if let Some(version) = version {
         validate_android_version(version).map_err(ProviderError::AndroidToolchain)?;
     }
@@ -1242,7 +1335,7 @@ where
     // The requested version goes into the synced script before the recipe runs, the way the
     // release does it; the built APK is checked against it below.
     if let Some(version) = version {
-        set_container_gradle_version(container_name, &toolchain.workspace, version)?;
+        set_container_project_version(container_name, &toolchain.workspace, layout, version)?;
         on_progress(android_progress(
             AndroidBuildPhase::PreparingTools,
             0,
@@ -1252,20 +1345,34 @@ where
             Some(format!("Building as version {}.", version.display())),
         ));
     }
-    let prepare_tools = android_tools_preparation(&toolchain);
+    let prepare_tools = android_tools_preparation(
+        &toolchain,
+        layout.kind.uses_javascript(),
+        !android_has_wrapper(layout),
+    );
     let environment = android_recipe_environment(&toolchain);
+    let jdk = android_jdk_selection(&toolchain, layout);
     let AndroidToolchain {
-        pnpm,
         build_tools,
         workspace,
         ..
     } = &toolchain;
-    let debug_gradle = android_debug_gradle_command(allow_http);
+    let prepare_project =
+        android_prepare_script(layout, workspace, &toolchain.recipe_tools(), version, false);
+    let gradle_dir = shell_single_quote(&android_gradle_dir(layout, workspace));
+    let build_dir = android_build_dir(layout, workspace);
+    let build_dir_argument = shell_single_quote(&build_dir);
+    let gradle_program = android_gradle_program(&toolchain, layout);
+    let debug_gradle = android_gradle_command(
+        layout,
+        &gradle_program,
+        &android_task(layout, "assembleDebug"),
+        allow_http,
+    );
     let body = format!(
         r#"phase() {{ /usr/bin/printf '__BUILDBRIDGE_PHASE__:%s\n' "$1"; }}
 /usr/bin/printf '__BUILDBRIDGE_ALLOW_HTTP__\t%s\n' '{allow_http}'
-/bin/test -f "{workspace}/package.json"
-/bin/test -f "{workspace}/android/gradlew"
+/bin/test -d "{workspace}"
 {environment}
 if /bin/test -f "{workspace}/.buildbridge/env.sh"; then
     . "{workspace}/.buildbridge/env.sh"
@@ -1274,23 +1381,18 @@ fi
 phase preparing_tools
 {prepare_tools}
 
-phase installing_dependencies
-cd "{workspace}"
-"{pnpm}" install --frozen-lockfile --prefer-offline
-
-phase building_web_assets
-"{workspace}/node_modules/.bin/vp" build
-
-phase syncing_android
-"{workspace}/node_modules/.bin/cap" sync android
-
+{prepare_project}
 phase building
-cd "{workspace}/android"
+{jdk}cd {gradle_dir}
 {debug_gradle}
 
 phase inspecting
-apk="{workspace}/android/app/build/outputs/apk/debug/app-debug.apk"
-/bin/test -f "$apk"
+apk=$(/usr/bin/find {build_dir_argument}/outputs/apk -type f -name '*.apk' -path '*debug*' 2>/dev/null | /usr/bin/sort | /usr/bin/head -n 1)
+if /bin/test -z "$apk"; then
+    /usr/bin/printf '%s\n' 'Gradle finished without a debug APK under the module'"'"'s build/outputs/apk.' >&2
+    exit 1
+fi
+/usr/bin/printf '__BUILDBRIDGE_APK_PATH__\t%s\n' "$apk"
 badging=$("{build_tools}/aapt2" dump badging "$apk" | /usr/bin/head -n 1)
 package=$(/usr/bin/printf '%s\n' "$badging" | /usr/bin/sed -n "s/^package: name='\([^']*\)'.*/\1/p")
 version_code=$(/usr/bin/printf '%s\n' "$badging" | /usr/bin/sed -n "s/.* versionCode='\([^']*\)'.*/\1/p")
@@ -1304,7 +1406,7 @@ apk_sha256=$(/usr/bin/sha256sum "$apk" | /usr/bin/cut -d ' ' -f 1)
     );
     // The recipe ends in the inspecting phase on purpose: the transfer that follows is this
     // host's, and completion is reported once the APK is here.
-    let container_apk = format!("{workspace}/android/app/build/outputs/apk/debug/app-debug.apk");
+    let mut container_apk: Option<String> = None;
 
     let mut phase = AndroidBuildPhase::PreparingTools;
     let mut app: Option<(String, String, String)> = None;
@@ -1377,6 +1479,14 @@ apk_sha256=$(/usr/bin/sha256sum "$apk" | /usr/bin/cut -d ' ' -f 1)
                 jdk_version = Some(fields[0].to_string());
                 return;
             }
+            if let Some(fields) = marker_fields(line, "__BUILDBRIDGE_APK_PATH__")
+                && fields.len() == 1
+                && fields[0].starts_with(&format!("{build_dir}/outputs/apk/"))
+                && !fields[0].contains("..")
+            {
+                container_apk = Some(fields[0].to_string());
+                return;
+            }
             if let Some(fields) = marker_fields(line, "__BUILDBRIDGE_APK__")
                 && fields.len() == 2
             {
@@ -1444,6 +1554,11 @@ apk_sha256=$(/usr/bin/sha256sum "$apk" | /usr/bin/cut -d ' ' -f 1)
             "the container reported the debug APK in an unexpected shape".to_string(),
         ));
     }
+    let container_apk = container_apk.ok_or_else(|| {
+        ProviderError::AndroidToolchain(
+            "the container did not report where the debug APK was written".to_string(),
+        )
+    })?;
     let transferred = (|| {
         on_progress(android_progress(
             AndroidBuildPhase::Transferring,
@@ -1505,31 +1620,6 @@ apk_sha256=$(/usr/bin/sha256sum "$apk" | /usr/bin/cut -d ' ' -f 1)
         allow_http,
         output_tail,
     })
-}
-
-fn android_debug_gradle_command(allow_http: bool) -> String {
-    if !allow_http {
-        return "./gradlew --no-daemon --console=plain assembleDebug".to_string();
-    }
-    // mktemp keeps the init script outside any source set, in a private directory so the
-    // template ends in the X's that both GNU and BSD mktemp replace (BSD takes any X before
-    // a suffix literally). Its generated debug inputs live under build/ and only this
-    // invocation points Gradle at them; even SIGKILL cannot make later builds inherit the
-    // override. No project config is rewritten.
-    format!(
-        r#"http_init_dir=$(/usr/bin/mktemp -d /tmp/buildbridge-http-debug.XXXXXX)
-http_init="$http_init_dir/init.gradle"
-/bin/cat > "$http_init" <<'BUILDBRIDGE_HTTP_DEBUG_INIT'
-{ANDROID_HTTP_DEBUG_INIT}
-BUILDBRIDGE_HTTP_DEBUG_INIT
-if ./gradlew --no-daemon --console=plain --no-configuration-cache --init-script "$http_init" assembleDebug; then
-    /bin/rm -rf "$http_init_dir"
-else
-    http_status=$?
-    /bin/rm -rf "$http_init_dir"
-    exit "$http_status"
-fi"#
-    )
 }
 
 fn validate_android_debug_http_mode(
@@ -1657,8 +1747,10 @@ fn selected_android_release_bytes(
 /// Builds and verifies a signed Android release, retaining only the selected files. A
 /// requested version is written into the synced app module's Gradle script first, the same
 /// edit the engine makes in the project on the host, and the signed APK is checked against it.
+#[allow(clippy::too_many_arguments)]
 pub fn run_signed_android_release<F>(
     container_name: &str,
+    layout: &ProjectLayout,
     signing: &AndroidSigningMaterial,
     env: Option<&GuestEnvFiles>,
     outputs: AndroidReleaseOutputs,
@@ -1669,6 +1761,7 @@ pub fn run_signed_android_release<F>(
 where
     F: FnMut(AndroidReleaseProgress),
 {
+    validate_layout(layout).map_err(|error| ProviderError::AndroidToolchain(error.to_string()))?;
     let keystore = read_signing_keystore(signing)?;
     if let Some(version) = version {
         validate_android_version(version).map_err(ProviderError::AndroidToolchain)?;
@@ -1689,8 +1782,13 @@ where
 
     let started_at = Instant::now();
     let toolchain = android_toolchain(HOME_CONTAINER_DIR);
-    let prepare_tools = android_tools_preparation(&toolchain);
+    let prepare_tools = android_tools_preparation(
+        &toolchain,
+        layout.kind.uses_javascript(),
+        !android_has_wrapper(layout),
+    );
     let environment = android_recipe_environment(&toolchain);
+    let jdk = android_jdk_selection(&toolchain, layout);
     let AndroidToolchain {
         build_tools,
         workspace,
@@ -1762,7 +1860,7 @@ where
             )?;
         }
         if let Some(version) = version {
-            set_container_gradle_version(container_name, workspace, version)?;
+            set_container_project_version(container_name, workspace, layout, version)?;
             on_progress(release_progress(
                 AndroidReleasePhase::Preparing,
                 0,
@@ -1784,32 +1882,46 @@ where
         .unwrap_or_default()
         .as_millis();
     let staging = format!("{home}/BuildBridge/artifacts/release-{nonce}");
+    // A release with a chosen env rebuilds what reads it; a Flutter or native project reads
+    // it from the build's environment and needs nothing rebuilt.
     let rebuild_web_assets = if env.is_some() {
         format!(
-            r#"phase building_web_assets
-cd "{workspace}"
-. "{workspace}/.buildbridge/env.sh"
-"{workspace}/node_modules/.bin/vp" build
-"{workspace}/node_modules/.bin/cap" sync android
-"#
+            "cd \"{workspace}\"\n. \"{workspace}/.buildbridge/env.sh\"\n{}",
+            android_environment_rebuild_script(layout, workspace, &toolchain.recipe_tools())
         )
     } else {
         String::new()
     };
+    // The framework's own preparation runs before the release the way it runs before the
+    // debug build, since the snapshot alone is not yet a buildable native project for every
+    // kind; dependencies are already installed by the debug build this release follows.
+    let prepare_project =
+        android_prepare_script(layout, workspace, &toolchain.recipe_tools(), version, true);
+    let gradle_dir = shell_single_quote(&android_gradle_dir(layout, workspace));
+    let build_dir = shell_single_quote(&android_build_dir(layout, workspace));
     let key_alias = shell_single_quote(&signing.key_alias);
     let build_aab = if outputs.includes_aab() { "1" } else { "0" };
     // A release APK remains an internal inspection artifact for AAB-only builds: aapt2
     // reads its effective application ID/version, and apksigner proves its signing key.
     let gradle_tasks = if outputs.includes_aab() {
-        "bundleRelease assembleRelease"
+        format!(
+            "{} {}",
+            android_task(layout, "bundleRelease"),
+            android_task(layout, "assembleRelease")
+        )
     } else {
-        "assembleRelease"
+        android_task(layout, "assembleRelease")
     };
+    let gradle_command = android_gradle_command(
+        layout,
+        &android_gradle_program(&toolchain, layout),
+        &gradle_tasks,
+        false,
+    );
     let body = format!(
         r#"phase() {{ /usr/bin/printf '__BUILDBRIDGE_PHASE__:%s\n' "$1"; }}
 phase preparing
-/bin/test -f "{workspace}/package.json"
-/bin/test -f "{workspace}/android/gradlew"
+/bin/test -d "{workspace}"
 {environment}
 if /bin/test -f "{workspace}/.buildbridge/env.sh"; then
     . "{workspace}/.buildbridge/env.sh"
@@ -1822,21 +1934,24 @@ key_pass="{signing_dir}/key.pass"
 /bin/test -f "$store_pass"
 /bin/test -f "$key_pass"
 "{JAVA_HOME}/bin/keytool" -list -keystore "$keystore" -storepass:file "$store_pass" -alias {key_alias} > /dev/null
-{rebuild_web_assets}
+{prepare_project}{rebuild_web_assets}
 phase bundling
-cd "{workspace}/android"
-./gradlew --no-daemon --console=plain {gradle_tasks}
+{jdk}cd {gradle_dir}
+{gradle_command}
 
 phase signing
 staging="{staging}"
 /bin/rm -rf "$staging"
 /bin/mkdir -p "$staging"
-aab_in="{workspace}/android/app/build/outputs/bundle/release/app-release.aab"
-apk_in="{workspace}/android/app/build/outputs/apk/release/app-release-unsigned.apk"
-if /bin/test ! -f "$apk_in"; then
-    apk_in="{workspace}/android/app/build/outputs/apk/release/app-release.apk"
+aab_in=$(/usr/bin/find {build_dir}/outputs/bundle -type f -name '*.aab' -path '*release*' 2>/dev/null | /usr/bin/sort | /usr/bin/head -n 1)
+apk_in=$(/usr/bin/find {build_dir}/outputs/apk -type f -name '*-release-unsigned.apk' 2>/dev/null | /usr/bin/sort | /usr/bin/head -n 1)
+if /bin/test -z "$apk_in"; then
+    apk_in=$(/usr/bin/find {build_dir}/outputs/apk -type f -name '*.apk' -path '*release*' 2>/dev/null | /usr/bin/sort | /usr/bin/head -n 1)
 fi
-/bin/test -f "$apk_in"
+if /bin/test -z "$apk_in"; then
+    /usr/bin/printf '%s\n' 'Gradle finished without a release APK under the module'"'"'s build/outputs/apk.' >&2
+    exit 1
+fi
 "{build_tools}/zipalign" -p -f 4 "$apk_in" "$staging/aligned.apk"
 "{build_tools}/apksigner" sign --ks "$keystore" --ks-pass "file:$store_pass" --ks-key-alias {key_alias} --key-pass "file:$key_pass" --out "$staging/{APK_NAME}" "$staging/aligned.apk"
 /bin/rm -f "$staging/aligned.apk"
@@ -2543,7 +2658,7 @@ mod tests {
 
     #[test]
     fn incompatible_architecture_is_rejected_before_downloading_any_tools() {
-        let script = android_tools_preparation(&android_toolchain("/root"));
+        let script = android_tools_preparation(&android_toolchain("/root"), true, false);
         let architecture = script.find("uname -m").unwrap();
         let first_download = script.find("/usr/bin/curl").unwrap();
         assert!(architecture < first_download);
@@ -2568,8 +2683,22 @@ mod tests {
 
     #[test]
     fn every_download_in_the_preparation_is_checked_against_its_pin() {
-        let script = android_tools_preparation(&android_toolchain("/root"));
+        let script = android_tools_preparation(&android_toolchain("/root"), true, false);
         assert!(script.contains(NODE_LINUX_X64_SHA256));
+        assert!(
+            !script.contains(GRADLE_BIN_SHA256),
+            "the wrapper is the project's own"
+        );
+        // A project that commits no wrapper gets the pinned distribution instead.
+        let supplied = android_tools_preparation(&android_toolchain("/root"), true, true);
+        assert!(supplied.contains(GRADLE_BIN_SHA256));
+        assert!(supplied.contains(&format!("gradle-{GRADLE_VERSION}-bin.zip")));
+        // A project with no JavaScript downloads no Node and no pnpm.
+        let native = android_tools_preparation(&android_toolchain("/root"), false, false);
+        assert!(!native.contains(NODE_LINUX_X64_SHA256));
+        assert!(!native.contains("pnpm@"));
+        assert!(native.contains(CMDLINE_TOOLS_LINUX_SHA256));
+        assert!(native.contains(&format!("build-tools;{BUILD_TOOLS_VERSION}")));
         assert!(script.contains(CMDLINE_TOOLS_LINUX_SHA256));
         assert!(script.contains(JDK_21_LINUX_X64_SHA256));
         assert!(script.contains("org.gradle.java.installations.paths=%s,%s"));
@@ -2587,17 +2716,30 @@ mod tests {
 
     #[test]
     fn the_recipe_environment_keeps_the_gradle_daemon_off_and_names_the_sdk() {
+        let layout = ProjectLayout::capacitor_default();
         let environment = android_recipe_environment(&android_toolchain("/root"));
         assert!(environment.contains("export ANDROID_HOME=\"/root/android-sdk\""));
         assert!(environment.contains("export GRADLE_USER_HOME=\"/root/.gradle\""));
         assert!(environment.contains("org.gradle.daemon=false"));
         assert!(environment.contains("export JAVA_HOME=\"/opt/java/openjdk\""));
-        // The wrapper decides: 8.5 and newer run on the second JDK.
-        assert!(environment.contains("gradle-wrapper.properties"));
-        assert!(environment.contains("-ge 5"));
-        assert!(environment.contains(&format!(
+        // The wrapper decides, and it is read where the layout says the Gradle root is.
+        let jdk = android_jdk_selection(&android_toolchain("/root"), &layout);
+        assert!(jdk.contains(
+            "gradle_wrapper=\"/root/BuildBridge/workspaces/active/android/gradle/wrapper/gradle-wrapper.properties\""
+        ));
+        assert!(jdk.contains("-ge 5"));
+        assert!(jdk.contains(&format!(
             "export JAVA_HOME=\"/root/.buildbridge/tools/jdk-{JDK_21_VERSION}\""
         )));
+        // A project whose Gradle root is the project itself keeps its wrapper there.
+        let mut root_gradle = ProjectLayout::capacitor_default();
+        let android = root_gradle.android.as_mut().unwrap();
+        android.root = String::new();
+        assert!(
+            android_jdk_selection(&android_toolchain("/root"), &root_gradle).contains(
+                "gradle_wrapper=\"/root/BuildBridge/workspaces/active/gradle/wrapper/gradle-wrapper.properties\""
+            )
+        );
     }
 
     #[test]
@@ -2713,7 +2855,7 @@ mod tests {
     }
 
     #[test]
-    fn an_approved_android_project_needs_package_json_gradle_wrapper_settings_and_app_module() {
+    fn an_approved_android_project_needs_its_package_wrapper_and_module_script() {
         let root = std::env::temp_dir().join(format!(
             "buildbridge-android-project-{}-{}",
             std::process::id(),
@@ -2727,36 +2869,41 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, b"").unwrap();
         };
+        let mut layout = ProjectLayout::capacitor_default();
         fs::create_dir_all(&root).unwrap();
-        assert!(validate_android_project(&root).is_err());
-        assert!(validate_android_project(&root.join("missing")).is_err());
+        assert!(validate_android_project(&root, &layout).is_err());
+        assert!(validate_android_project(&root.join("missing"), &layout).is_err());
         write("package.json");
         write("android/gradlew");
         write("android/settings.gradle.kts");
-        write("android/app/build.gradle.kts");
+        write("android/app/build.gradle");
         assert_eq!(
-            validate_android_project(&root).unwrap(),
+            validate_android_project(&root, &layout).unwrap(),
             fs::canonicalize(&root).unwrap()
         );
         fs::remove_file(root.join("android/gradlew")).unwrap();
-        let error = validate_android_project(&root).unwrap_err().to_string();
+        let error = validate_android_project(&root, &layout)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("Gradle wrapper"), "{error}");
         assert!(!error.contains(root.to_str().unwrap()), "{error}");
         fs::create_dir(root.join("android/gradlew")).unwrap();
         assert!(
-            validate_android_project(&root).is_err(),
+            validate_android_project(&root, &layout).is_err(),
             "a directory is not the wrapper script"
         );
         fs::remove_dir(root.join("android/gradlew")).unwrap();
         write("android/gradlew");
-        fs::remove_file(root.join("android/settings.gradle.kts")).unwrap();
-        fs::remove_file(root.join("android/app/build.gradle.kts")).unwrap();
-        write("android/settings.gradle");
-        write("android/app/build.gradle");
-        assert!(
-            validate_android_project(&root).is_ok(),
-            "the Groovy dialect is accepted"
-        );
+        // A native project keeps no package.json; an Expo project has nothing native yet.
+        fs::remove_file(root.join("package.json")).unwrap();
+        assert!(validate_android_project(&root, &layout).is_err());
+        layout.kind = ProjectKind::Native;
+        layout.package_manager = None;
+        assert!(validate_android_project(&root, &layout).is_ok());
+        layout.kind = ProjectKind::Expo;
+        fs::remove_dir_all(root.join("android")).unwrap();
+        write("package.json");
+        assert!(validate_android_project(&root, &layout).is_ok());
         fs::remove_dir_all(&root).unwrap();
     }
 

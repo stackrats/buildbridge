@@ -10,6 +10,7 @@ import type {
     NativeMacStatus,
 } from '../types/backend';
 import { createNativeMacStore, validNativeCommit, validNativeMinimum } from './native-mac';
+import { capacitorLayout } from '../model/project-layout';
 
 function fixture() {
     const result: NativeMacBuildResult = {
@@ -43,6 +44,7 @@ function fixture() {
                 bundleIdentifier: result.bundleIdentifier,
                 developmentTeam: 'TEAM123456',
                 scheme: 'App',
+                layout: capacitorLayout(),
                 minXcodeVersion: null,
                 minIosSdkVersion: null,
             },

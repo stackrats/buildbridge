@@ -26,12 +26,15 @@ mod device_run;
 mod disk;
 mod docker;
 mod dockur;
+mod frameworks;
 pub mod native_mac;
 mod optimizations;
 mod podfile;
 mod process;
 mod profiles;
+mod project;
 mod qmp;
+mod recipes;
 mod signing;
 mod smoke_build;
 mod ssh;
@@ -61,6 +64,8 @@ pub use optimizations::*;
 pub use podfile::*;
 pub use process::*;
 pub use profiles::*;
+pub use project::*;
+pub(crate) use recipes::*;
 pub use signing::*;
 pub use smoke_build::*;
 pub use ssh::*;
@@ -171,6 +176,28 @@ const PORTABLE_RUBY_VERSION: &str = "3.4.6";
 const PORTABLE_RUBY_DARWIN_X64_SHA256: &str =
     "99bec6d4440dc4f114754f7b9e18d79258a6dacc4089a9a50638e22a1e8665d0";
 const COCOAPODS_VERSION: &str = "1.16.2";
+/// Gradle for a project that commits no wrapper. A wrapper is the project's own decision and
+/// is used wherever there is one; Cordova's generated Android project has none, and neither do
+/// some hand-made ones, so buildbridge supplies a pinned recent stable and says which.
+/// The Cordova command line, installed on demand for a project that does not keep it in its
+/// own devDependencies — which is the common shape, since Cordova is usually installed
+/// globally. A project that does keep one uses its own.
+const CORDOVA_VERSION: &str = "13.0.0";
+const GRADLE_VERSION: &str = "8.13";
+const GRADLE_BIN_SHA256: &str = "20f1b1176237254a6fc204d8434196fa11a4cfb387567519c61556e8710aed78";
+/// Yarn 1 is what a `yarn.lock` without `.yarnrc.yml` means; Yarn 2 and later come through
+/// corepack, which reads the version the package declares.
+const YARN_CLASSIC_VERSION: &str = "1.22.22";
+/// Bun's npm package fetches the platform binary as an optional dependency, so it installs
+/// the same way pnpm does, from the registry, without a second download channel.
+const BUN_VERSION: &str = "1.4.2";
+/// Flutter's stable release, installed into the tools directory on first use by a Flutter
+/// project; the guest gets the Intel macOS build, the container the Linux one.
+const FLUTTER_VERSION: &str = "3.47.2";
+const FLUTTER_MACOS_X64_SHA256: &str =
+    "b6fd6ba98c8503d5ee06a6670627b5b1c36167ece3427435ec83b66e9b28c6b5";
+const FLUTTER_LINUX_X64_SHA256: &str =
+    "447878859d01ca9bfdb99a85f245af07ed8a15fedcd9d189c4749e8e92d1f185";
 
 /// Which image runs a machine. The two macOS providers run macOS under QEMU with KVM in a
 /// container the engine creates with a fixed argv, and differ in how the disk, the screen and
@@ -1652,6 +1679,7 @@ mod tests {
 
     #[test]
     fn workspace_snapshot_excludes_dependencies_outputs_and_secret_material() {
+        let exclusions = SnapshotExclusions::for_layout(&ProjectLayout::capacitor_default());
         for path in [
             "node_modules/package/index.js",
             ".git/config",
@@ -1667,7 +1695,7 @@ mod tests {
             "ios/App/App.xcworkspace/xcuserdata/user.xcuserdatad/data.plist",
         ] {
             assert!(
-                snapshot_path_excluded(Path::new(path)),
+                snapshot_path_excluded(Path::new(path), &exclusions),
                 "{path} should be excluded"
             );
         }
@@ -1680,7 +1708,7 @@ mod tests {
             "ios/App/App.xcworkspace/contents.xcworkspacedata",
         ] {
             assert!(
-                !snapshot_path_excluded(Path::new(path)),
+                !snapshot_path_excluded(Path::new(path), &exclusions),
                 "{path} should be included"
             );
         }

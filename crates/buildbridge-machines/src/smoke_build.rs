@@ -2,11 +2,13 @@
 
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_apple_smoke_build<F>(
     ssh_port: u16,
     username: &str,
     identity_path: &Path,
     known_hosts_path: &Path,
+    layout: &ProjectLayout,
     target: UnsignedBuildTarget,
     version: Option<&ProjectVersion>,
     mut on_progress: F,
@@ -15,6 +17,14 @@ where
     F: FnMut(AppleProjectProgress),
 {
     validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
+    validate_layout(layout)?;
+    let scheme = layout
+        .ios
+        .as_ref()
+        .map(|ios| ios.scheme.clone())
+        .ok_or_else(|| {
+            ProviderError::GuestBridge("the approved project has no iOS project".to_string())
+        })?;
     if let Some(version) = version {
         validate_apple_version(version).map_err(ProviderError::GuestBridge)?;
     }
@@ -27,13 +37,7 @@ where
     // The requested version rides on xcodebuild's command line as build settings, the way the
     // archive carries it in its settings file; the built app is checked against it below.
     let version_settings = version
-        .map(|version| {
-            format!(
-                " MARKETING_VERSION={} CURRENT_PROJECT_VERSION={}",
-                shell_single_quote(&version.version),
-                shell_single_quote(&version.build)
-            )
-        })
+        .map(|version| ios_version_settings(layout, version))
         .unwrap_or_default();
     let products_dir = match target {
         UnsignedBuildTarget::DeviceSdk => "Debug-iphoneos",
@@ -42,12 +46,21 @@ where
     let guest_home = format!("/Users/{username}");
     let workspace = format!("{guest_home}/BuildBridge/workspaces/active");
     let toolchain = guest_toolchain(&guest_home);
-    let prepare_tools = guest_tools_preparation(&toolchain);
+    let prepare_tools = guest_tools_preparation(
+        &toolchain,
+        layout.kind.uses_javascript(),
+        layout
+            .ios
+            .as_ref()
+            .is_some_and(|ios| ios.podfile_dir.is_some()),
+    );
+    let prepare_project =
+        ios_prepare_script(layout, &workspace, &toolchain.recipe_tools(), version);
+    let container_args = ios_container_args(layout, &workspace);
+    let scheme_argument = shell_single_quote(&scheme);
     let GuestToolchain {
         tools,
-        pnpm,
         gem_home,
-        pod,
         developer_dir,
         path,
         ..
@@ -55,8 +68,7 @@ where
 
     let body = format!(
         r#"phase() {{ /usr/bin/printf '__BUILDBRIDGE_PHASE__:%s\n' "$1"; }}
-/bin/test -f "{workspace}/package.json"
-/bin/test -d "{workspace}/ios/App/App.xcworkspace"
+/bin/test -d "{workspace}"
 export PATH="{path}"
 export GEM_HOME="{gem_home}"
 export GEM_PATH="{gem_home}"
@@ -123,28 +135,11 @@ if /bin/test "{needs_simulator}" -eq 1 && ! /usr/bin/xcrun simctl list runtimes 
     install_ios_platform
 fi
 
-phase installing_dependencies
-cd "{workspace}"
-"{pnpm}" install --frozen-lockfile --prefer-offline
-
-phase building_web_assets
-"{workspace}/node_modules/.bin/vp" build
-
-phase syncing_ios
-lock_before=$(/usr/bin/shasum -a 256 "{workspace}/ios/App/Podfile.lock" | /usr/bin/cut -d ' ' -f 1)
-"{workspace}/node_modules/.bin/cap" sync ios
-
-phase resolving_pods
-cd "{workspace}/ios/App"
-"{pod}" install --no-ansi
-lock_after=$(/usr/bin/shasum -a 256 "{workspace}/ios/App/Podfile.lock" | /usr/bin/cut -d ' ' -f 1)
-if /bin/test "$lock_before" != "$lock_after"; then
-    /usr/bin/printf '__BUILDBRIDGE_NATIVE_LOCK_UPDATED__:yes\n'
-fi
-
+{prepare_project}
 phase building
+cd "{workspace}"
 build_ios() {{
-    /usr/bin/xcodebuild -workspace "{workspace}/ios/App/App.xcworkspace" -scheme App -configuration Debug {build_destination} -derivedDataPath "{workspace}/.buildbridge/DerivedData" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO COMPILER_INDEX_STORE_ENABLE=NO{version_settings} build
+    /usr/bin/xcodebuild {container_args} -scheme {scheme_argument} -configuration Debug {build_destination} -derivedDataPath "{workspace}/.buildbridge/DerivedData" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO COMPILER_INDEX_STORE_ENABLE=NO{version_settings} build
 }}
 build_log="{tools}/apple-build.log"
 build_status_file="{tools}/apple-build.status"
@@ -237,7 +232,9 @@ phase completed"#
         }
         if line == "__BUILDBRIDGE_NATIVE_LOCK_UPDATED__:yes" {
             native_lockfile_updated = true;
-            let message = "The guest-only Podfile.lock was refreshed to match the synchronized native plugins.".to_string();
+            let message =
+                "The guest's Podfile.lock was refreshed to match the resolved native dependencies."
+                    .to_string();
             output_tail.push(message.clone());
             on_progress(apple_progress(
                 phase,

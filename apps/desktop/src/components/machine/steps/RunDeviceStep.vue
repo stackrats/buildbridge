@@ -21,6 +21,7 @@ import {
     usbMigrationPhaseLabel,
 } from '../../../model/phases';
 import { requestedVersion } from '../../../model/build-flow';
+import { hasWebAssets } from '../../../model/project-layout';
 import type { JourneyStep } from '../../../model/steps';
 import { useBuildFlowStore } from '../../../stores/build-flow';
 import { useEnvSetsStore } from '../../../stores/envs';
@@ -54,20 +55,26 @@ watch(attachedEnvSet, (set, previous) => {
     }
 });
 onMounted(() => void envs.load());
+const webAssets = computed(() => hasWebAssets(session.view?.appleWorkspace?.layout));
 const envOptions = computed<ListboxOption[]>(() => [
     {
         value: '',
-        label: 'Use prepared assets',
-        description:
-            'Keep web assets from the most recent build, including their environment values.',
+        label: webAssets.value ? 'Use prepared assets' : 'Project configuration only',
+        description: webAssets.value
+            ? 'Keep web assets from the most recent build, including their environment values.'
+            : 'Build with the environment the last copy or build left in place.',
     },
     ...envs.sets.value.map((set) => ({
         value: set.id,
         label: set.name,
         description:
             set.id === attachedEnvSet.value?.id
-                ? 'Rebuild web assets · the set the last copy used'
-                : 'Rebuild web assets with this environment',
+                ? webAssets.value
+                    ? 'Rebuild web assets · the set the last copy used'
+                    : 'Export to the build · the set the last copy used'
+                : webAssets.value
+                  ? 'Rebuild web assets with this environment'
+                  : 'Export this environment to the build',
     })),
 ]);
 

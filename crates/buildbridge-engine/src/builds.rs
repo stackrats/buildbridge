@@ -402,11 +402,11 @@ pub async fn approve_apple_workspace(
             "This is an Android machine; approve the project as an Android project.".to_string(),
         );
     }
-    let approved = inspect_apple_workspace(input.path.trim())?;
+    let approved = inspect_apple_workspace(input.path.trim(), input.scheme.as_deref())?;
     let workspace = match load_apple_workspace(&paths)? {
         Some(existing) if existing.local_path == approved.local_path => StoredAppleWorkspace {
             name: approved.name,
-            ios_workspace: approved.ios_workspace,
+            layout: approved.layout,
             scheme: approved.scheme,
             development_team: approved.development_team,
             bundle_identifier: approved.bundle_identifier,
@@ -479,12 +479,14 @@ pub(crate) async fn sync_apple_workspace_with_env(
 
     let event_app = app.clone();
     let event_machine_id = machine_id.to_string();
+    let layout = workspace.layout.clone();
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
         let _operation = buildbridge_machines::enter_operation(scope);
         buildbridge_machines::sync_apple_workspace(
             &workspace_path,
+            &layout,
             env_files.as_ref(),
             profile.ssh_port,
             &access.username,
@@ -538,7 +540,8 @@ pub async fn run_apple_smoke_build(
     if workspace.last_snapshot_sha256.is_none() {
         return Err("Synchronize the approved project before running a test build.".to_string());
     }
-    let requested_version = resolve_apple_project_version(&workspace.local_path, version)?;
+    let requested_version =
+        resolve_apple_project_version(&workspace.local_path, &workspace.layout, version)?;
     let current = build_machine_view(app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let identity_path = paths.guest_identity();
@@ -546,7 +549,8 @@ pub async fn run_apple_smoke_build(
     let guard = begin_machine_operation(app, &machine_id, "test_building")?;
     // The project takes the version before the build does, so it is never behind an app.
     if let Some(version) = &requested_version
-        && let Err(error) = write_apple_project_version(&workspace.local_path, version)
+        && let Err(error) =
+            write_apple_project_version(&workspace.local_path, &workspace.layout, version)
     {
         drop(guard);
         return Err(error);
@@ -562,6 +566,7 @@ pub async fn run_apple_smoke_build(
 
     let event_app = app.clone();
     let event_machine_id = machine_id.clone();
+    let layout = workspace.layout.clone();
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
@@ -571,6 +576,7 @@ pub async fn run_apple_smoke_build(
             &access.username,
             &identity_path,
             &known_hosts_path,
+            &layout,
             target,
             requested_version.as_ref(),
             |progress: AppleProjectProgress| {
@@ -629,7 +635,8 @@ pub async fn run_apple_signed_archive(
                 .to_string(),
         );
     }
-    let requested_version = resolve_apple_project_version(&workspace.local_path, version)?;
+    let requested_version =
+        resolve_apple_project_version(&workspace.local_path, &workspace.layout, version)?;
     let current = build_machine_view(app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let signing = current
@@ -673,7 +680,8 @@ pub async fn run_apple_signed_archive(
     };
     // The project takes the version before the archive does, so it is never behind an IPA.
     if let Some(version) = &requested_version
-        && let Err(error) = write_apple_project_version(&workspace.local_path, version)
+        && let Err(error) =
+            write_apple_project_version(&workspace.local_path, &workspace.layout, version)
     {
         drop(guard);
         let _ = fs::remove_dir(&output_directory);
@@ -683,7 +691,7 @@ pub async fn run_apple_signed_archive(
     let event_app = app.clone();
     let event_machine_id = machine_id.clone();
     let operation_output_directory = output_directory.clone();
-    let scheme = workspace.scheme.clone();
+    let layout = workspace.layout.clone();
     let env_set_name = chosen_env.as_ref().map(|(name, _)| name.clone());
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
@@ -695,7 +703,7 @@ pub async fn run_apple_signed_archive(
             &identity_path,
             &known_hosts_path,
             &signing,
-            &scheme,
+            &layout,
             &keychain_password,
             chosen_env.as_ref().map(|(_, files)| files),
             requested_version.as_ref(),

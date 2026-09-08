@@ -192,7 +192,7 @@ pub async fn prepare_apple_device_signing(
     let device_bundle_identifier = {
         let identity_path = paths.guest_identity();
         let known_hosts_path = paths.known_hosts();
-        let scheme = workspace.scheme.clone();
+        let layout = workspace.layout.clone();
         let ssh_port = profile.ssh_port;
         let username = access.username.clone();
         tokio::task::spawn_blocking(move || {
@@ -201,7 +201,7 @@ pub async fn prepare_apple_device_signing(
                 &username,
                 &identity_path,
                 &known_hosts_path,
-                &scheme,
+                &layout,
             )
             .map_err(|error| error.to_string())
         })
@@ -544,7 +544,8 @@ pub async fn run_apple_device_build(
     if !workspace.last_build_succeeded || workspace.last_snapshot_sha256.is_none() {
         return Err("Complete the unsigned project test build first.".to_string());
     }
-    let requested_version = resolve_apple_project_version(&workspace.local_path, input.version)?;
+    let requested_version =
+        resolve_apple_project_version(&workspace.local_path, &workspace.layout, input.version)?;
     let current = build_machine_view(app, &paths).await?;
     ensure_apple_project_guest_ready(&current)?;
     let signing = current
@@ -596,11 +597,12 @@ pub async fn run_apple_device_build(
         .expect("checked above");
     let identity_path = paths.guest_identity();
     let known_hosts_path = paths.known_hosts();
-    let scheme = workspace.scheme.clone();
+    let layout = workspace.layout.clone();
     let guard = begin_machine_operation(app, &machine_id, "running_on_device")?;
     // The project takes the version before the build does, so it is never behind the phone.
     if let Some(version) = &requested_version
-        && let Err(error) = write_apple_project_version(&workspace.local_path, version)
+        && let Err(error) =
+            write_apple_project_version(&workspace.local_path, &workspace.layout, version)
     {
         drop(guard);
         return Err(error);
@@ -625,7 +627,7 @@ pub async fn run_apple_device_build(
             &identity_path,
             &known_hosts_path,
             &device_signing,
-            &scheme,
+            &layout,
             &device,
             &keychain_password,
             chosen_env.as_ref().map(|(_, files)| files),
@@ -697,13 +699,25 @@ pub async fn adopt_guest_podfile_lock(
                 .to_string(),
         );
     }
-    let host_lock = PathBuf::from(&workspace.local_path).join("ios/App/Podfile.lock");
+    let podfile_dir = workspace
+        .layout
+        .ios
+        .as_ref()
+        .and_then(|ios| ios.podfile_dir.clone())
+        .ok_or_else(|| {
+            "The approved project has no Podfile, so there is no lock to adopt.".to_string()
+        })?;
+    let host_lock = PathBuf::from(&workspace.local_path)
+        .join(&podfile_dir)
+        .join("Podfile.lock");
+    let layout = workspace.layout.clone();
     let guest_lock = run_machine_operation(app, &machine_id, "adopting_lock", move || {
         buildbridge_machines::read_guest_podfile_lock(
             guest.ssh_port(),
             &guest.username,
             &guest.identity_path,
             &guest.known_hosts_path,
+            &layout,
         )
         .map_err(|error| error.to_string())
     })

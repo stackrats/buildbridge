@@ -325,12 +325,12 @@ function build(): void {
         </div>
 
         <template #details>
-            Compiles the App scheme with signing disabled. The device SDK is also used by signed
-            archives and phone builds. Xcode may require a one-time iOS platform download for it;
-            the Simulator target always requires that platform. The first run on a machine
-            bootstraps pinned Node, pnpm, Ruby, and CocoaPods and installs locked dependencies. If
-            this desktop restarts mid-build, running it again reattaches to the job instead of
-            starting a second one.
+            Compiles the project's scheme with signing disabled. The device SDK is also used by
+            signed archives and phone builds. Xcode may require a one-time iOS platform download for
+            it; the Simulator target always requires that platform. The first run on a machine
+            bootstraps pinned Node, the project's package manager, Ruby and CocoaPods, and Flutter
+            for a Flutter project, then installs the dependencies. If this desktop restarts
+            mid-build, running it again reattaches to the job instead of starting a second one.
         </template>
     </StepPanel>
 </template>

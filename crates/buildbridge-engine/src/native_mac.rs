@@ -32,6 +32,10 @@ pub struct NativeMacProject {
     pub bundle_identifier: String,
     pub development_team: Option<String>,
     pub scheme: String,
+    /// What the folder holds, as detected when it was approved; approvals from before
+    /// detection existed were Capacitor projects in the one layout that was assumed.
+    #[serde(default = "ProjectLayout::capacitor_default")]
+    pub layout: ProjectLayout,
     pub min_xcode_version: Option<String>,
     pub min_ios_sdk_version: Option<String>,
 }
@@ -359,16 +363,16 @@ pub async fn native_mac_status(app: &Engine) -> Result<NativeMacStatus, String> 
             let minimums = check_owner_minimums(project, &toolchain);
             issues.extend(minimums.0);
             compatibility_warnings.extend(minimums.1);
-            match inspect_apple_workspace(&project.path) {
+            match inspect_apple_workspace(&project.path, Some(&project.scheme)) {
                 Ok(workspace) => {
                     if workspace.bundle_identifier.as_deref() != Some(&project.bundle_identifier) || workspace.development_team != project.development_team { compatibility_warnings.push("Local checkout: its signing settings differ from the approved project. Requested commits must still match the saved approval; approve the changed project to build its new identity.".to_string()); }
-                    let compatibility = check_compatibility(project, Path::new(&project.path), &toolchain);
+                    let compatibility = check_compatibility(project, &workspace.layout, Path::new(&project.path), &toolchain);
                     for issue in compatibility.0 { if !issues.contains(&issue) { compatibility_warnings.push(format!("Local checkout: {issue}")); } }
                     for warning in compatibility.1 { if !compatibility_warnings.contains(&warning) { compatibility_warnings.push(format!("Local checkout: {warning}")); } }
                 }
                 Err(error) => compatibility_warnings.push(format!("Local checkout: {error} Requested commits are fetched and checked separately.")),
             }
-        } else { issues.push("Approve a local Capacitor project on this Mac.".to_string()); }
+        } else { issues.push("Approve a local iOS project on this Mac.".to_string()); }
         let test_ready = supported && issues.is_empty() && !busy;
         let mut archive_ready = test_ready;
         if let Some(error) = identity_issue { issues.push(error); archive_ready = false; }
@@ -406,7 +410,7 @@ pub async fn approve_native_mac_project(
         let _operation = operation;
         validate_minimum(input.min_xcode_version.as_deref())?;
         validate_minimum(input.min_ios_sdk_version.as_deref())?;
-        let workspace = inspect_apple_workspace(&input.path)?;
+        let workspace = inspect_apple_workspace(&input.path, None)?;
         let repository = native::native_repository_for(Path::new(&workspace.local_path))?;
         let bundle_identifier = workspace.bundle_identifier.ok_or_else(|| {
             "Set a concrete Release bundle identifier in this project's Xcode settings first."
@@ -419,6 +423,7 @@ pub async fn approve_native_mac_project(
             bundle_identifier,
             development_team: workspace.development_team,
             scheme: workspace.scheme,
+            layout: workspace.layout,
             min_xcode_version: input.min_xcode_version,
             min_ios_sdk_version: input.min_ios_sdk_version,
         };
@@ -662,9 +667,9 @@ pub(crate) async fn run_authorized_native_mac_build(
         let checkout = staging.join("Source");
         native::checkout_native_commit(&project.repository, &input.commit, &checkout, |line| progress(&app, "source", "Fetch the approved source commit", Some(line)))?;
         validate_source_links(&checkout)?;
-        let fetched = inspect_apple_workspace(checkout.to_str().ok_or_else(|| "The native build directory is not UTF-8.".to_string())?)?;
+        let fetched = inspect_apple_workspace(checkout.to_str().ok_or_else(|| "The native build directory is not UTF-8.".to_string())?, Some(&project.scheme))?;
         if fetched.bundle_identifier.as_deref() != Some(&project.bundle_identifier) || fetched.development_team != project.development_team { return Err("This commit changes the approved project's bundle identifier or team. The Mac owner must approve the updated project first.".to_string()); }
-        let compatibility = check_compatibility(&project, &checkout, &toolchain);
+        let compatibility = check_compatibility(&project, &fetched.layout, &checkout, &toolchain);
         if !compatibility.0.is_empty() { return Err(compatibility.0.join("\n")); }
         for warning in compatibility.1 { progress(&app, "compatibility", "Review project compatibility", Some(warning)); }
         // Checked-in .env files are source and remain so; the explicit saved environment uses
@@ -684,7 +689,7 @@ pub(crate) async fn run_authorized_native_mac_build(
             Some(install_profile(signing)?)
         } else { None };
         let output = staging.join("Artifacts");
-        let recipe = native::NativeBuildRecipe { project: &checkout, staging: &staging, output: &output, developer_directory: toolchain.developer_directory.as_deref().ok_or_else(|| "Select Xcode on this Mac first.".to_string())?, bundle_identifier: &project.bundle_identifier, team: signing.as_ref().map(|s| s.profile.team_identifier.as_str()).or(project.development_team.as_deref()).unwrap_or_default(), signing: signing.as_ref().map(|s| (s.identity_sha1.as_str(), &s.profile)), environment: &environment, secrets: &secrets };
+        let recipe = native::NativeBuildRecipe { project: &checkout, layout: &fetched.layout, staging: &staging, output: &output, developer_directory: toolchain.developer_directory.as_deref().ok_or_else(|| "Select Xcode on this Mac first.".to_string())?, bundle_identifier: &project.bundle_identifier, team: signing.as_ref().map(|s| s.profile.team_identifier.as_str()).or(project.development_team.as_deref()).unwrap_or_default(), signing: signing.as_ref().map(|s| (s.identity_sha1.as_str(), &s.profile)), environment: &environment, secrets: &secrets };
         let (mut artifacts, output_tail) = native::run_native_recipe(recipe, |phase, label, line| progress(&app, phase, label, line))?;
         if _operation.scope.is_cancelled() { return Err(CANCELLED_MESSAGE.to_string()); }
         if !artifacts.is_empty() {
@@ -931,6 +936,7 @@ fn check_owner_minimums(
 
 fn check_compatibility(
     project: &NativeMacProject,
+    layout: &ProjectLayout,
     source: &Path,
     toolchain: &NativeMacToolchain,
 ) -> (Vec<String>, Vec<String>) {
@@ -958,7 +964,12 @@ fn check_compatibility(
             ));
         }
     }
-    if let Ok(settings) = fs::read_to_string(source.join("ios/App/App.xcodeproj/project.pbxproj")) {
+    let project_file = layout
+        .ios
+        .as_ref()
+        .map(|ios| ios.project_file())
+        .unwrap_or_else(|| "ios/App/App.xcodeproj/project.pbxproj".to_string());
+    if let Ok(settings) = fs::read_to_string(source.join(project_file)) {
         for deployment in xcode_setting_values(&settings, "IPHONEOS_DEPLOYMENT_TARGET") {
             if toolchain
                 .ios_sdk
@@ -991,8 +1002,8 @@ fn check_compatibility(
                             toolchain.pnpm_version.as_deref().unwrap_or("none")
                         ));
                     }
-                } else {
-                    issues.push("This native recipe requires pnpm; the commit selects another package manager.".to_string());
+                } else if layout.package_manager == Some(PackageManager::Pnpm) {
+                    issues.push("The project locks its dependencies with pnpm, but this commit's packageManager selects another manager; approve the project again once the change is deliberate.".to_string());
                 }
             }
             if let Some(required) = package
@@ -1019,9 +1030,10 @@ fn check_compatibility(
                 }
             }
         }
-        None => issues.push(
+        None if layout.kind.uses_javascript() => issues.push(
             "Could not inspect the commit's package.json before running its build.".to_string(),
         ),
+        None => {}
     }
     (issues, warnings)
 }
@@ -1038,6 +1050,7 @@ mod tests {
             bundle_identifier: "com.example.app".into(),
             development_team: Some("TEAM123456".into()),
             scheme: "App".into(),
+            layout: ProjectLayout::capacitor_default(),
             min_xcode_version: Some("16.4".into()),
             min_ios_sdk_version: Some("18.5".into()),
         }
@@ -1093,7 +1106,7 @@ mod tests {
             node_version: Some("v20.0.0".into()),
             ..Default::default()
         };
-        let (issues, _) = check_compatibility(&project(), &dir, &tools);
+        let (issues, _) = check_compatibility(&project(), &project().layout, &dir, &tools);
         assert_eq!(issues.len(), 2);
         assert!(issues.iter().any(|v| v.contains("Xcode 16.4")));
         assert!(issues.iter().any(|v| v.contains("Node.js >=22")));
@@ -1130,9 +1143,13 @@ mod tests {
             ..Default::default()
         };
         assert!(check_owner_minimums(&project(), &tools).0.is_empty());
-        assert!(!check_compatibility(&project(), &local, &tools).0.is_empty());
         assert!(
-            check_compatibility(&project(), &fetched, &tools)
+            !check_compatibility(&project(), &project().layout, &local, &tools)
+                .0
+                .is_empty()
+        );
+        assert!(
+            check_compatibility(&project(), &project().layout, &fetched, &tools)
                 .0
                 .is_empty()
         );

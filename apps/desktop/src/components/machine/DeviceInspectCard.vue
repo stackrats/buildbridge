@@ -7,7 +7,7 @@
 // opens Safari with its Develop menu on and then says what to click. It is not a machine
 // operation — the time to inspect is while the run streams — so it keeps its own state here.
 import { Globe, ScrollText, X } from '@lucide/vue';
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 
 import { useMachinesStore, type MachineSession } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
@@ -27,6 +27,9 @@ const { session, available } = defineProps<{
 }>();
 const machines = useMachinesStore();
 const ui = useUi();
+// Only a Capacitor app's web view answers at capacitor://localhost; any other web view is
+// listed by its page title.
+const capacitor = computed(() => session.view?.appleWorkspace?.layout.kind === 'capacitor');
 const inspector = ref<SafariInspectorResult | null>(null);
 const inspecting = ref(false);
 const inspectorError = ref<string | null>(null);
@@ -106,7 +109,9 @@ async function openInspector(): Promise<void> {
                     <li>
                         In Safari's menu bar: <b>Develop</b> › <b>{{ deviceName }}</b> › the app's
                         web view, listed as
-                        <span class="group inline-flex items-center gap-0.5 align-middle"
+                        <span
+                            v-if="capacitor"
+                            class="group inline-flex items-center gap-0.5 align-middle"
                             ><code class="font-mono">capacitor://localhost</code>
                             <CopyButton
                                 text="capacitor://localhost"
@@ -114,14 +119,15 @@ async function openInspector(): Promise<void> {
                                 size="iconXs"
                                 class="opacity-45 group-hover:opacity-100"
                         /></span>
+                        <template v-else>its address</template>
                         or its page title. The inspector shows its console, network requests,
                         elements and storage.
                     </li>
                 </ol>
                 <p class="mt-2">
-                    Only the Debug build buildbridge installs is inspectable (Capacitor enables it
-                    in Debug), so run the app first. The console is this machine's QEMU window on
-                    this host; Ctrl+Alt+G releases the mouse.
+                    Only the Debug build buildbridge installs is inspectable (a web view is
+                    inspectable in Debug builds), so run the app first. The console is this
+                    machine's QEMU window on this host; Ctrl+Alt+G releases the mouse.
                 </p>
                 <div class="mt-2">
                     <Button variant="ghost" size="sm" @click="inspector = null">

@@ -14,6 +14,7 @@ import {
     journeyHeadline,
     summarizeJourney,
 } from './steps';
+import { capacitorLayout } from './project-layout';
 
 const readyHost: HostPrerequisites = {
     supportedHost: true,
@@ -268,7 +269,7 @@ function provisionedView(): MachineView {
     view.appleWorkspace = {
         localPath: '/home/you/projects/example-app',
         name: 'example-app',
-        iosWorkspace: 'ios/App/App.xcworkspace',
+        layout: capacitorLayout(),
         scheme: 'App',
         developmentTeam: 'TEAM123456',
         bundleIdentifier: 'com.example.app',
@@ -333,7 +334,7 @@ describe('deriveBuildSteps', () => {
         view.appleWorkspace = {
             localPath: '/home/you/projects/example-app',
             name: 'app',
-            iosWorkspace: 'ios/App/App.xcworkspace',
+            layout: capacitorLayout(),
             scheme: 'App',
             developmentTeam: 'TEAM123456',
             bundleIdentifier: 'nz.co.example.app',
@@ -370,7 +371,7 @@ describe('deriveBuildSteps', () => {
         view.appleWorkspace = {
             localPath: '/home/you/projects/example-app',
             name: 'app',
-            iosWorkspace: 'ios/App/App.xcworkspace',
+            layout: capacitorLayout(),
             scheme: 'App',
             developmentTeam: 'TEAM123456',
             bundleIdentifier: 'nz.co.example.app',
@@ -1248,6 +1249,7 @@ describe('an Android machine', () => {
         view.android!.workspace = {
             localPath: '/home/you/app',
             name: 'app',
+            layout: capacitorLayout(),
             applicationId: 'com.example.app',
             lastSnapshotSha256: 'abc123def456',
             lastSyncFileCount: 10,
@@ -1290,6 +1292,7 @@ describe('an Android machine', () => {
         view.android!.workspace = {
             localPath: '/home/you/app',
             name: 'app',
+            layout: capacitorLayout(),
             applicationId: 'com.example.app',
             lastSnapshotSha256: 'abc',
             lastSyncFileCount: 10,
@@ -1316,6 +1319,7 @@ describe('an Android machine', () => {
         view.android!.workspace = {
             localPath: '/home/you/app',
             name: 'app',
+            layout: capacitorLayout(),
             applicationId: 'com.example.app',
             lastSnapshotSha256: 'abc',
             lastSyncFileCount: 10,

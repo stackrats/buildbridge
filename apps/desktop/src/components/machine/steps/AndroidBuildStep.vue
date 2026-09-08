@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // The debug build: Gradle's assembleDebug in the container, after the toolchain, the locked
-// dependencies, the web assets and Capacitor's sync. The first run also downloads the toolchain.
+// dependencies and the framework's own preparation. The first run also downloads the toolchain.
 import { FolderOpen, Hammer, Package, ScrollText } from '@lucide/vue';
 import { computed, onMounted, ref } from 'vue';
 
@@ -145,8 +145,8 @@ const details = computed(() =>
                 "
                 :title="
                     source === 'latest'
-                        ? 'Copies the latest local source into the container, installs the locked dependencies, builds the web assets, synchronizes the Capacitor Android project, and compiles the debug APK'
-                        : 'Installs the locked dependencies, builds the web assets, synchronizes the Capacitor Android project, and compiles the debug APK from the saved snapshot'
+                        ? 'Copies the latest local source into the container, installs the dependencies, prepares the Android project, and compiles the debug APK'
+                        : 'Installs the dependencies, prepares the Android project, and compiles the debug APK from the saved snapshot'
                 "
                 @click="build"
             >
@@ -296,13 +296,13 @@ const details = computed(() =>
         </div>
 
         <template #details>
-            Compiles the debug build type with Gradle. The first run downloads pinned Node and pnpm,
-            Google's command-line tools, the build tools and a second JDK into the container's home
-            on this host, and accepts the SDK licences; the platforms the project asks for follow
-            through its own Gradle plugin, and the project's Gradle wrapper decides which JDK Gradle
-            runs on. Gradle runs without a daemon, so a stopped container holds no memory. If this
-            desktop restarts mid-build, running it again reattaches to the job instead of starting a
-            second one.
+            Compiles the debug build type with Gradle. The first run downloads pinned Node and the
+            project's package manager, Google's command-line tools, the build tools and a second
+            JDK, and Flutter for a Flutter project, into the container's home on this host, and
+            accepts the SDK licences; the platforms the project asks for follow through its own
+            Gradle plugin, and the project's Gradle wrapper decides which JDK Gradle runs on. Gradle
+            runs without a daemon, so a stopped container holds no memory. If this desktop restarts
+            mid-build, running it again reattaches to the job instead of starting a second one.
         </template>
     </StepPanel>
 </template>

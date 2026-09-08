@@ -7,6 +7,7 @@ import { computed, ref } from 'vue';
 
 import { formatBytes, percent, relativeTime } from '../../../lib/format';
 import { androidBuildPhaseLabel } from '../../../model/phases';
+import { describeProjectKind } from '../../../model/project-layout';
 import type { JourneyStep } from '../../../model/steps';
 import { useMachinesStore, type MachineSession } from '../../../stores/machines';
 import { useUi } from '../../../stores/ui';
@@ -17,6 +18,7 @@ import Field from '../../ui/Field.vue';
 import KeyValue from '../../ui/KeyValue.vue';
 import PathField from '../../ui/PathField.vue';
 import ProgressRow from '../../ui/ProgressRow.vue';
+import Select from '../../ui/Select.vue';
 import Spinner from '../../ui/Spinner.vue';
 import StepPanel from '../../ui/StepPanel.vue';
 
@@ -37,12 +39,32 @@ const failure = computed(() =>
         : null,
 );
 
+// What the folder must hold, and what is read from it: the detector names the framework in
+// front of the Gradle project from the files it finds, and never runs the project's own tools.
 const requirements = [
-    'package.json and pnpm-lock.yaml',
-    'capacitor.config.ts',
-    'android/gradlew, committed with its wrapper',
-    'android/settings.gradle and android/app/build.gradle',
+    'A Gradle project with an application module, where the app keeps it',
+    'Capacitor, Cordova, React Native, Expo or Flutter in front of it, or nothing at all',
+    'gradlew committed with its wrapper, beside settings.gradle',
+    'The lockfile of the package manager the project installs with, when it has one',
 ];
+
+// The module is chosen among the project's application modules; choosing one approves the
+// same folder again with it.
+const moduleOptions = computed(() =>
+    (workspace.value?.layout.android?.modules ?? []).map((module) => ({
+        value: module,
+        label: module,
+        description: 'An application module of the Gradle project',
+    })),
+);
+const module = computed({
+    get: () => workspace.value?.layout.android?.modulePath ?? '',
+    set: (value: string) => {
+        if (workspace.value && value && value !== workspace.value.layout.android?.modulePath) {
+            void machines.approveWorkspace(session.id, workspace.value.localPath, value);
+        }
+    },
+});
 
 async function remove(): Promise<void> {
     removeOpen.value = false;
@@ -100,7 +122,7 @@ async function remove(): Promise<void> {
                 :cause="
                     failure.operation === 'sync'
                         ? null
-                        : 'The folder must hold a Capacitor project with its Android platform added; the files it needs are listed below.'
+                        : 'The folder must hold an Android app: a Gradle project with an application module, with or without a framework in front of it. What buildbridge looks for is listed below.'
                 "
                 :diagnostic="failure.message"
             >
@@ -114,10 +136,10 @@ async function remove(): Promise<void> {
 
         <div class="space-y-3">
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                Approval is read-only: buildbridge validates the project shape and reads the
-                application identifier from the app module's Gradle script; only this one folder is
-                ever read. Every build of the latest source copies a bounded, checksummed snapshot
-                of it into the container, leaving out Git metadata,
+                Approval is read-only: buildbridge detects what kind of project the folder holds,
+                the Gradle module to build, and the application identifier its script declares; only
+                this one folder is ever read. Every build of the latest source copies a bounded,
+                checksummed snapshot of it into the container, leaving out Git metadata,
                 <span class="font-mono">node_modules</span>, Gradle and build output, every
                 <span class="font-mono">.env</span> file, keys, and certificates. Synchronizing here
                 refreshes that snapshot without building.
@@ -134,7 +156,17 @@ async function remove(): Promise<void> {
                         mono: workspace.applicationId !== null,
                         tone: workspace.applicationId ? 'default' : 'warn',
                     },
-                    { label: 'Module', value: 'android/app', mono: true },
+                    {
+                        label: 'Project kind',
+                        value: describeProjectKind(workspace.layout),
+                        copyable: false,
+                    },
+                    {
+                        label: 'Gradle root',
+                        value: workspace.layout.android?.root || 'the project folder',
+                        mono: Boolean(workspace.layout.android?.root),
+                    },
+                    { label: 'Module', value: workspace.layout.android?.modulePath, mono: true },
                 ]"
             />
             <KeyValue
@@ -170,7 +202,7 @@ async function remove(): Promise<void> {
 
             <Field
                 :label="workspace ? 'Approve a different folder' : 'Project folder on this host'"
-                hint="A Capacitor project with its Android platform added. Drop the folder here or paste its absolute path."
+                hint="Any Android app: Capacitor, Cordova, React Native, Expo, Flutter, or a plain Gradle project. Drop the folder here or paste its absolute path."
             >
                 <PathField
                     v-model="path"
@@ -192,6 +224,17 @@ async function remove(): Promise<void> {
                         {{ workspace ? 'Re-approve' : 'Approve project' }}
                     </Button>
                 </template>
+            </Field>
+            <Field
+                v-if="workspace && moduleOptions.length > 1"
+                label="Module to build"
+                hint="The project has more than one application module. Choosing approves the same folder again with it."
+            >
+                <Select
+                    v-model="module"
+                    :options="moduleOptions"
+                    :disabled="busy || step.status === 'pending'"
+                />
             </Field>
             <ul class="grid gap-1 text-xs text-zinc-500 sm:grid-cols-2 dark:text-zinc-400">
                 <li v-for="item in requirements" :key="item">· {{ item }}</li>

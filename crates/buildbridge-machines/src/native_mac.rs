@@ -888,6 +888,7 @@ fn fetch_needs_full_history(error: &str) -> bool {
 
 pub struct NativeBuildRecipe<'a> {
     pub project: &'a Path,
+    pub layout: &'a ProjectLayout,
     pub staging: &'a Path,
     pub output: &'a Path,
     pub developer_directory: &'a str,
@@ -898,8 +899,10 @@ pub struct NativeBuildRecipe<'a> {
     pub secrets: &'a [String],
 }
 
-/// Fixed Capacitor recipe: install locked JS deps, build web assets, sync iOS, enforce the
-/// committed native lock, then unsigned compilation or a manually signed App Store archive.
+/// The recipe the layout names, with the owner's own tools: the project's dependencies, its
+/// web assets and its framework's preparation when it has them, CocoaPods where a Podfile
+/// is, a committed native lock enforced, then unsigned compilation or a manually signed App
+/// Store archive of the scheme.
 pub fn run_native_recipe<F>(
     recipe: NativeBuildRecipe<'_>,
     mut on_progress: F,
@@ -910,6 +913,7 @@ where
     require_native_mac()?;
     let NativeBuildRecipe {
         project,
+        layout,
         staging,
         output,
         developer_directory,
@@ -922,9 +926,21 @@ where
     if (signing.is_some() && !valid_native_team(team)) || !valid_native_bundle(bundle_identifier) {
         return Err("The approved Apple team or bundle identifier is invalid.".to_string());
     }
+    crate::recipes::validate_layout(layout).map_err(|error| error.to_string())?;
+    let ios = layout
+        .ios
+        .as_ref()
+        .ok_or_else(|| "The approved project has no iOS project.".to_string())?;
     let mut tail = Vec::new();
-    let lock = project.join("ios/App/Podfile.lock");
-    let before = fs::read(&lock).map_err(|e| e.to_string())?;
+    let lock = ios
+        .podfile_dir
+        .as_ref()
+        .filter(|_| ios.podfile_locked)
+        .map(|directory| project.join(directory).join("Podfile.lock"));
+    let lock_before = match &lock {
+        Some(lock) => Some(fs::read(lock).map_err(|e| e.to_string())?),
+        None => None,
+    };
     let mut build_command =
         |program: OsString, args: Vec<OsString>, cwd: &Path, phase: &str, label: &str| {
             on_progress(phase, label, None);
@@ -933,49 +949,147 @@ where
                 .args(args)
                 .envs(environment.iter().map(|(k, v)| (k, v)))
                 .env("DEVELOPER_DIR", developer_directory)
+                .env("CI", "1")
                 .env("CYPRESS_INSTALL_BINARY", "0");
             run(cmd, label, secrets, &mut tail, &mut |line| {
                 on_progress(phase, label, Some(line))
             })
         };
     let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
-    build_command(
-        "pnpm".into(),
-        args(&["install", "--frozen-lockfile", "--prefer-offline"]),
-        project,
-        "dependencies",
-        "Install locked JavaScript dependencies",
-    )?;
-    build_command(
-        project.join("node_modules/.bin/vp").into_os_string(),
-        args(&["build"]),
-        project,
-        "web",
-        "Build web assets",
-    )?;
-    build_command(
-        project.join("node_modules/.bin/cap").into_os_string(),
-        args(&["sync", "ios"]),
-        project,
-        "sync",
-        "Prepare the Capacitor iOS project",
-    )?;
-    build_command(
-        "pod".into(),
-        args(&["install", "--deployment", "--no-ansi"]),
-        &project.join("ios/App"),
-        "pods",
-        "Install locked CocoaPods",
-    )?;
-    if fs::read(&lock).map_err(|e| e.to_string())? != before {
+    let manager_program = |manager: PackageManager| match manager {
+        PackageManager::Pnpm => "pnpm",
+        PackageManager::Npm => "npm",
+        PackageManager::Yarn => "yarn",
+        PackageManager::Bun => "bun",
+    };
+    match layout.kind {
+        ProjectKind::Flutter => build_command(
+            "flutter".into(),
+            args(&["pub", "get"]),
+            project,
+            "dependencies",
+            "Fetch the Dart dependencies",
+        )?,
+        kind if kind.uses_javascript() => {
+            if let Some(manager) = layout.package_manager {
+                let install: Vec<&str> = match manager {
+                    PackageManager::Pnpm => {
+                        vec!["install", "--frozen-lockfile", "--prefer-offline"]
+                    }
+                    PackageManager::Npm => {
+                        if project.join("package-lock.json").is_file()
+                            || project.join("npm-shrinkwrap.json").is_file()
+                        {
+                            vec!["ci", "--no-audit", "--no-fund"]
+                        } else {
+                            vec!["install", "--no-audit", "--no-fund"]
+                        }
+                    }
+                    PackageManager::Yarn => {
+                        if project.join(".yarnrc.yml").is_file() {
+                            vec!["install", "--immutable"]
+                        } else {
+                            vec!["install", "--frozen-lockfile", "--non-interactive"]
+                        }
+                    }
+                    PackageManager::Bun => vec!["install", "--frozen-lockfile"],
+                };
+                build_command(
+                    manager_program(manager).into(),
+                    args(&install),
+                    project,
+                    "dependencies",
+                    "Install the JavaScript dependencies",
+                )?;
+            }
+        }
+        _ => {}
+    }
+    if layout.kind.has_web_assets()
+        && let Some(manager) = layout.package_manager
+        && package_has_build_script(project)
+    {
+        build_command(
+            manager_program(manager).into(),
+            args(&["run", "build"]),
+            project,
+            "web",
+            "Build web assets",
+        )?;
+    }
+    match layout.kind {
+        ProjectKind::Capacitor => build_command(
+            project.join("node_modules/.bin/cap").into_os_string(),
+            args(&["sync", "ios"]),
+            project,
+            "sync",
+            "Prepare the Capacitor iOS project",
+        )?,
+        ProjectKind::Cordova => build_command(
+            project.join("node_modules/.bin/cordova").into_os_string(),
+            args(&["prepare", "ios"]),
+            project,
+            "sync",
+            "Prepare the Cordova iOS project",
+        )?,
+        ProjectKind::Expo if !project.join(&ios.project).is_dir() => build_command(
+            project.join("node_modules/.bin/expo").into_os_string(),
+            args(&["prebuild", "--platform", "ios", "--no-install"]),
+            project,
+            "sync",
+            "Write the iOS project with Expo",
+        )?,
+        ProjectKind::Flutter => build_command(
+            "flutter".into(),
+            args(&["build", "ios", "--config-only", "--no-codesign"]),
+            project,
+            "sync",
+            "Configure the iOS project with Flutter",
+        )?,
+        _ => {}
+    }
+    if let Some(podfile_dir) = &ios.podfile_dir {
+        let mut pod_args = vec!["install"];
+        if ios.podfile_locked {
+            pod_args.push("--deployment");
+        }
+        pod_args.push("--no-ansi");
+        build_command(
+            "pod".into(),
+            args(&pod_args),
+            &project.join(podfile_dir),
+            "pods",
+            "Install CocoaPods",
+        )?;
+    }
+    if let (Some(lock), Some(before)) = (&lock, &lock_before)
+        && fs::read(lock).map_err(|e| e.to_string())? != *before
+    {
         return Err("Preparing iOS changed Podfile.lock. Commit the updated native lockfile in your project, then build that commit.".to_string());
     }
-    let archive = staging.join("App.xcarchive");
-    let mut xcode = args(&["-workspace"]);
-    xcode.push(project.join("ios/App/App.xcworkspace").into_os_string());
+    if let Some(target) = ios.generated_scheme_target() {
+        let schemes = project.join(&ios.project).join("xcshareddata/xcschemes");
+        let scheme_file = schemes.join(format!("{}.xcscheme", ios.scheme));
+        if !scheme_file.is_file() {
+            fs::create_dir_all(&schemes).map_err(|e| e.to_string())?;
+            let project_name = ios.project.rsplit('/').next().unwrap_or(&ios.project);
+            fs::write(
+                &scheme_file,
+                crate::recipes::generated_scheme_xml(target, project_name),
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    let scheme = ios.scheme.as_str();
+    let archive = staging.join(format!("{scheme}.xcarchive"));
+    let mut xcode = args(&[match ios.container_kind {
+        XcodeContainerKind::Workspace => "-workspace",
+        XcodeContainerKind::Project => "-project",
+    }]);
+    xcode.push(project.join(&ios.container).into_os_string());
     xcode.extend(args(&[
         "-scheme",
-        "App",
+        scheme,
         "-configuration",
         if signing.is_some() {
             "Release"
@@ -1003,7 +1117,8 @@ where
         }
         xcode.extend(args(&["-archivePath"]));
         xcode.push(archive.clone().into_os_string());
-        let target = native_archive_target(project, developer_directory, bundle_identifier)?;
+        let target =
+            native_archive_target(project, layout, developer_directory, bundle_identifier)?;
         let settings = staging.join("Signing.xcconfig");
         fs::write(
             &settings,
@@ -1095,9 +1210,9 @@ where
         &staging.join("ipa-certificate"),
     )?;
     fs::create_dir(output).map_err(|e| e.to_string())?;
-    let ipa_path = output.join("App-AppStore.ipa");
+    let ipa_path = output.join(format!("{scheme}-AppStore.ipa"));
     fs::copy(&ipas[0], &ipa_path).map_err(|e| e.to_string())?;
-    let archive_path = output.join("App.xcarchive.zip");
+    let archive_path = output.join(format!("{scheme}.xcarchive.zip"));
     build_command(
         "/usr/bin/ditto".into(),
         vec![
@@ -1185,15 +1300,36 @@ fn native_application(directory: &Path) -> Result<PathBuf, String> {
     Ok(apps.remove(0))
 }
 
-fn native_archive_target(project: &Path, developer: &str, bundle: &str) -> Result<String, String> {
+/// Whether the package declares a `build` script for the web assets.
+fn package_has_build_script(project: &Path) -> bool {
+    fs::read(project.join("package.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|package| package.get("scripts")?.get("build").cloned())
+        .is_some()
+}
+
+fn native_archive_target(
+    project: &Path,
+    layout: &ProjectLayout,
+    developer: &str,
+    bundle: &str,
+) -> Result<String, String> {
+    let ios = layout
+        .ios
+        .as_ref()
+        .ok_or_else(|| "The approved project has no iOS project.".to_string())?;
     let mut cmd = command("/usr/bin/xcodebuild");
     cmd.current_dir(project)
         .env("DEVELOPER_DIR", developer)
-        .arg("-workspace")
-        .arg(project.join("ios/App/App.xcworkspace"))
+        .arg(match ios.container_kind {
+            XcodeContainerKind::Workspace => "-workspace",
+            XcodeContainerKind::Project => "-project",
+        })
+        .arg(project.join(&ios.container))
         .args([
             "-scheme",
-            "App",
+            ios.scheme.as_str(),
             "-configuration",
             "Release",
             "-destination",

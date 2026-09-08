@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vite-plus/test';
 
 import type { AndroidDevice, AndroidMachineView } from '../types/backend';
 import { androidDeviceApks, androidInstallCommand, androidNetworkWarning } from './android-device';
+import { capacitorLayout } from './project-layout';
 
 function androidView(): AndroidMachineView {
     return {
         workspace: {
             localPath: '/home/you/app',
             name: 'app',
+            layout: capacitorLayout(),
             applicationId: 'com.example.app',
             lastSnapshotSha256: 'snapshot',
             lastSyncFileCount: 10,

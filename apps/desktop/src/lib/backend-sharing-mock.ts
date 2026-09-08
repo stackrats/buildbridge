@@ -1,6 +1,7 @@
 // Browser-only fixtures for native Mac setup and owner-approved sharing.
 import type { Backend, Unlisten } from './backend';
 import type * as T from '../types/backend';
+import { capacitorLayout } from '../model/project-layout';
 
 type Events = {
     emit(event: string, value: unknown): void;
@@ -20,6 +21,7 @@ export function createSharingPreview(events: Events, query: URLSearchParams) {
                   bundleIdentifier: 'dev.example.app',
                   developmentTeam: 'TEAM123456',
                   scheme: 'App',
+                  layout: capacitorLayout(),
                   minXcodeVersion: '26.0',
                   minIosSdkVersion: '26.0',
               }
@@ -115,6 +117,7 @@ export function createSharingPreview(events: Events, query: URLSearchParams) {
                 bundleIdentifier: 'dev.example.app',
                 developmentTeam: 'TEAM123456',
                 scheme: 'App',
+                layout: capacitorLayout(),
                 minXcodeVersion: input.minXcodeVersion,
                 minIosSdkVersion: input.minIosSdkVersion,
             };

@@ -23,7 +23,7 @@ The intended local experience is:
 6. Create a release and locate its verified artifacts. The desktop keeps source, status, diagnostics and output details accessible.
 7. Optionally pair with a remote build dashboard using a short-lived, single-use code to queue typed builds, follow live logs and retain remote history.
 
-Machine setup is a first-use phase that folds away once complete; the everyday page is the approved project, the build choices on the step that builds, and the supported device destinations. Native Mac builds currently use exact Git commits and provide unsigned compile or signed archive/export outcomes; remote screen sharing, dirty-source uploads and native preview are later work. Native Windows execution remains an expansion target.
+Machine setup is a first-use phase that folds away once complete; the everyday page is the approved project, the build choices on the step that builds, and the supported device destinations. Any iOS or Android app is approvable: Capacitor, Cordova, React Native, Expo and Flutter projects and plain Xcode or Gradle projects are recognised from their files (decision 63). Native Mac builds currently use exact Git commits and provide unsigned compile or signed archive/export outcomes; remote screen sharing, dirty-source uploads and native preview are later work. Native Windows execution remains an expansion target.
 
 “Cross-platform” does not mean pretending every toolchain can execute on every operating system. It means buildbridge presents a consistent workflow while dispatching work to a compatible executor.
 
@@ -257,12 +257,12 @@ Workspace safety requirements:
 
 ### Current guided project workflow
 
-The first real project fixture is the Ionic/Capacitor application at the Ionic/Capacitor fixture project. This path is development data, not a privileged or hard-coded product path. The desktop UI requires the user to approve the exact local folder and validates its package lock, Capacitor configuration, CocoaPods project, Xcode workspace, and Xcode project before it stores the approval.
+The first real project fixture is the Ionic/Capacitor application at the Ionic/Capacitor fixture project. This path is development data, not a privileged or hard-coded product path. The desktop UI requires the user to approve the exact local folder; approval detects what the folder holds — the framework in front of the native projects, if any, the Xcode workspace or project and its scheme, the Gradle root and application module, the Podfile and whether its lock is committed — and stores that layout with the approval (decision 63). Nothing in the folder is run to find it out.
 
 The desktop presents the project workflow as the first two steps of a machine's build phase (see [Desktop application](#desktop-application)):
 
 1. **Set up the project** — paste or drop the local project folder. Approval is read-only and does not copy source. The step also holds the snapshot: a bounded, checksummed archive streamed through the authenticated, host-key-pinned SSH bridge, made by every build of the latest source and, on demand, by the step's own synchronize. The progress display reports source inspection, bytes transferred, and guest extraction.
-2. **Run the unsigned test build** — prepare pinned guest tools, install locked JavaScript dependencies, build the web application, run Capacitor synchronization, resolve pods from the committed native lock baseline, and compile the `App` scheme with signing disabled. The target is a choice: the **device SDK** by default, which ships inside Xcode and is what the signed archive and the phone build compile against, so nothing is downloaded; or the **iOS Simulator**, the only target that can run on screen inside the guest, for which Apple's iOS Simulator platform is installed first when the selected Xcode has no compatible runtime. The guest diagnostics report which runtime is installed, so the choice is labelled with its cost before it is made. Live phase and bounded log output remain visible in the desktop UI. The multi-gigabyte Apple platform download is a one-time persistent guest operation with measured byte/percentage progress and a distinct install/register state. Remote builds queued from the control plane always use the device SDK. The guest runs one durable smoke-build job at a time, so repeating the build action after a desktop restart or development hot reload reattaches to its log instead of starting a duplicate build. If regenerated Capacitor plugin metadata requires CocoaPods to refresh `Podfile.lock`, that change remains guest-only and is reported clearly rather than silently modifying the host project. Because a host without a Mac cannot regenerate the lock itself, the step offers **Adopt the guest's Podfile.lock**: it copies the lock CocoaPods wrote in the guest into the approved project (the previous copy is kept beside the machine's records), lists each repinned pod, and lifts the archive's drift block, since the test build that just passed compiled with exactly that lock. Committing it in the project stays the user's.
+2. **Run the unsigned test build** — prepare pinned guest tools, install the project's dependencies with the package manager it locks with, build the web assets and run the framework's own preparation for the kinds that have them (`cap sync`, `cordova prepare`, `expo prebuild`, Flutter's project configuration), resolve pods where the Podfile is against a committed lock, and compile the approved scheme with signing disabled. The target is a choice: the **device SDK** by default, which ships inside Xcode and is what the signed archive and the phone build compile against, so nothing is downloaded; or the **iOS Simulator**, the only target that can run on screen inside the guest, for which Apple's iOS Simulator platform is installed first when the selected Xcode has no compatible runtime. The guest diagnostics report which runtime is installed, so the choice is labelled with its cost before it is made. Live phase and bounded log output remain visible in the desktop UI. The multi-gigabyte Apple platform download is a one-time persistent guest operation with measured byte/percentage progress and a distinct install/register state. Remote builds queued from the control plane always use the device SDK. The guest runs one durable smoke-build job at a time, so repeating the build action after a desktop restart or development hot reload reattaches to its log instead of starting a duplicate build. If resolving the native dependencies requires CocoaPods to refresh a committed `Podfile.lock`, that change remains guest-only and is reported clearly rather than silently modifying the host project. Because a host without a Mac cannot regenerate the lock itself, the step offers **Adopt the guest's Podfile.lock**: it copies the lock CocoaPods wrote in the guest into the approved project (the previous copy is kept beside the machine's records), lists each repinned pod, and lifts the archive's drift block, since the test build that just passed compiled with exactly that lock. Committing it in the project stays the user's.
 
 The first implementation caps an approved snapshot at 50,000 files and 2 GiB before compression. It excludes Git metadata, `node_modules`, generated native/web output, dependency stores, common IDE/cache directories, every `.env` variant, package-manager authentication files, SSH material, private keys, certificates, provisioning profiles, and App Store Connect keys. It rejects included symlinks and non-regular files. The archive checksum and source counts are retained in the local workspace record; removing approval does not modify the host project.
 
@@ -1343,6 +1343,123 @@ The following decisions should be treated as settled until this document is deli
     optimization, where red is the warning the tier itself carries; the labelled **Copy
     invitation**, which copies more than the code shown beside it; and the labelled **Show** and
     **Copy** pair on a hidden secret, where a lone glyph would be the odd control out.
+
+63. Any iOS or Android app, detected from its files (2026-09-08). Every mobile project ends in
+    the same two things — an Xcode workspace or project with a scheme, and a Gradle project with
+    an application module — and differs only in what stands in front of them. Approval now runs
+    `detect_project` in the machines crate, which reads the folder and never runs anything in
+    it: a `pubspec.yaml` depending on Flutter means Flutter; a `package.json` depending on
+    `@capacitor/core`, on `expo` with an app config, on `react-native`, or on `cordova` means
+    that framework; anything else is native, with the Xcode container and the Gradle settings
+    searched for at the root and one directory down. The result is a `ProjectLayout` stored on
+    the workspace record — kind, package manager, the container Xcode opens and whether it is a
+    workspace or a bare project, the scheme with the shared schemes and application targets it
+    was chosen from, the Podfile's directory and whether its lock is committed, the Gradle root,
+    the application module's path with the other application modules — and records from before
+    detection deserialize to the one Capacitor layout that used to be assumed. The seven fixed
+    recipes now render from it (`recipes.rs`): the package manager the project locks with (pnpm,
+    npm, Yarn 1 or Yarn through corepack, Bun, installed on first use beside pnpm), the web
+    build through the package's `build` script and `cap sync` or `cordova prepare` for the kinds
+    that have web assets, `expo prebuild` when the native project is not committed, Flutter's
+    `pub get` and `build ios --config-only` or `local.properties` after installing the pinned
+    Flutter SDK into the tools directory, CocoaPods where the Podfile is, a shared scheme written
+    for an application target that has none, `-workspace` or `-project` for `xcodebuild`, and
+    module-scoped Gradle tasks with the outputs found under the module's build directory
+    (Flutter's under the project's own `build`). React Native's debug APK bundles its
+    JavaScript through an init script, so the phone runs it without a Metro server here; the
+    HTTP override keeps its Capacitor mixed-content part only when a Capacitor config is there.
+    A version is read from and written into wherever the kind keeps it: the Xcode project and
+    the module's Gradle script, a Flutter app's pubspec, or an Expo app's `app.json` while the
+    native projects are not on the host. The snapshot leaves out every Gradle module's `build`
+    by finding the script beside it, and `Pods`, `.dart_tool` and `.expo` anywhere. The desktop's
+    project step names the kind, what Xcode opens or which module Gradle builds, and offers the
+    other schemes or application modules; the command line's `project approve` takes `--scheme`
+    and `--module`. Detection is a reading of the folder, so a project whose scheme or module is
+    computed at build time can still name it explicitly. Expo's native project names are
+    predicted from the app's name before prebuild writes them; the approval says so.
+
+    **What the fixtures taught it (2026-09-08, the same day).** A boilerplate project of each
+    kind was generated beside the existing Capacitor fixture and approved through the command
+    line, which found three things worth fixing. An identifier a Gradle script *computes* rather
+    than writes — Cordova's, from its `<widget>` — was reported as unknown, so the widget's id is
+    now read as the fallback, as Expo's app config already was. A project whose Xcode file
+    declares more than one bundle identifier — Flutter's, whose test target takes the app's with
+    `.RunnerTests` appended — detected none, because only a `.debug` suffix was filtered; the
+    rule is now that an identifier which extends another belongs to a build type or a bundled
+    target, and the one nothing else is a prefix of is the app's. And the machine prepared Node
+    and pnpm, or Ruby and CocoaPods, whatever the project was, so a native Gradle project paid
+    for a Node download it would never call and failed when npm's connection dropped; each tool
+    is now installed only for a project that uses it, which the layout already says.
+
+    **A Gradle project need not commit a wrapper (2026-09-08).** Cordova's generated Android
+    project carries `settings.gradle` and `build.gradle` and no wrapper at all, because the
+    Cordova command line brings its own Gradle; the same is true of some hand-made projects.
+    The wrapper is still the project's own choice of Gradle wherever there is one, and the
+    layout records whether there is. For a project without one, the toolchain installs a pinned
+    Gradle beside the SDK — checked against its digest like every other download, and unpacked
+    with the JDK's `jar`, since the image ships no `unzip` — and the recipes run that instead of
+    `./gradlew`. Everything else is unchanged: the same module-scoped tasks, the same init
+    scripts, the same artifacts. The version buildbridge supplies is named here rather than
+    guessed per project, and a project that wants another commits a wrapper.
+
+    **One row per framework (2026-09-08, later).** What differs between Capacitor and Flutter
+    and the rest had spread across the detector's search paths, its kind inference, two error
+    messages and the recipes' match arms, so adding a framework meant finding six places.
+    `frameworks.rs` now holds one row each: how a folder is recognised as that framework, where
+    it keeps its Xcode and Gradle projects, whether it installs JavaScript dependencies and
+    whether it produces web assets, how its native projects are named before it writes them
+    (Expo's predictor is a field, not a special case), and what to tell someone whose folder has
+    neither project yet. The rows are tested in order, so a more specific framework comes before
+    a more general one and `Native` matches anything last. Adding a framework is a row here plus,
+    when it has a step of its own, one function in `recipes.rs` — and the compiler names those
+    two match arms, so nothing can be forgotten quietly.
+
+    **NativePHP (2026-09-08, later).** `php artisan native:install` writes a Swift or Kotlin
+    shell around a statically compiled PHP and the Laravel application into `nativephp/`, whose
+    `ios` and `android` are an ordinary Xcode project and an ordinary Gradle project. buildbridge
+    recognises the folder by `nativephp/mobile` in `composer.json`, or by `config/nativephp.php`
+    beside one, and builds those two exactly as it builds any other native project. The shell is
+    not predicted the way Expo's is: it is the package's to name, and its documentation asks
+    people to keep `nativephp/` out of Git, so a folder that has not had the install run is
+    refused with that instruction rather than guessed at. A plain Laravel application is not
+    mistaken for one. The PHP toolchain itself stays out of the machine: buildbridge builds the
+    shell that is there, and running the install inside the machine would need a pinned PHP and
+    Composer, which is the next step if anyone wants a build from a bare checkout.
+
+    **What was built (2026-09-08).** Each fixture was approved, synchronized and built for
+    Android through the command line, in a throwaway toolchain container of its own, and every
+    kind produced a debug APK the container read back: the native Gradle project
+    (`com.example.nativeapp.debug 1.2.0 (3)`, no JavaScript anywhere), NativePHP
+    (`com.example.nativephpapp.debug`, the generated shell built like any other), React Native
+    (`com.rnapp 1.0 (1)`, whose APK carries the megabyte `assets/index.android.bundle` the init
+    script asks for, so the app runs without a Metro server on the host), Expo
+    (`com.anonymous.expoapp 1.0.0 (1)`, its native project written by `expo prebuild` inside the
+    container), Flutter (`com.example.flutter_app 1.0 (1)`, the pinned SDK installed there
+    first), Cordova (`com.example.cordovaapp 1.0.0 (10000)`, on the supplied Gradle and the
+    installed command line) and the Capacitor fixture, unchanged. The iOS side was verified by
+    detection only: approving each fixture names the right container, scheme and identifier, and
+    a real `expo prebuild` confirmed the predicted name. The Apple recipes were then run for
+    real on a booted macOS machine (15.7.9, Xcode 26.6), unsigned against the device SDK, in the
+    three shapes that differ most: the Capacitor fixture, from a workspace record written before
+    the layout existed, which deserialized to the assumed Capacitor layout and built unchanged
+    with pnpm, the web build, `cap sync` and CocoaPods; the native Xcode fixture, a bare
+    `.xcodeproj` opened with `-project`, whose recipe installed no Node, no Ruby and no
+    CocoaPods because the layout says it needs none; and the Flutter fixture, which installed
+    the pinned Flutter SDK into the guest, ran `pub get` and `build ios --config-only`, resolved
+    its pods and compiled `Runner.app`. The remaining four followed on the same machine:
+    NativePHP's generated shell, Cordova's `platforms/ios` after `cordova prepare ios` (no
+    Podfile, so no CocoaPods installed), Expo's prebuilt project, and React Native, whose pods
+    resolved the whole React graph before Xcode compiled it. Every framework now compiles on
+    both platforms. What is still only detected: the signed archive and the signed Android
+    release for anything but Capacitor, and running on a device.
+
+    **The JDK is chosen when Gradle runs, not before (2026-09-08).** The wrapper says which JDK
+    Gradle needs, and the recipe read it once at the top, before the framework's own step. An
+    Expo project has no wrapper at all until `expo prebuild` writes one, so the read always
+    found nothing and the build settled for the image's JDK 17 — which happened to work, since
+    Gradle 9 runs on 17, but would not for a project that needs 21. The selection now runs
+    immediately before the Gradle invocation, in both the debug build and the release, so it
+    sees whatever the framework just wrote.
 
 ### Credential loss and recovery
 

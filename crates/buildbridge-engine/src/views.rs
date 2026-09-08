@@ -266,14 +266,16 @@ pub(crate) async fn build_machine_view(
         signing.is_some(),
     );
     let project_version = if profile.provider.is_macos() {
-        apple_workspace
-            .as_ref()
-            .and_then(|workspace| read_apple_project_version(&workspace.local_path))
+        apple_workspace.as_ref().and_then(|workspace| {
+            read_apple_project_version(&workspace.local_path, &workspace.layout)
+        })
     } else {
         android
             .as_ref()
             .and_then(|android| android.workspace.as_ref())
-            .and_then(|workspace| read_android_project_version(&workspace.local_path))
+            .and_then(|workspace| {
+                read_android_project_version(&workspace.local_path, &workspace.layout)
+            })
     };
 
     Ok(MachineView {

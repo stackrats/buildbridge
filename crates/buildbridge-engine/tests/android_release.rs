@@ -1,11 +1,11 @@
 //! The Android provider's live acceptance: a throwaway Android machine in directories of its
-//! own approves a real Capacitor project, synchronizes it, runs the debug build (which prepares
+//! own approves a real Android project, synchronizes it, runs the debug build (which prepares
 //! the toolchain), then signs a release with an upload key created for the run, and verifies
 //! both artifacts landed with the checksums the container reported. It pulls the JDK image and
 //! downloads Node, Google's command-line tools, the SDK packages the project needs and the
 //! project's dependencies, so it is ignored by default:
 //!
-//!     BUILDBRIDGE_ANDROID_TEST_PROJECT=/path/to/capacitor-project \
+//!     BUILDBRIDGE_ANDROID_TEST_PROJECT=/path/to/android-project \
 //!     cargo test -p buildbridge-engine --test android_release -- --ignored --nocapture
 //!
 //! The kit and the vault stay out of it: the keystore is created and used directly, so the
@@ -54,7 +54,7 @@ fn as_json<T: serde::Serialize>(value: T) -> Value {
 
 async fn release_a_real_project() -> Result<(), String> {
     let project = std::env::var("BUILDBRIDGE_ANDROID_TEST_PROJECT").map_err(|_| {
-        "set BUILDBRIDGE_ANDROID_TEST_PROJECT to a Capacitor project with an android directory"
+        "set BUILDBRIDGE_ANDROID_TEST_PROJECT to a project with a Gradle application module"
             .to_string()
     })?;
     let base = std::env::var_os("BUILDBRIDGE_BOOT_TEST_DIR")
@@ -103,6 +103,10 @@ async fn release_a_real_project() -> Result<(), String> {
             "== approved {} ({})",
             view["android"]["workspace"]["name"], view["android"]["workspace"]["applicationId"]
         );
+        let layout: buildbridge_machines::ProjectLayout =
+            serde_json::from_value(view["android"]["workspace"]["layout"].clone())
+                .map_err(|error| format!("the approved layout did not round-trip: {error}"))?;
+        eprintln!("== layout {}", layout.describe());
 
         let synced =
             as_json(buildbridge_engine::sync_android_workspace(&engine, machine_id.clone()).await?);
@@ -167,6 +171,7 @@ async fn release_a_real_project() -> Result<(), String> {
         let release = tokio::task::spawn_blocking(move || {
             run_signed_android_release(
                 &container,
+                &layout,
                 &material,
                 None,
                 buildbridge_machines::AndroidReleaseOutputs::Both,

@@ -10,8 +10,10 @@ pub struct GuestEnvFiles {
     pub shell: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn sync_apple_workspace<F>(
     workspace_path: &Path,
+    layout: &ProjectLayout,
     env: Option<&GuestEnvFiles>,
     ssh_port: u16,
     username: &str,
@@ -23,20 +25,7 @@ where
     F: FnMut(AppleProjectProgress),
 {
     validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
-    let workspace_path = fs::canonicalize(workspace_path).map_err(|error| {
-        ProviderError::GuestBridge(format!("the approved project is unavailable: {error}"))
-    })?;
-    if !workspace_path.is_dir()
-        || !workspace_path.join("package.json").is_file()
-        || !workspace_path.join("ios/App/Podfile").is_file()
-        || !workspace_path.join("ios/App/Podfile.lock").is_file()
-        || !workspace_path.join("ios/App/App.xcworkspace").is_dir()
-    {
-        return Err(ProviderError::GuestBridge(
-            "the approved project must contain package.json and ios/App/App.xcworkspace with a locked Podfile"
-                .to_string(),
-        ));
-    }
+    let workspace_path = validate_apple_project(workspace_path, layout)?;
 
     let started_at = Instant::now();
     on_progress(apple_progress(
@@ -47,9 +36,11 @@ where
         "Inspecting the approved project and excluding local dependencies and secrets.",
         None,
     ));
-    let (source_file_count, source_bytes) = inspect_snapshot_tree(&workspace_path)?;
+    let mut exclusions = SnapshotExclusions::for_layout(layout);
+    let (source_file_count, source_bytes) =
+        inspect_snapshot_tree(&workspace_path, &mut exclusions)?;
     let temporary_archive = TemporaryArchive::new();
-    create_workspace_archive(&workspace_path, &temporary_archive.0)?;
+    create_workspace_archive(&workspace_path, &temporary_archive.0, &exclusions)?;
     let archive_bytes = fs::metadata(&temporary_archive.0)
         .map_err(|error| {
             ProviderError::GuestBridge(format!("could not inspect the source snapshot: {error}"))
@@ -116,8 +107,9 @@ where
         "Extracting the bounded snapshot into the buildbridge guest workspace.",
         None,
     ));
+    let checks = extraction_checks(layout, &guest_staging);
     let extract = format!(
-        "set -eu; /bin/mkdir -p '{guest_staging}'; /usr/bin/tar -xzf '{guest_archive}' -C '{guest_staging}'; /bin/test -f '{guest_staging}/package.json'; /bin/test -d '{guest_staging}/ios/App/App.xcworkspace'; /bin/rm -rf '{guest_workspace}.previous'; if /bin/test -d '{guest_workspace}'; then /bin/mv '{guest_workspace}' '{guest_workspace}.previous'; fi; /bin/mv '{guest_staging}' '{guest_workspace}'; if /bin/test -f '{guest_env}'; then /bin/mv '{guest_env}' '{guest_workspace}/.env.production.local'; /bin/chmod 600 '{guest_workspace}/.env.production.local'; fi; if /bin/test -f '{guest_env_shell}'; then /bin/mkdir -p '{guest_workspace}/.buildbridge'; /bin/mv '{guest_env_shell}' '{guest_workspace}/.buildbridge/env.sh'; /bin/chmod 600 '{guest_workspace}/.buildbridge/env.sh'; fi; /bin/rm -f '{guest_archive}'; /bin/rm -rf '{guest_workspace}.previous'"
+        "set -eu; /bin/mkdir -p '{guest_staging}'; /usr/bin/tar -xzf '{guest_archive}' -C '{guest_staging}'; {checks}/bin/rm -rf '{guest_workspace}.previous'; if /bin/test -d '{guest_workspace}'; then /bin/mv '{guest_workspace}' '{guest_workspace}.previous'; fi; /bin/mv '{guest_staging}' '{guest_workspace}'; if /bin/test -f '{guest_env}'; then /bin/mv '{guest_env}' '{guest_workspace}/.env.production.local'; /bin/chmod 600 '{guest_workspace}/.env.production.local'; fi; if /bin/test -f '{guest_env_shell}'; then /bin/mkdir -p '{guest_workspace}/.buildbridge'; /bin/mv '{guest_env_shell}' '{guest_workspace}/.buildbridge/env.sh'; /bin/chmod 600 '{guest_workspace}/.buildbridge/env.sh'; fi; /bin/rm -f '{guest_archive}'; /bin/rm -rf '{guest_workspace}.previous'"
     );
     run_guest_command(
         ssh_port,
@@ -134,6 +126,88 @@ where
         source_bytes,
         archive_bytes,
     })
+}
+
+/// The project as the layout describes it, on the host, before a snapshot is taken: the
+/// package for a JavaScript project, the Xcode project and its Podfile for every kind but
+/// Expo, whose native project is written where the build runs.
+pub(crate) fn validate_apple_project(
+    workspace_path: &Path,
+    layout: &ProjectLayout,
+) -> Result<PathBuf, ProviderError> {
+    validate_layout(layout)?;
+    let workspace_path = fs::canonicalize(workspace_path).map_err(|error| {
+        ProviderError::GuestBridge(format!("the approved project is unavailable: {error}"))
+    })?;
+    let ios = layout.ios.as_ref().ok_or_else(|| {
+        ProviderError::GuestBridge("the approved project has no iOS project".to_string())
+    })?;
+    if !workspace_path.is_dir() {
+        return Err(ProviderError::GuestBridge(
+            "the approved project is not a directory".to_string(),
+        ));
+    }
+    if layout.kind.uses_javascript() && !workspace_path.join("package.json").is_file() {
+        return Err(ProviderError::GuestBridge(
+            "the approved project must contain package.json".to_string(),
+        ));
+    }
+    if !layout.kind.generates_native_projects() {
+        if !workspace_path.join(&ios.project).is_dir() {
+            return Err(ProviderError::GuestBridge(format!(
+                "the approved project must contain {}",
+                ios.project
+            )));
+        }
+        if let Some(podfile_dir) = &ios.podfile_dir
+            && !workspace_path
+                .join(join_relative(podfile_dir, "Podfile"))
+                .is_file()
+        {
+            return Err(ProviderError::GuestBridge(format!(
+                "the approved project must contain {}",
+                join_relative(podfile_dir, "Podfile")
+            )));
+        }
+    }
+    Ok(workspace_path)
+}
+
+/// What the extraction asserts about the snapshot it just unpacked, as shell.
+pub(crate) fn extraction_checks(layout: &ProjectLayout, staging: &str) -> String {
+    let mut checks = String::new();
+    if layout.kind.uses_javascript() {
+        checks.push_str(&format!(
+            "/bin/test -f {}; ",
+            shell_single_quote(&format!("{staging}/package.json"))
+        ));
+    }
+    if !layout.kind.generates_native_projects() {
+        if let Some(ios) = &layout.ios {
+            checks.push_str(&format!(
+                "/bin/test -d {}; ",
+                shell_single_quote(&join_relative(staging, &ios.project))
+            ));
+        }
+        // A project that commits no wrapper is built with the Gradle the toolchain supplies.
+        if let Some(android) = layout.android.as_ref().filter(|android| android.wrapper) {
+            let wrapper = shell_single_quote(&join_relative(
+                staging,
+                &join_relative(&android.root, "gradlew"),
+            ));
+            checks.push_str(&format!(
+                "/bin/test -f {wrapper}; /bin/chmod 755 {wrapper}; "
+            ));
+        }
+    }
+    checks
+}
+
+/// Sources the environment a sync or a rebuild wrote, so a build reads it, as shell to put in
+/// front of a command.
+pub(crate) fn guest_env_source(workspace_root: &str) -> String {
+    let env = shell_single_quote(&format!("{workspace_root}/.buildbridge/env.sh"));
+    format!("if /bin/test -f {env}; then . {env}; fi; ")
 }
 
 pub(crate) fn validate_guest_operation(
@@ -156,10 +230,67 @@ pub(crate) fn validate_guest_operation(
     Ok(())
 }
 
-pub(crate) fn inspect_snapshot_tree(root: &Path) -> Result<(u64, u64), ProviderError> {
+/// What a snapshot leaves out: the names every project uses for dependencies, outputs, caches
+/// and secrets, and the output directories the layout names. Gradle's `build` directories are
+/// added as the walk finds the scripts beside them, so every module's output stays behind
+/// without a directory merely called `build` being taken for one.
+#[derive(Debug, Clone, Default)]
+pub struct SnapshotExclusions {
+    prefixes: Vec<String>,
+}
+
+impl SnapshotExclusions {
+    pub fn for_layout(layout: &ProjectLayout) -> Self {
+        let mut prefixes = Vec::new();
+        if let Some(android) = &layout.android {
+            prefixes.push(join_relative(&android.root, "local.properties"));
+            prefixes.push(join_relative(&android.root, "build"));
+            prefixes.push(join_relative(&android.module_relative(), "build"));
+        }
+        if let Some(ios) = &layout.ios {
+            prefixes.push(join_relative(&ios.container_dir(), "build"));
+        }
+        if layout.kind == ProjectKind::Flutter {
+            prefixes.push("build".to_string());
+        }
+        let mut exclusions = Self::default();
+        for prefix in prefixes {
+            exclusions.add(prefix);
+        }
+        exclusions
+    }
+
+    fn add(&mut self, prefix: String) {
+        if !prefix.is_empty() && !self.prefixes.contains(&prefix) {
+            self.prefixes.push(prefix);
+        }
+    }
+}
+
+/// A directory named `build` beside a Gradle script is Gradle's output.
+fn gradle_output_directory(root: &Path, relative: &Path) -> bool {
+    if relative.file_name().and_then(|name| name.to_str()) != Some("build") {
+        return false;
+    }
+    let parent = root.join(relative.parent().unwrap_or(Path::new("")));
+    [
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+    ]
+    .iter()
+    .any(|script| parent.join(script).is_file())
+}
+
+pub(crate) fn inspect_snapshot_tree(
+    root: &Path,
+    exclusions: &mut SnapshotExclusions,
+) -> Result<(u64, u64), ProviderError> {
     fn visit(
         root: &Path,
         directory: &Path,
+        exclusions: &mut SnapshotExclusions,
         files: &mut u64,
         bytes: &mut u64,
     ) -> Result<(), ProviderError> {
@@ -171,7 +302,11 @@ pub(crate) fn inspect_snapshot_tree(root: &Path) -> Result<(u64, u64), ProviderE
             })?;
             let path = entry.path();
             let relative = path.strip_prefix(root).unwrap_or(&path);
-            if snapshot_path_excluded(relative) {
+            if snapshot_path_excluded(relative, exclusions) {
+                continue;
+            }
+            if path.is_dir() && gradle_output_directory(root, relative) {
+                exclusions.add(relative.to_string_lossy().replace('\\', "/"));
                 continue;
             }
             let metadata = fs::symlink_metadata(&path).map_err(|error| {
@@ -184,7 +319,7 @@ pub(crate) fn inspect_snapshot_tree(root: &Path) -> Result<(u64, u64), ProviderE
                 )));
             }
             if metadata.is_dir() {
-                visit(root, &path, files, bytes)?;
+                visit(root, &path, exclusions, files, bytes)?;
             } else if metadata.is_file() {
                 *files += 1;
                 *bytes = bytes.saturating_add(metadata.len());
@@ -207,44 +342,48 @@ pub(crate) fn inspect_snapshot_tree(root: &Path) -> Result<(u64, u64), ProviderE
 
     let mut files = 0;
     let mut bytes = 0;
-    visit(root, root, &mut files, &mut bytes)?;
+    visit(root, root, exclusions, &mut files, &mut bytes)?;
     Ok((files, bytes))
 }
 
-pub(crate) fn snapshot_path_excluded(relative: &Path) -> bool {
+/// Directory names left out of every snapshot wherever they appear: dependencies that are
+/// installed again where the build runs, the outputs and caches of every toolchain, and
+/// editors' own files.
+const EXCLUDED_DIRECTORY_NAMES: [&str; 17] = [
+    ".git",
+    ".ssh",
+    ".buildbridge",
+    ".pnpm-store",
+    "node_modules",
+    "dist",
+    "coverage",
+    "DerivedData",
+    "xcuserdata",
+    ".idea",
+    ".vscode",
+    ".gradle",
+    "Pods",
+    ".dart_tool",
+    ".expo",
+    ".cxx",
+    ".kotlin",
+];
+
+pub(crate) fn snapshot_path_excluded(relative: &Path, exclusions: &SnapshotExclusions) -> bool {
     // `local.properties` names the SDK on the machine that made it, never on the one building.
-    if [
-        "android/build",
-        "android/app/build",
-        "android/capacitor-cordova-android-plugins/build",
-        "android/local.properties",
-        "ios/App/build",
-        "ios/App/Pods",
-    ]
-    .iter()
-    .any(|path| relative.starts_with(path))
+    if exclusions
+        .prefixes
+        .iter()
+        .any(|path| relative.starts_with(path))
     {
         return true;
     }
 
     let excluded_directory = relative.components().any(|component| {
-        matches!(
-            component.as_os_str().to_str(),
-            Some(
-                ".git"
-                    | ".ssh"
-                    | ".buildbridge"
-                    | ".pnpm-store"
-                    | "node_modules"
-                    | "dist"
-                    | "coverage"
-                    | "DerivedData"
-                    | "xcuserdata"
-                    | ".idea"
-                    | ".vscode"
-                    | ".gradle"
-            )
-        )
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| EXCLUDED_DIRECTORY_NAMES.contains(&name))
     });
     if excluded_directory {
         return true;
@@ -281,7 +420,12 @@ pub(crate) fn snapshot_path_excluded(relative: &Path) -> bool {
         })
 }
 
-fn workspace_archive_command(root: &Path, archive_path: &Path, macos: bool) -> Command {
+fn workspace_archive_command(
+    root: &Path,
+    archive_path: &Path,
+    macos: bool,
+    exclusions: &SnapshotExclusions,
+) -> Command {
     let mut command = Command::new(if macos { "/usr/bin/tar" } else { "tar" });
     if macos {
         // BSD tar otherwise preserves host metadata in AppleDouble entries. A source snapshot
@@ -294,25 +438,13 @@ fn workspace_archive_command(root: &Path, archive_path: &Path, macos: bool) -> C
         ]);
     }
     command.args(["-czf"]).arg(archive_path);
+    for name in EXCLUDED_DIRECTORY_NAMES {
+        command.arg(format!("--exclude={name}"));
+    }
+    for prefix in &exclusions.prefixes {
+        command.arg(format!("--exclude={prefix}"));
+    }
     for pattern in [
-        ".git",
-        ".ssh",
-        ".buildbridge",
-        ".pnpm-store",
-        "node_modules",
-        "dist",
-        "coverage",
-        "DerivedData",
-        "xcuserdata",
-        ".idea",
-        ".vscode",
-        ".gradle",
-        "android/build",
-        "android/app/build",
-        "android/capacitor-cordova-android-plugins/build",
-        "android/local.properties",
-        "ios/App/build",
-        "ios/App/Pods",
         ".env",
         ".env.*",
         ".npmrc",
@@ -341,14 +473,16 @@ fn workspace_archive_command(root: &Path, archive_path: &Path, macos: bool) -> C
 pub(crate) fn create_workspace_archive(
     root: &Path,
     archive_path: &Path,
+    exclusions: &SnapshotExclusions,
 ) -> Result<(), ProviderError> {
-    let output = workspace_archive_command(root, archive_path, cfg!(target_os = "macos"))
-        .tracked_output()
-        .map_err(|error| {
-            ProviderError::GuestBridge(format!(
-                "could not run tar for the source snapshot: {error}"
-            ))
-        })?;
+    let output =
+        workspace_archive_command(root, archive_path, cfg!(target_os = "macos"), exclusions)
+            .tracked_output()
+            .map_err(|error| {
+                ProviderError::GuestBridge(format!(
+                    "could not run tar for the source snapshot: {error}"
+                ))
+            })?;
     if !output.status.success() {
         return Err(ProviderError::GuestBridge(format!(
             "could not create the source snapshot: {}",
@@ -436,13 +570,16 @@ where
     Ok(())
 }
 
-/// Rebuilds the web assets inside the guest with a chosen env set, in place, and re-syncs them
-/// into the iOS project. This is what makes an env a per-build choice: the source snapshot and
-/// the installed dependencies stay, only the assets that read the environment are produced again.
-/// Refuses to continue if the native lockfile moves, exactly as the test build would.
+/// Applies a chosen env set inside the guest without a new snapshot: writes it beside the
+/// source for the build to read, and for a project with web assets rebuilds them in place and
+/// copies them into the iOS project again. This is what makes an env a per-build choice: the
+/// source snapshot and the installed dependencies stay, only what reads the environment is
+/// produced again. Refuses to continue if a committed native lockfile moves, exactly as the
+/// test build would.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rebuild_web_assets_with_env<F>(
     env: &GuestEnvFiles,
+    layout: &ProjectLayout,
     ssh_port: u16,
     username: &str,
     identity_path: &Path,
@@ -462,9 +599,18 @@ where
         "Applying the chosen environment and rebuilding the web assets.",
         None,
     ));
+    validate_layout(layout)?;
     let root = format!("{guest_home}/BuildBridge/workspaces/active");
     let toolchain = guest_toolchain(guest_home);
-    let prepare_tools = guest_tools_preparation(&toolchain);
+    let prepare_tools = guest_tools_preparation(
+        &toolchain,
+        layout.kind.uses_javascript(),
+        layout
+            .ios
+            .as_ref()
+            .is_some_and(|ios| ios.podfile_dir.is_some()),
+    );
+    let rebuild = ios_environment_rebuild_script(layout, &root, &toolchain.recipe_tools());
     let GuestToolchain {
         gem_home,
         developer_dir,
@@ -502,10 +648,22 @@ where
         "env script",
     )?;
 
+    if rebuild.is_empty() {
+        on_progress(archive_progress(
+            AppleArchivePhase::BuildingWebAssets,
+            0,
+            0,
+            started_at,
+            "The chosen environment is in place for the build to read.",
+            None,
+        ));
+        return Ok(());
+    }
     let script = format!(
         r#"set -u
 exec 2>&1
 set -e
+phase() {{ /usr/bin/printf '__BUILDBRIDGE_PHASE__:%s\n' "$1"; }}
 export PATH="{path}"
 export GEM_HOME="{gem_home}"
 export GEM_PATH="{gem_home}"
@@ -513,20 +671,9 @@ export DEVELOPER_DIR="{developer_dir}"
 export LANG="en_US.UTF-8"
 export CYPRESS_INSTALL_BINARY=0
 {prepare_tools}
-/bin/test -f "{root}/package.json"
-/bin/test -x "{root}/node_modules/.bin/vp"
-/bin/test -x "{root}/node_modules/.bin/cap"
 . "{root}/.buildbridge/env.sh"
 cd "{root}"
-"{root}/node_modules/.bin/vp" build
-lock_before=$(/usr/bin/shasum -a 256 "{root}/ios/App/Podfile.lock" | /usr/bin/cut -d ' ' -f 1)
-"{root}/node_modules/.bin/cap" sync ios
-lock_after=$(/usr/bin/shasum -a 256 "{root}/ios/App/Podfile.lock" | /usr/bin/cut -d ' ' -f 1)
-if /bin/test "$lock_before" != "$lock_after"; then
-    /usr/bin/printf '__BUILDBRIDGE_NATIVE_LOCK_UPDATED__:yes\n'
-    exit 3
-fi
-"#
+{rebuild}"#
     );
     let mut child = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
         .arg(script)
@@ -548,6 +695,9 @@ fi
         })?;
         if line == "__BUILDBRIDGE_NATIVE_LOCK_UPDATED__:yes" {
             lock_moved = true;
+            continue;
+        }
+        if line.starts_with("__BUILDBRIDGE_PHASE__:") {
             continue;
         }
         if tail.len() >= 40 {
@@ -647,7 +797,8 @@ mod snapshot_tests {
     fn macos_snapshot_uses_system_tar_without_host_metadata() {
         let root = Path::new("/Users/Build User/project");
         let archive = Path::new("/tmp/build snapshot.tar.gz");
-        let command = workspace_archive_command(root, archive, true);
+        let command =
+            workspace_archive_command(root, archive, true, &SnapshotExclusions::default());
         assert_eq!(command.get_program(), "/usr/bin/tar");
         let args = command.get_args().collect::<Vec<_>>();
         for flag in [
@@ -672,6 +823,7 @@ mod snapshot_tests {
         fs::create_dir_all(root.join("node_modules")).unwrap();
         fs::write(root.join("package.json"), "{}").unwrap();
         fs::write(root.join("src/app.ts"), "export const app = true").unwrap();
+        let mut exclusions = SnapshotExclusions::for_layout(&ProjectLayout::capacitor_default());
         for secret in [
             ".env.production",
             ".npmrc",
@@ -687,11 +839,20 @@ mod snapshot_tests {
             "android/app/build/output.apk",
             "node_modules/secret.js",
         ] {
-            assert!(snapshot_path_excluded(Path::new(secret)), "{secret}");
+            assert!(
+                snapshot_path_excluded(Path::new(secret), &exclusions),
+                "{secret}"
+            );
             fs::write(root.join(secret), "excluded").unwrap();
         }
-        assert_eq!(inspect_snapshot_tree(&root).unwrap().0, 2);
-        create_workspace_archive(&root, &archive).unwrap();
+        // A Gradle module anywhere keeps its output behind; a folder merely called build stays.
+        fs::create_dir_all(root.join("libs/shared/build/classes")).unwrap();
+        fs::write(root.join("libs/shared/build.gradle.kts"), "plugins {}").unwrap();
+        fs::write(root.join("libs/shared/build/classes/A.class"), "excluded").unwrap();
+        fs::create_dir_all(root.join("scripts/build")).unwrap();
+        fs::write(root.join("scripts/build/release.sh"), "kept").unwrap();
+        assert_eq!(inspect_snapshot_tree(&root, &mut exclusions).unwrap().0, 4);
+        create_workspace_archive(&root, &archive, &exclusions).unwrap();
         let output = Command::new("tar")
             .arg("-tzf")
             .arg(&archive)
@@ -704,7 +865,15 @@ mod snapshot_tests {
             .filter(|line| !line.ends_with('/'))
             .collect::<Vec<_>>();
         files.sort_unstable();
-        assert_eq!(files, ["./package.json", "./src/app.ts"]);
+        assert_eq!(
+            files,
+            [
+                "./libs/shared/build.gradle.kts",
+                "./package.json",
+                "./scripts/build/release.sh",
+                "./src/app.ts"
+            ]
+        );
     }
 
     #[test]
@@ -759,9 +928,15 @@ mod snapshot_tests {
         fs::write(fixture.0.join("package.json"), "{}").unwrap();
         fs::create_dir_all(fixture.0.join("node_modules/pkg")).unwrap();
         std::os::unix::fs::symlink("../../src", fixture.0.join("node_modules/pkg/link")).unwrap();
-        assert_eq!(inspect_snapshot_tree(&fixture.0).unwrap(), (2, 11));
+        let mut exclusions = SnapshotExclusions::default();
+        assert_eq!(
+            inspect_snapshot_tree(&fixture.0, &mut exclusions).unwrap(),
+            (2, 11)
+        );
         std::os::unix::fs::symlink("/etc/hostname", fixture.0.join("src/escape")).unwrap();
-        let error = inspect_snapshot_tree(&fixture.0).unwrap_err().to_string();
+        let error = inspect_snapshot_tree(&fixture.0, &mut exclusions)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("symbolic link"), "{error}");
         assert!(error.contains("src/escape"), "{error}");
         assert!(!error.contains("/etc/hostname"), "{error}");

@@ -53,25 +53,32 @@ gradle.beforeProject { project ->
 
             def assets = new File(staging, 'assets')
             copyDirectories(debug.assets.srcDirs.toList(), assets)
+            // A Capacitor app also needs its web view to allow mixed content; any other
+            // app has no such config, and the manifest's cleartext permission is the whole
+            // override.
             def config = new File(assets, 'capacitor.config.json')
             if (!config.isFile()) {
                 def configs = main.assets.srcDirs.collect {
                     new File(it, 'capacitor.config.json')
                 }.findAll { it.isFile() }
-                if (configs.size() != 1) {
-                    throw new IllegalStateException('Allow HTTP APIs requires one synchronized Capacitor Android config.')
+                if (configs.size() > 1) {
+                    throw new IllegalStateException('Allow HTTP APIs found more than one synchronized Capacitor Android config.')
                 }
-                config.parentFile.mkdirs()
-                config.bytes = configs.first().bytes
+                if (configs.size() == 1) {
+                    config.parentFile.mkdirs()
+                    config.bytes = configs.first().bytes
+                }
             }
-            def capacitor = new JsonSlurper().parse(config)
-            if (!(capacitor instanceof Map) ||
-                (capacitor.android != null && !(capacitor.android instanceof Map))) {
-                throw new IllegalStateException('The Capacitor Android config must contain an Android settings object.')
+            if (config.isFile()) {
+                def capacitor = new JsonSlurper().parse(config)
+                if (!(capacitor instanceof Map) ||
+                    (capacitor.android != null && !(capacitor.android instanceof Map))) {
+                    throw new IllegalStateException('The Capacitor Android config must contain an Android settings object.')
+                }
+                if (capacitor.android == null) capacitor.android = [:]
+                capacitor.android.allowMixedContent = true
+                config.setText(JsonOutput.toJson(capacitor), 'UTF-8')
             }
-            if (capacitor.android == null) capacitor.android = [:]
-            capacitor.android.allowMixedContent = true
-            config.setText(JsonOutput.toJson(capacitor), 'UTF-8')
 
             def manifest = new File(staging, 'AndroidManifest.xml')
             if (debug.manifest.srcFile.isFile()) {

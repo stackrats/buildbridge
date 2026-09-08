@@ -363,9 +363,60 @@ pub(crate) fn validated_android_release_directory(
     directory.ok_or_else(|| "The retained Android release has no artifacts.".to_string())
 }
 
-/// Approves a Capacitor project for an Android machine: the same package and lock the iOS
-/// side requires, plus the Android platform with its committed Gradle wrapper.
-pub(crate) fn inspect_android_workspace(path: &str) -> Result<StoredAndroidWorkspace, String> {
+/// Approves a folder for an Android machine: whatever the detector finds a Gradle application
+/// module in, with the module chosen when the project offers several.
+pub(crate) fn inspect_android_workspace(
+    path: &str,
+    module: Option<&str>,
+) -> Result<StoredAndroidWorkspace, String> {
+    let (canonical, local_path) = approved_project_path(path)?;
+    let layout = buildbridge_machines::detect_project(
+        &canonical,
+        buildbridge_machines::ProjectChoices {
+            scheme: None,
+            module,
+        },
+    )?;
+    let android = layout.android.as_ref().ok_or_else(|| {
+        format!(
+            "This {} project has no Android project to build. Add the Android platform and approve it again.",
+            layout.kind.label()
+        )
+    })?;
+    // A script that computes its identifier leaves it unknown; the frameworks that do so keep it
+    // in their own configuration, which is the same file their own build reads.
+    let application_id = fs::read_to_string(canonical.join(&android.script))
+        .ok()
+        .and_then(|script| gradle_application_id(&script))
+        .or_else(|| {
+            buildbridge_machines::expo_app_config(&canonical)
+                .and_then(|expo| {
+                    expo.get("android")?
+                        .get("package")?
+                        .as_str()
+                        .map(str::to_string)
+                })
+                .filter(|package| valid_gradle_application_id(package))
+        })
+        .or_else(|| buildbridge_machines::cordova_widget_id(&canonical));
+
+    Ok(StoredAndroidWorkspace {
+        local_path,
+        name: layout.name.clone(),
+        layout,
+        application_id,
+        last_snapshot_sha256: None,
+        last_sync_file_count: None,
+        last_sync_bytes: None,
+        last_synced_at_epoch_seconds: None,
+        last_build_succeeded: false,
+        last_build: None,
+        last_source: None,
+    })
+}
+
+/// The folder as approved: absolute, existing, and its canonical path as a string.
+fn approved_project_path(path: &str) -> Result<(PathBuf, String), String> {
     if path.is_empty() {
         return Err("Choose an absolute local project directory.".to_string());
     }
@@ -378,64 +429,20 @@ pub(crate) fn inspect_android_workspace(path: &str) -> Result<StoredAndroidWorks
     if !canonical.is_dir() {
         return Err("The selected project path is not a directory.".to_string());
     }
-    for required in [
-        "package.json",
-        "pnpm-lock.yaml",
-        "capacitor.config.ts",
-        "android/gradlew",
-    ] {
-        if !canonical.join(required).is_file() {
-            return Err(format!("This project is missing {required}."));
-        }
-    }
-    let app_script = ["android/app/build.gradle", "android/app/build.gradle.kts"]
-        .into_iter()
-        .map(|relative| canonical.join(relative))
-        .find(|candidate| candidate.is_file())
-        .ok_or_else(|| "This project is missing android/app/build.gradle.".to_string())?;
-    if !canonical.join("android/settings.gradle").is_file()
-        && !canonical.join("android/settings.gradle.kts").is_file()
-    {
-        return Err("This project is missing android/settings.gradle.".to_string());
-    }
-
-    let package: serde_json::Value = serde_json::from_slice(
-        &fs::read(canonical.join("package.json"))
-            .map_err(|error| format!("Could not read package.json: {error}"))?,
-    )
-    .map_err(|error| format!("package.json is invalid: {error}"))?;
-    let name = package
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .filter(|name| !name.trim().is_empty() && name.len() <= 120)
-        .map(str::to_string)
-        .or_else(|| {
-            canonical
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_string)
-        })
-        .ok_or_else(|| "The selected project name is invalid.".to_string())?;
     let local_path = canonical
         .to_str()
         .filter(|path| path.len() <= 4_096)
         .ok_or_else(|| "The selected project path is not valid UTF-8.".to_string())?
         .to_string();
-    let script = fs::read_to_string(&app_script)
-        .map_err(|error| format!("Could not read the app module's Gradle script: {error}"))?;
+    Ok((canonical, local_path))
+}
 
-    Ok(StoredAndroidWorkspace {
-        local_path,
-        name,
-        application_id: gradle_application_id(&script),
-        last_snapshot_sha256: None,
-        last_sync_file_count: None,
-        last_sync_bytes: None,
-        last_synced_at_epoch_seconds: None,
-        last_build_succeeded: false,
-        last_build: None,
-        last_source: None,
-    })
+fn valid_gradle_application_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_'))
 }
 
 /// The `applicationId` an app module's Gradle script declares as a literal, in either the
@@ -447,12 +454,7 @@ pub(crate) fn gradle_application_id(script: &str) -> Option<String> {
         let rest = rest.trim_start().strip_prefix('=').unwrap_or(rest).trim();
         let quote = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
         let value = rest[1..].split(quote).next()?;
-        let valid = !value.is_empty()
-            && value.len() <= 255
-            && value.chars().all(|character| {
-                character.is_ascii_alphanumeric() || matches!(character, '.' | '_')
-            });
-        valid.then(|| value.to_string())
+        valid_gradle_application_id(value).then(|| value.to_string())
     })
 }
 
@@ -595,12 +597,12 @@ pub(crate) fn load_apple_workspace(
                     format!("The approved Apple project configuration is invalid: {error}")
                 })?;
             if workspace.development_team.is_none() || workspace.bundle_identifier.is_none() {
-                let project_path = PathBuf::from(&workspace.local_path)
-                    .join("ios/App/App.xcodeproj/project.pbxproj");
-                if let Ok(project) = fs::read_to_string(project_path) {
-                    workspace.development_team = one_xcode_setting(&project, "DEVELOPMENT_TEAM");
-                    workspace.bundle_identifier = release_bundle_identifier(&project);
-                }
+                let (team, bundle) = apple_project_identity(
+                    std::path::Path::new(&workspace.local_path),
+                    &workspace.layout,
+                );
+                workspace.development_team = workspace.development_team.or(team);
+                workspace.bundle_identifier = workspace.bundle_identifier.or(bundle);
             }
 
             Ok(Some(workspace))
@@ -620,67 +622,31 @@ pub(crate) fn save_apple_workspace(
     write_restricted_file(&path, &encoded)
 }
 
-pub(crate) fn inspect_apple_workspace(path: &str) -> Result<StoredAppleWorkspace, String> {
-    if path.is_empty() {
-        return Err("Choose an absolute local project directory.".to_string());
-    }
-    let requested = std::path::Path::new(path);
-    if !requested.is_absolute() {
-        return Err("The approved project path must be absolute.".to_string());
-    }
-    let canonical = fs::canonicalize(requested)
-        .map_err(|error| format!("The selected project directory is unavailable: {error}"))?;
-    if !canonical.is_dir() {
-        return Err("The selected project path is not a directory.".to_string());
-    }
-    for required in [
-        "package.json",
-        "pnpm-lock.yaml",
-        "capacitor.config.ts",
-        "ios/App/Podfile",
-        "ios/App/Podfile.lock",
-        "ios/App/App.xcodeproj/project.pbxproj",
-    ] {
-        if !canonical.join(required).is_file() {
-            return Err(format!("This project is missing {required}."));
-        }
-    }
-    if !canonical.join("ios/App/App.xcworkspace").is_dir() {
-        return Err("This project is missing ios/App/App.xcworkspace.".to_string());
-    }
-
-    let package: serde_json::Value = serde_json::from_slice(
-        &fs::read(canonical.join("package.json"))
-            .map_err(|error| format!("Could not read package.json: {error}"))?,
-    )
-    .map_err(|error| format!("package.json is invalid: {error}"))?;
-    let name = package
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .filter(|name| !name.trim().is_empty() && name.len() <= 120)
-        .map(str::to_string)
-        .or_else(|| {
-            canonical
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_string)
-        })
-        .ok_or_else(|| "The selected project name is invalid.".to_string())?;
-    let local_path = canonical
-        .to_str()
-        .filter(|path| path.len() <= 4_096)
-        .ok_or_else(|| "The selected project path is not valid UTF-8.".to_string())?
-        .to_string();
-    let project_file = fs::read_to_string(canonical.join("ios/App/App.xcodeproj/project.pbxproj"))
-        .map_err(|error| format!("Could not read the Xcode project settings: {error}"))?;
-    let development_team = one_xcode_setting(&project_file, "DEVELOPMENT_TEAM");
-    let bundle_identifier = release_bundle_identifier(&project_file);
+pub(crate) fn inspect_apple_workspace(
+    path: &str,
+    scheme: Option<&str>,
+) -> Result<StoredAppleWorkspace, String> {
+    let (canonical, local_path) = approved_project_path(path)?;
+    let layout = buildbridge_machines::detect_project(
+        &canonical,
+        buildbridge_machines::ProjectChoices {
+            scheme,
+            module: None,
+        },
+    )?;
+    let ios = layout.ios.as_ref().ok_or_else(|| {
+        format!(
+            "This {} project has no iOS project to build. Add the iOS platform and approve it again.",
+            layout.kind.label()
+        )
+    })?;
+    let (development_team, bundle_identifier) = apple_project_identity(&canonical, &layout);
 
     Ok(StoredAppleWorkspace {
         local_path,
-        name,
-        ios_workspace: "ios/App/App.xcworkspace".to_string(),
-        scheme: "App".to_string(),
+        name: layout.name.clone(),
+        scheme: ios.scheme.clone(),
+        layout,
         development_team,
         bundle_identifier,
         last_snapshot_sha256: None,
@@ -694,6 +660,45 @@ pub(crate) fn inspect_apple_workspace(path: &str) -> Result<StoredAppleWorkspace
         debug_bundle_identifier: None,
         last_source: None,
     })
+}
+
+/// The team and the release bundle identifier the project declares: in its Xcode project's
+/// settings when it has one on the host, or in its Expo config when prebuild will write the
+/// project from that.
+pub(crate) fn apple_project_identity(
+    root: &std::path::Path,
+    layout: &ProjectLayout,
+) -> (Option<String>, Option<String>) {
+    let project_file = layout
+        .ios
+        .as_ref()
+        .map(|ios| root.join(ios.project_file()))
+        .and_then(|path| fs::read_to_string(path).ok());
+    match project_file {
+        Some(project) => (
+            one_xcode_setting(&project, "DEVELOPMENT_TEAM"),
+            release_bundle_identifier(&project),
+        ),
+        None => (
+            None,
+            buildbridge_machines::expo_app_config(root)
+                .and_then(|expo| {
+                    expo.get("ios")?
+                        .get("bundleIdentifier")?
+                        .as_str()
+                        .map(str::to_string)
+                })
+                .filter(|identifier| {
+                    xcode_setting_values(
+                        &format!("PRODUCT_BUNDLE_IDENTIFIER = {identifier};"),
+                        "PRODUCT_BUNDLE_IDENTIFIER",
+                    )
+                    .len()
+                        == 1
+                })
+                .or_else(|| buildbridge_machines::cordova_widget_id(root)),
+        ),
+    }
 }
 
 pub(crate) fn xcode_setting_values(project: &str, key: &str) -> Vec<String> {
@@ -727,17 +732,28 @@ pub(crate) fn one_xcode_setting(project: &str, key: &str) -> Option<String> {
     (values.len() == 1).then(|| values.remove(0))
 }
 
+/// The identifier the app itself ships under, among every one the project declares. A project
+/// names more than one whenever a build type or a bundled target gets its own — `.debug` on a
+/// debug build, `.RunnerTests` or `.UITests` on a test target — and each of those extends the
+/// app's own identifier, so the one nothing else is a prefix of is the app's.
 pub(crate) fn release_bundle_identifier(project: &str) -> Option<String> {
     let mut values = xcode_setting_values(project, "PRODUCT_BUNDLE_IDENTIFIER");
     if values.len() == 1 {
         return values.pop();
     }
-    let release_values = values
-        .into_iter()
-        .filter(|value| !value.ends_with(".debug") && !value.ends_with(".Debug"))
+    let roots = values
+        .iter()
+        .filter(|value| {
+            !values.iter().any(|other| {
+                other != *value
+                    && value
+                        .strip_prefix(other.as_str())
+                        .is_some_and(|rest| rest.starts_with('.'))
+            })
+        })
         .collect::<Vec<_>>();
 
-    (release_values.len() == 1).then(|| release_values[0].clone())
+    (roots.len() == 1).then(|| roots[0].clone())
 }
 
 pub(crate) fn load_mac_guest_access(

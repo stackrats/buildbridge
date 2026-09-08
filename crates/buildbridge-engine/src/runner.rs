@@ -923,7 +923,14 @@ pub(crate) async fn run_remote_android_release(
                 LogStream::System,
                 format!("Checked out {git_ref} at {commit}"),
             );
-            let inspected = inspect_android_workspace(&checkout.to_string_lossy())?;
+            let inspected = inspect_android_workspace(
+                &checkout.to_string_lossy(),
+                approved
+                    .layout
+                    .android
+                    .as_ref()
+                    .map(|android| android.module_path.as_str()),
+            )?;
             if inspected.application_id != approved.application_id {
                 return Err(
                     "That revision declares a different application identifier than the approved project."
@@ -1060,7 +1067,8 @@ pub(crate) async fn run_remote_apple_archive(
                 format!("Checked out {git_ref} at {commit}"),
             );
 
-            let inspected = inspect_apple_workspace(&checkout.to_string_lossy())?;
+            let inspected =
+                inspect_apple_workspace(&checkout.to_string_lossy(), Some(&approved.scheme))?;
             if inspected.bundle_identifier != approved.bundle_identifier
                 || inspected.development_team != approved.development_team
             {

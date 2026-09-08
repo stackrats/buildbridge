@@ -859,11 +859,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::{
     APPLE_BUILD_DIAGNOSTIC_LINES, APPLE_BUILD_OUTPUT_TAIL_LINES, AppleArchiveProgress,
-    GuestEnvFiles, ProjectVersion, ProvisioningProfileSummary, SIGNING_KEYCHAIN_NAME,
-    apple_archive_signing_xcconfig, apple_build_log_is_diagnostic, apple_version_xcconfig,
-    build_setting_value, profile_allows_bundle, rebuild_web_assets_with_env, run_guest_command,
-    sanitize_build_log_line, stream_bytes_to_guest, valid_apple_scheme, valid_release_value,
-    validate_apple_version, validate_signing_target, write_secret_frame,
+    GuestEnvFiles, ProjectLayout, ProjectVersion, ProvisioningProfileSummary,
+    SIGNING_KEYCHAIN_NAME, apple_archive_signing_xcconfig, apple_build_log_is_diagnostic,
+    apple_version_xcconfig, build_setting_value, guest_env_source, ios_container_args,
+    ios_container_path, profile_allows_bundle, rebuild_web_assets_with_env, run_guest_command,
+    sanitize_build_log_line, stream_bytes_to_guest, valid_release_value, validate_apple_version,
+    validate_layout, validate_signing_target, write_secret_frame,
 };
 
 const DEVICE_RUN_JOB: &str = "apple-device-run";
@@ -1036,19 +1037,22 @@ pub fn resolve_debug_bundle_identifier(
     username: &str,
     identity_path: &Path,
     known_hosts_path: &Path,
-    scheme: &str,
+    layout: &ProjectLayout,
 ) -> Result<String, ProviderError> {
     validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
-    if !valid_apple_scheme(scheme) {
-        return Err(ProviderError::GuestBridge(
-            "the stored Xcode scheme is missing or invalid".to_string(),
-        ));
-    }
+    validate_layout(layout)?;
+    let scheme: &str = layout
+        .ios
+        .as_ref()
+        .map(|ios| ios.scheme.as_str())
+        .ok_or_else(|| {
+            ProviderError::GuestBridge("the approved project has no iOS project".to_string())
+        })?;
     let guest_home = format!("/Users/{username}");
     let xcodebuild =
         format!("{guest_home}/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild");
     let workspace_root = format!("{guest_home}/BuildBridge/workspaces/active");
-    let workspace = format!("{workspace_root}/ios/App/App.xcworkspace");
+    let container_args = ios_container_args(layout, &workspace_root);
     let derived_data = format!("{workspace_root}/.buildbridge/DerivedData");
     let settings = run_guest_command(
         ssh_port,
@@ -1056,9 +1060,9 @@ pub fn resolve_debug_bundle_identifier(
         identity_path,
         known_hosts_path,
         &format!(
-            "set -o pipefail; {} -workspace {} -scheme {} -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath {} -showBuildSettings | /usr/bin/awk '$1 == \"TARGET_NAME\" || $1 == \"PRODUCT_BUNDLE_IDENTIFIER\" || $1 == \"CODESIGNING_FOLDER_PATH\" {{ print }}'",
+            "set -o pipefail; {} {} -scheme {} -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath {} -showBuildSettings | /usr/bin/awk '$1 == \"TARGET_NAME\" || $1 == \"PRODUCT_BUNDLE_IDENTIFIER\" || $1 == \"CODESIGNING_FOLDER_PATH\" {{ print }}'",
             shell_single_quote(&xcodebuild),
-            shell_single_quote(&workspace),
+            container_args,
             shell_single_quote(scheme),
             shell_single_quote(&derived_data),
         ),
@@ -1387,6 +1391,7 @@ fn run_device_build_helper<F>(
     scheme: &str,
     derived_data_path: &str,
     signing_settings_path: &str,
+    env_source: &str,
     keychain_password: &str,
     started_at: Instant,
     on_progress: &mut F,
@@ -1395,7 +1400,7 @@ where
     F: FnMut(AppleDeviceRunProgress),
 {
     let remote_command = format!(
-        "{} --device-build {} {} {} {} {} {} 2>&1",
+        "{env_source}{} --device-build {} {} {} {} {} {} 2>&1",
         shell_single_quote(helper_path),
         shell_single_quote(keychain_path),
         shell_single_quote(xcodebuild_path),
@@ -1517,7 +1522,7 @@ pub fn run_apple_device_build<F>(
     identity_path: &Path,
     known_hosts_path: &Path,
     signing: &DeviceSigning<'_>,
-    scheme: &str,
+    layout: &ProjectLayout,
     device: &GuestDevice,
     keychain_password: &str,
     env: Option<&GuestEnvFiles>,
@@ -1529,16 +1534,19 @@ where
 {
     validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
     validate_signing_target(signing.development_team, signing.bundle_identifier)?;
+    validate_layout(layout)?;
+    let scheme: &str = layout
+        .ios
+        .as_ref()
+        .map(|ios| ios.scheme.as_str())
+        .ok_or_else(|| {
+            ProviderError::GuestBridge("the approved project has no iOS project".to_string())
+        })?;
     if let Some(version) = version {
         validate_apple_version(version).map_err(ProviderError::GuestBridge)?;
     }
     // Set while the target is resolved; a reattached run does not resolve it again.
     let mut project_bundle_identifier: Option<String> = None;
-    if !valid_apple_scheme(scheme) {
-        return Err(ProviderError::GuestBridge(
-            "the stored Xcode scheme is missing or invalid".to_string(),
-        ));
-    }
     if keychain_password.is_empty() || keychain_password.len() > 512 {
         return Err(ProviderError::GuestBridge(
             "the signing keychain credential is missing or invalid".to_string(),
@@ -1575,7 +1583,9 @@ where
     let developer_dir = format!("{guest_home}/Applications/Xcode.app/Contents/Developer");
     let xcodebuild = format!("{developer_dir}/usr/bin/xcodebuild");
     let workspace_root = format!("{guest_home}/BuildBridge/workspaces/active");
-    let workspace = format!("{workspace_root}/ios/App/App.xcworkspace");
+    let workspace = ios_container_path(layout, &workspace_root);
+    let container_args = ios_container_args(layout, &workspace_root);
+    let env_source = guest_env_source(&workspace_root);
     let derived_data = format!("{workspace_root}/.buildbridge/DerivedData");
     let operation_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1640,6 +1650,7 @@ where
                 };
                 rebuild_web_assets_with_env(
                     env,
+                    layout,
                     ssh_port,
                     username,
                     identity_path,
@@ -1662,9 +1673,9 @@ where
                 identity_path,
                 known_hosts_path,
                 &format!(
-                    "set -o pipefail; {} -workspace {} -scheme {} -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath {} -showBuildSettings | /usr/bin/awk '$1 == \"TARGET_NAME\" || $1 == \"PRODUCT_BUNDLE_IDENTIFIER\" || $1 == \"CODESIGNING_FOLDER_PATH\" {{ print }}'",
+                    "set -o pipefail; {} {} -scheme {} -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath {} -showBuildSettings | /usr/bin/awk '$1 == \"TARGET_NAME\" || $1 == \"PRODUCT_BUNDLE_IDENTIFIER\" || $1 == \"CODESIGNING_FOLDER_PATH\" {{ print }}'",
                     shell_single_quote(&xcodebuild),
-                    shell_single_quote(&workspace),
+                    container_args,
                     shell_single_quote(scheme),
                     shell_single_quote(&derived_data),
                 ),
@@ -1746,6 +1757,7 @@ where
                 scheme,
                 &derived_data,
                 &signing_settings,
+                &env_source,
                 keychain_password,
                 started_at,
                 &mut on_progress,

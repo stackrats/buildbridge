@@ -9,7 +9,7 @@
 
 ### Build, sign, and ship iOS and Android apps locally.
 
-A desktop app for local mobile builds on Linux and macOS. Go from local code to signed releases, with device testing, signing, and store uploads in one place.
+A desktop app for local mobile builds on Linux and macOS. Go from local code to signed releases, with on-device previews, signing, and store uploads in one place.
 
 Your hardware. Your signing keys. No cloud build service required.
 
@@ -52,7 +52,7 @@ buildbridge never collects an Apple Account password or two-factor code. The loc
 
 ## Requirements
 
-The automated workflow currently requires a Capacitor project with `capacitor.config.ts`, `pnpm-lock.yaml`, and a Vite+ web build. Other iOS and Android project types need additional build recipes.
+Any iOS or Android app works out of the box. buildbridge reads the approved folder and recognises what is in front of the native projects: Capacitor, Cordova, React Native, Expo (prebuilding the native projects where the build runs when they are not committed), Flutter (installing the pinned Flutter SDK on first use), or nothing at all for a plain Xcode workspace or project and a plain Gradle project. Dependencies install with the package manager the project locks with (pnpm, npm, Yarn or Bun); CocoaPods runs where the Podfile is; a project offering several schemes or application modules lets you choose. What is required of the folder: a committed Gradle wrapper for Android, and an application target in the Xcode project for iOS.
 
 For the desktop on Linux:
 

@@ -210,11 +210,19 @@ enum XcodeCommand {
 
 #[derive(Subcommand)]
 enum ProjectCommand {
-    /// Approve a Capacitor project folder: its iOS platform for a macOS machine, its Android
-    /// platform for an Android one.
+    /// Approve a project folder: its iOS project for a macOS machine, its Android project for
+    /// an Android one. Capacitor, Cordova, React Native, Expo, Flutter and plain Xcode or
+    /// Gradle projects are recognised from their files.
     Approve {
         machine: String,
         path: String,
+        /// The Xcode scheme to build when the project offers several (macOS machines).
+        #[arg(long)]
+        scheme: Option<String>,
+        /// The Gradle application module to build when the project has several, such as
+        /// `:app` (Android machines).
+        #[arg(long)]
+        module: Option<String>,
     },
     Sync {
         machine: String,
@@ -734,6 +742,69 @@ impl ProviderArg {
     }
 }
 
+/// One line naming what was detected: the kind, the package manager, the Xcode container and
+/// scheme, the Gradle root and module, with the other schemes or modules the project offers.
+fn describe_layout(layout: &serde_json::Value) -> String {
+    // The engine names the kinds; the command line does not keep a second list of them.
+    let kind = serde_json::from_value::<buildbridge_engine::ProjectKind>(layout["kind"].clone())
+        .map(|kind| kind.label().to_string())
+        .unwrap_or_default();
+    let mut parts = vec![kind];
+    if let Some(manager) = layout["packageManager"].as_str() {
+        parts.push(manager.to_string());
+    }
+    if let Some(ios) = layout["ios"].as_object() {
+        let scheme = ios["scheme"].as_str().unwrap_or_default();
+        let others: Vec<&str> = ios["schemes"]
+            .as_array()
+            .map(|schemes| {
+                schemes
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|name| *name != scheme)
+                    .collect()
+            })
+            .unwrap_or_default();
+        parts.push(format!(
+            "{} · scheme {scheme}{}",
+            ios["container"].as_str().unwrap_or_default(),
+            if others.is_empty() {
+                String::new()
+            } else {
+                format!(" (also {}; choose with --scheme)", others.join(", "))
+            }
+        ));
+    }
+    if let Some(android) = layout["android"].as_object() {
+        let module = android["modulePath"].as_str().unwrap_or_default();
+        let others: Vec<&str> = android["modules"]
+            .as_array()
+            .map(|modules| {
+                modules
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|name| *name != module)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let root = android["root"].as_str().unwrap_or_default();
+        parts.push(format!(
+            "{} · module {module}{}",
+            if root.is_empty() {
+                "Gradle at the root"
+            } else {
+                root
+            },
+            if others.is_empty() {
+                String::new()
+            } else {
+                format!(" (also {}; choose with --module)", others.join(", "))
+            }
+        ));
+    }
+    parts.join(" · ")
+}
+
 /// Whether a registered machine is an Android toolchain, from the machine list rather than a
 /// full probe of the machine.
 async fn machine_is_android(engine: &Engine, machine: &str) -> Result<bool, String> {
@@ -1190,31 +1261,48 @@ async fn run(cli: Cli) -> Result<(), String> {
                 },
             )
         }
-        Command::Project(ProjectCommand::Approve { machine, path }) => {
+        Command::Project(ProjectCommand::Approve {
+            machine,
+            path,
+            scheme,
+            module,
+        }) => {
             if machine_is_android(engine, &machine).await? {
                 report(
                     json,
-                    &e::approve_android_workspace(engine, machine, input(json!({ "path": path }))?)
-                        .await?,
+                    &e::approve_android_workspace(
+                        engine,
+                        machine,
+                        input(json!({ "path": path, "module": module }))?,
+                    )
+                    .await?,
                     |view| {
+                        let workspace = &view["android"]["workspace"];
                         println!(
                             "Approved {} ({})",
-                            text(&view["android"]["workspace"]["name"]),
-                            text(&view["android"]["workspace"]["applicationId"])
-                        )
+                            text(&workspace["name"]),
+                            text(&workspace["applicationId"])
+                        );
+                        println!("  {}", describe_layout(&workspace["layout"]));
                     },
                 )
             } else {
                 report(
                     json,
-                    &e::approve_apple_workspace(engine, machine, input(json!({ "path": path }))?)
-                        .await?,
+                    &e::approve_apple_workspace(
+                        engine,
+                        machine,
+                        input(json!({ "path": path, "scheme": scheme }))?,
+                    )
+                    .await?,
                     |view| {
+                        let workspace = &view["appleWorkspace"];
                         println!(
                             "Approved {} ({})",
-                            text(&view["appleWorkspace"]["name"]),
-                            text(&view["appleWorkspace"]["bundleIdentifier"])
-                        )
+                            text(&workspace["name"]),
+                            text(&workspace["bundleIdentifier"])
+                        );
+                        println!("  {}", describe_layout(&workspace["layout"]));
                     },
                 )
             }

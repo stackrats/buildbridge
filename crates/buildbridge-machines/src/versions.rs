@@ -337,6 +337,119 @@ pub(crate) fn apple_version_xcconfig(version: &ProjectVersion) -> String {
     )
 }
 
+/// The version a Flutter app declares in its pubspec: `version: 1.2.3+4`, the build number
+/// after the plus and 1 when there is none, as the Flutter tool reads it.
+pub fn pubspec_project_version(pubspec: &str) -> Option<ProjectVersion> {
+    let value = pubspec.lines().find_map(|line| {
+        let value = line.strip_prefix("version:")?.trim();
+        let value = value.trim_matches(|c| c == '"' || c == '\'').trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })?;
+    let (version, build) = match value.split_once('+') {
+        Some((version, build)) => (version.to_string(), build.to_string()),
+        None => (value, "1".to_string()),
+    };
+    (valid_project_version(&version) && valid_android_version_code(&build))
+        .then_some(ProjectVersion { version, build })
+}
+
+/// Writes the version into a pubspec, keeping every other line as it is.
+pub fn set_pubspec_project_version(
+    pubspec: &str,
+    version: &ProjectVersion,
+) -> Result<String, String> {
+    validate_android_version(version)?;
+    let mut written = false;
+    let rewritten = rewrite_lines(pubspec, |line| {
+        line.strip_prefix("version:").map(|_| {
+            written = true;
+            format!("version: {}+{}", version.version, version.build)
+        })
+    });
+    if !written {
+        return Err("The pubspec declares no version line to write the version into. Add `version: 1.0.0+1` to pubspec.yaml once.".to_string());
+    }
+    Ok(rewritten)
+}
+
+/// The version an Expo app config declares for one platform: `expo.version` with
+/// `expo.ios.buildNumber` or `expo.android.versionCode`, 1 when the platform has none, as
+/// prebuild writes them into the native projects.
+pub fn expo_project_version(config: &serde_json::Value, android: bool) -> Option<ProjectVersion> {
+    let expo = config.get("expo")?;
+    let version = expo.get("version")?.as_str()?.to_string();
+    let build = if android {
+        expo.get("android")
+            .and_then(|android| android.get("versionCode"))
+            .and_then(|code| {
+                code.as_u64()
+                    .map(|code| code.to_string())
+                    .or_else(|| code.as_str().map(str::to_string))
+            })
+    } else {
+        expo.get("ios")
+            .and_then(|ios| ios.get("buildNumber"))
+            .and_then(|number| number.as_str().map(str::to_string))
+    }
+    .unwrap_or_else(|| "1".to_string());
+    valid_project_version(&version).then_some(ProjectVersion { version, build })
+}
+
+/// Writes the version into an Expo app config for one platform, keeping the rest of the
+/// document; the file comes back pretty-printed the way Expo's own tooling writes it.
+pub fn set_expo_project_version(
+    config: &str,
+    version: &ProjectVersion,
+    android: bool,
+) -> Result<String, String> {
+    if android {
+        validate_android_version(version)?;
+    } else {
+        validate_apple_version(version)?;
+    }
+    let mut document: serde_json::Value =
+        serde_json::from_str(config).map_err(|error| format!("app.json is invalid: {error}"))?;
+    let expo = document
+        .get_mut("expo")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| "app.json holds no expo object to write the version into.".to_string())?;
+    expo.insert(
+        "version".to_string(),
+        serde_json::Value::String(version.version.clone()),
+    );
+    let (platform, key, value) = if android {
+        (
+            "android",
+            "versionCode",
+            serde_json::Value::Number(
+                version
+                    .build
+                    .parse::<u64>()
+                    .map_err(|_| "The version code must be a whole number.".to_string())?
+                    .into(),
+            ),
+        )
+    } else {
+        (
+            "ios",
+            "buildNumber",
+            serde_json::Value::String(version.build.clone()),
+        )
+    };
+    let platform = expo
+        .entry(platform)
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let platform = platform.as_object_mut().ok_or_else(|| {
+        "app.json's platform settings are not an object; fix them before setting a version."
+            .to_string()
+    })?;
+    platform.insert(key.to_string(), value);
+    let mut text = serde_json::to_string_pretty(&document)
+        .map_err(|error| format!("app.json could not be written: {error}"))?;
+    text.push('\n');
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +580,67 @@ mod tests {
             "MARKETING_VERSION = 3.2.1\nCURRENT_PROJECT_VERSION = 16\n"
         );
         assert_eq!(version("3.2.1", "16").display(), "3.2.1 (16)");
+    }
+
+    #[test]
+    fn a_pubspec_and_an_expo_config_carry_the_version_too() {
+        let pubspec = "name: app\nversion: 1.2.3+4\n\nenvironment:\n  sdk: ^3.0.0\n";
+        assert_eq!(
+            pubspec_project_version(pubspec),
+            Some(ProjectVersion {
+                version: "1.2.3".to_string(),
+                build: "4".to_string()
+            })
+        );
+        assert_eq!(
+            pubspec_project_version("name: app\nversion: 2.0.0\n")
+                .unwrap()
+                .build,
+            "1"
+        );
+        let rewritten = set_pubspec_project_version(
+            pubspec,
+            &ProjectVersion {
+                version: "1.3.0".to_string(),
+                build: "5".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "name: app\nversion: 1.3.0+5\n\nenvironment:\n  sdk: ^3.0.0\n"
+        );
+        assert!(
+            set_pubspec_project_version(
+                "name: app\n",
+                &ProjectVersion {
+                    version: "1".into(),
+                    build: "1".into()
+                }
+            )
+            .is_err()
+        );
+
+        let config = serde_json::json!({
+            "expo": { "name": "App", "version": "3.2.0", "ios": { "buildNumber": "15" }, "android": { "versionCode": 12 } }
+        });
+        assert_eq!(expo_project_version(&config, false).unwrap().build, "15");
+        assert_eq!(expo_project_version(&config, true).unwrap().build, "12");
+        let written = set_expo_project_version(
+            &config.to_string(),
+            &ProjectVersion {
+                version: "3.3.0".to_string(),
+                build: "16".to_string(),
+            },
+            true,
+        )
+        .unwrap();
+        let written: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(written["expo"]["version"], "3.3.0");
+        assert_eq!(written["expo"]["android"]["versionCode"], 16);
+        assert_eq!(
+            written["expo"]["ios"]["buildNumber"], "15",
+            "the other platform keeps its number"
+        );
     }
 }

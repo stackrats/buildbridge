@@ -7,6 +7,7 @@ import { computed, ref } from 'vue';
 
 import { formatBytes, percent, relativeTime } from '../../../lib/format';
 import { projectPhaseLabel } from '../../../model/phases';
+import { describeProjectKind } from '../../../model/project-layout';
 import type { JourneyStep } from '../../../model/steps';
 import { useMachinesStore, type MachineSession } from '../../../stores/machines';
 import { useUi } from '../../../stores/ui';
@@ -17,6 +18,7 @@ import Field from '../../ui/Field.vue';
 import KeyValue from '../../ui/KeyValue.vue';
 import PathField from '../../ui/PathField.vue';
 import ProgressRow from '../../ui/ProgressRow.vue';
+import Select from '../../ui/Select.vue';
 import Spinner from '../../ui/Spinner.vue';
 import StepPanel from '../../ui/StepPanel.vue';
 
@@ -37,12 +39,44 @@ const failure = computed(() =>
         : null,
 );
 
+// What the folder must hold, and what is read from it: the detector names the framework in
+// front of the Xcode project from the files it finds, and never runs the project's own tools.
 const requirements = [
-    'package.json and pnpm-lock.yaml',
-    'capacitor.config.ts',
-    'ios/App/Podfile and Podfile.lock',
-    'ios/App/App.xcodeproj and App.xcworkspace',
+    'An Xcode workspace or project with an application target, where the app keeps it',
+    'Capacitor, Cordova, React Native, Expo or Flutter in front of it, or nothing at all',
+    'Podfile.lock committed beside the Podfile, when the project uses CocoaPods',
+    'The lockfile of the package manager the project installs with, when it has one',
 ];
+
+// The scheme is chosen among the project's shared schemes and application targets; choosing
+// one approves the same folder again with it.
+const schemeOptions = computed(() => {
+    const ios = workspace.value?.layout.ios;
+    if (!ios) {
+        return [];
+    }
+    const names = [...ios.schemes];
+    for (const target of ios.appTargets) {
+        if (!names.includes(target.name)) {
+            names.push(target.name);
+        }
+    }
+    return names.map((name) => ({
+        value: name,
+        label: name,
+        description: ios.schemes.includes(name)
+            ? 'A shared scheme of the project'
+            : 'An application target; buildbridge writes its scheme where the build runs',
+    }));
+});
+const scheme = computed({
+    get: () => workspace.value?.scheme ?? '',
+    set: (value: string) => {
+        if (workspace.value && value && value !== workspace.value.scheme) {
+            void machines.approveWorkspace(session.id, workspace.value.localPath, value);
+        }
+    },
+});
 
 async function remove(): Promise<void> {
     removeOpen.value = false;
@@ -100,7 +134,7 @@ async function remove(): Promise<void> {
                 :cause="
                     failure.operation === 'sync'
                         ? null
-                        : 'The folder must hold an Ionic or Capacitor iOS project with CocoaPods; the files it needs are listed below.'
+                        : 'The folder must hold an iOS app: an Xcode workspace or project, with or without a framework in front of it. What buildbridge looks for is listed below.'
                 "
                 :diagnostic="failure.message"
             >
@@ -114,10 +148,11 @@ async function remove(): Promise<void> {
 
         <div class="space-y-3">
             <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-                Approval is read-only: buildbridge validates the project shape and detects the Xcode
-                team and release bundle identifier; only this one folder is ever read. Every build
-                of the latest source copies a bounded, checksummed snapshot of it into the guest
-                over the pinned bridge, leaving out Git metadata,
+                Approval is read-only: buildbridge detects what kind of project the folder holds,
+                the Xcode workspace or project and scheme to build, and the team and release bundle
+                identifier; only this one folder is ever read. Every build of the latest source
+                copies a bounded, checksummed snapshot of it into the guest over the pinned bridge,
+                leaving out Git metadata,
                 <span class="font-mono">node_modules</span>, build output, every
                 <span class="font-mono">.env</span> file, keys, certificates, and profiles.
                 Synchronizing here refreshes that snapshot without building.
@@ -139,7 +174,12 @@ async function remove(): Promise<void> {
                         mono: true,
                         tone: workspace.bundleIdentifier ? 'default' : 'warn',
                     },
-                    { label: 'Workspace', value: workspace.iosWorkspace, mono: true },
+                    {
+                        label: 'Project kind',
+                        value: describeProjectKind(workspace.layout),
+                        copyable: false,
+                    },
+                    { label: 'Xcode opens', value: workspace.layout.ios?.container, mono: true },
                     { label: 'Scheme', value: workspace.scheme },
                 ]"
             />
@@ -176,7 +216,7 @@ async function remove(): Promise<void> {
 
             <Field
                 :label="workspace ? 'Approve a different folder' : 'Project folder on this host'"
-                hint="Currently an Ionic or Capacitor iOS project with CocoaPods. Drop the folder here or paste its absolute path."
+                hint="Any iOS app: Capacitor, Cordova, React Native, Expo, Flutter, or a plain Xcode project. Drop the folder here or paste its absolute path."
             >
                 <PathField
                     v-model="path"
@@ -198,6 +238,17 @@ async function remove(): Promise<void> {
                         {{ workspace ? 'Re-approve' : 'Approve project' }}
                     </Button>
                 </template>
+            </Field>
+            <Field
+                v-if="workspace && schemeOptions.length > 1"
+                label="Scheme to build"
+                hint="The project offers more than one. Choosing approves the same folder again with it."
+            >
+                <Select
+                    v-model="scheme"
+                    :options="schemeOptions"
+                    :disabled="busy || step.status === 'pending'"
+                />
             </Field>
             <ul class="grid gap-1 text-xs text-zinc-500 sm:grid-cols-2 dark:text-zinc-400">
                 <li v-for="item in requirements" :key="item">· {{ item }}</li>

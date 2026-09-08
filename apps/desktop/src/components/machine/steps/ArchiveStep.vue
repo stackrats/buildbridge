@@ -14,6 +14,7 @@ import { formatBytes, percent, shortHash } from '../../../lib/format';
 import { requestedVersion, type BuildRequest } from '../../../model/build-flow';
 import type { JourneyStep } from '../../../model/steps';
 import { archivePhaseLabel } from '../../../model/phases';
+import { hasWebAssets } from '../../../model/project-layout';
 import { describeSnapshot } from '../../../model/snapshot';
 import { useBuildFlowStore } from '../../../stores/build-flow';
 import { useEnvSetsStore } from '../../../stores/envs';
@@ -70,17 +71,21 @@ watch(attachedEnvSet, (set, previous) => {
     }
 });
 onMounted(() => void envs.load());
+const webAssets = computed(() => hasWebAssets(workspace.value?.layout));
 const envOptions = computed(() => [
     {
         value: '',
-        label: 'Use prepared assets',
-        description:
-            'Keep web assets from the most recent build, including their environment values.',
+        label: webAssets.value ? 'Use prepared assets' : 'Project configuration only',
+        description: webAssets.value
+            ? 'Keep web assets from the most recent build, including their environment values.'
+            : 'Build with the environment the last copy or build left in place.',
     },
     ...envs.sets.value.map((set) => ({
         value: set.id,
         label: set.name,
-        description: 'Rebuild web assets with this environment',
+        description: webAssets.value
+            ? 'Rebuild web assets with this environment'
+            : 'Export this environment to the build',
     })),
 ]);
 const chosenEnvName = computed(() => envs.setById(envSetId.value)?.name ?? null);
@@ -113,7 +118,12 @@ function build(): void {
 }
 
 const recipe = computed(() => [
-    { label: 'Scheme', value: workspace.value?.scheme ?? 'App' },
+    { label: 'Scheme', value: workspace.value?.scheme ?? null },
+    {
+        label: 'Xcode opens',
+        value: workspace.value?.layout.ios?.container ?? null,
+        mono: true,
+    },
     { label: 'Configuration', value: 'Release', copyable: false },
     { label: 'Export', value: 'App Store Connect · manual signing · app target only' },
     { label: 'Bundle identifier', value: workspace.value?.bundleIdentifier, mono: true },
@@ -124,10 +134,14 @@ const recipe = computed(() => [
     },
     { label: 'Profile', value: signing.value?.profiles[0]?.uuid ?? null, mono: true },
     {
-        label: 'Web assets for this build',
+        label: webAssets.value ? 'Web assets for this build' : 'Environment for this build',
         value: chosenEnvName.value
-            ? `${chosenEnvName.value} · web assets rebuilt with it before archiving`
-            : 'Prepared assets · keeps the values from the most recent build',
+            ? webAssets.value
+                ? `${chosenEnvName.value} · web assets rebuilt with it before archiving`
+                : `${chosenEnvName.value} · exported to the build`
+            : webAssets.value
+              ? 'Prepared assets · keeps the values from the most recent build'
+              : 'As the last copy or build left it',
     },
 ]);
 
@@ -365,8 +379,12 @@ async function clear(): Promise<void> {
                     label="Environment"
                     :hint="
                         chosenEnvName
-                            ? 'The web assets are rebuilt with this environment before archiving.'
-                            : 'Keeps the web assets from the most recent build, including their environment values.'
+                            ? webAssets
+                                ? 'The web assets are rebuilt with this environment before archiving.'
+                                : 'The environment is exported to the build before archiving.'
+                            : webAssets
+                              ? 'Keeps the web assets from the most recent build, including their environment values.'
+                              : 'Builds with the environment the last copy or build left in place.'
                     "
                 >
                     <Select

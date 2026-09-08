@@ -988,14 +988,15 @@ export function useMachinesStore() {
                 },
             );
         },
-        approveWorkspace: (id: string, path: string) =>
+        /** `choice` is the scheme on a macOS machine and the application module on an Android one. */
+        approveWorkspace: (id: string, path: string, choice: string | null = null) =>
             runOperation(
                 id,
                 'approve',
                 () =>
                     androidMachine(id)
-                        ? useBackend().approveAndroidWorkspace(id, path)
-                        : useBackend().approveWorkspace(id, path),
+                        ? useBackend().approveAndroidWorkspace(id, path, choice)
+                        : useBackend().approveWorkspace(id, path, choice),
                 { finished: 'Project approved. Nothing has been copied yet.' },
             ),
         clearWorkspace: (id: string) =>

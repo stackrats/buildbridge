@@ -300,8 +300,8 @@ function cancelEdit(): void {
                         ></template
                     >
                     <template #description
-                        >Choose the local Capacitor project whose repository, app identifier, and
-                        team this Mac may build.</template
+                        >Choose the local iOS project whose repository, app identifier, and team
+                        this Mac may build.</template
                     >
                     <template v-if="project && !projectFormOpen" #actions>
                         <Button
@@ -316,7 +316,7 @@ function cancelEdit(): void {
                         <Field
                             label="Project folder"
                             required
-                            hint="The folder containing package.json and ios/App, with an origin Git repository."
+                            hint="The folder holding the app's Xcode workspace or project, with an origin Git repository. Capacitor, Cordova, React Native, Expo and Flutter projects are recognised from their files."
                         >
                             <PathField
                                 v-model="state.projectPath"

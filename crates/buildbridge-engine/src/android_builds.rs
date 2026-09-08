@@ -11,11 +11,12 @@ pub async fn approve_android_workspace(
 ) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     ensure_android_machine(app, &machine_id)?;
-    let approved = inspect_android_workspace(input.path.trim())?;
+    let approved = inspect_android_workspace(input.path.trim(), input.module.as_deref())?;
     let guard = begin_machine_operation(app, &machine_id, "approving_android_workspace")?;
     let workspace = match load_android_workspace(&paths)? {
         Some(existing) if existing.local_path == approved.local_path => StoredAndroidWorkspace {
             name: approved.name,
+            layout: approved.layout,
             application_id: approved.application_id,
             ..existing
         },
@@ -84,6 +85,7 @@ pub(crate) async fn sync_android_workspace_with_env(
     let event_app = app.clone();
     let event_machine_id = machine_id.to_string();
     let container_name = paths.container_name.clone();
+    let layout = workspace.layout.clone();
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
@@ -91,6 +93,7 @@ pub(crate) async fn sync_android_workspace_with_env(
         buildbridge_machines::sync_android_workspace(
             &container_name,
             &workspace_path,
+            &layout,
             env_files.as_ref(),
             |progress: AndroidBuildProgress| {
                 emit_machine_progress(
@@ -140,7 +143,8 @@ pub async fn run_android_debug_build(
     if workspace.last_snapshot_sha256.is_none() {
         return Err("Synchronize the approved project before running a debug build.".to_string());
     }
-    let requested_version = resolve_android_project_version(&workspace.local_path, version)?;
+    let requested_version =
+        resolve_android_project_version(&workspace.local_path, &workspace.layout, version)?;
     let current = build_machine_view(app, &paths).await?;
     ensure_android_container_ready(&current)?;
     // Hold the operation lock before removing the previous APK so an in-flight device
@@ -149,7 +153,8 @@ pub async fn run_android_debug_build(
     let output_directory = prepare_android_debug_output_dir(&paths)?;
     // The project takes the version before the build does, so it is never behind an APK.
     if let Some(version) = &requested_version
-        && let Err(error) = write_android_project_version(&workspace.local_path, version)
+        && let Err(error) =
+            write_android_project_version(&workspace.local_path, &workspace.layout, version)
     {
         drop(guard);
         let _ = fs::remove_dir(&output_directory);
@@ -167,12 +172,14 @@ pub async fn run_android_debug_build(
     let event_machine_id = machine_id.clone();
     let container_name = paths.container_name.clone();
     let operation_output_directory = output_directory.clone();
+    let layout = workspace.layout.clone();
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
         let _operation = buildbridge_machines::enter_operation(scope);
         buildbridge_machines::run_android_debug_build(
             &container_name,
+            &layout,
             &operation_output_directory,
             allow_http,
             requested_version.as_ref(),
@@ -227,7 +234,8 @@ pub async fn run_android_signed_release(
     if !workspace.last_build_succeeded || workspace.last_snapshot_sha256.is_none() {
         return Err("Complete the debug build first.".to_string());
     }
-    let requested_version = resolve_android_project_version(&workspace.local_path, version)?;
+    let requested_version =
+        resolve_android_project_version(&workspace.local_path, &workspace.layout, version)?;
     let current = build_machine_view(app, &paths).await?;
     ensure_android_container_ready(&current)?;
     let kit = resolve_signing_kit_for(app, &machine_id).await?;
@@ -244,7 +252,8 @@ pub async fn run_android_signed_release(
     let output_directory = prepare_android_release_output_dir(&paths)?;
     // The project takes the version before the release does, so it is never behind an APK.
     if let Some(version) = &requested_version
-        && let Err(error) = write_android_project_version(&workspace.local_path, version)
+        && let Err(error) =
+            write_android_project_version(&workspace.local_path, &workspace.layout, version)
     {
         let _ = fs::remove_dir_all(&output_directory);
         return Err(error);
@@ -255,12 +264,14 @@ pub async fn run_android_signed_release(
     let container_name = paths.container_name.clone();
     let operation_output_directory = output_directory.clone();
     let env_set_name = chosen_env.as_ref().map(|(name, _)| name.clone());
+    let layout = workspace.layout.clone();
     let scope = guard.scope();
     let cancel_probe = Arc::clone(&scope);
     let joined = tokio::task::spawn_blocking(move || {
         let _operation = buildbridge_machines::enter_operation(scope);
         buildbridge_machines::run_signed_android_release(
             &container_name,
+            &layout,
             &signing,
             chosen_env.as_ref().map(|(_, files)| files),
             outputs.unwrap_or_default(),
