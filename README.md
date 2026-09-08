@@ -25,13 +25,13 @@ Your hardware. Your signing keys. No cloud build service required.
 
 ## Features
 
-- **Set up once, build across projects.** Keep your iOS and Android build environments ready for the next app.
-- **Start with a test build.** Compile your iOS app or build an Android debug APK before setting up release signing.
-- **Try it on a phone.** Install Android builds and inspect WebViews in Chrome. iPhone previews through a virtual Mac are experimental.
-- **Keep signing in one place.** Create, import, and reuse credentials stored in your operating system's credential vault.
-- **Get the files you need.** Export signed iOS IPAs and Xcode archives, Android App Bundles for Google Play, and APKs for direct installation.
-- **Upload from the desktop.** Send iOS builds to App Store Connect from your virtual Mac, or create Google Play internal-testing drafts.
-- **Switch between desktop and CLI.** Both use the same machines, projects, and signing credentials.
+- **Set up once.** Reuse iOS and Android build environments across projects.
+- **Build as you work.** Run test builds before setting up release signing.
+- **Test on devices.** Run iPhone and Android builds; inspect WebViews with Safari or Chrome.
+- **Keep your keys.** Create, import, and reuse signing credentials in your OS vault.
+- **Export signed releases.** Get iOS IPAs and Xcode archives, Android App Bundles, and APKs.
+- **Upload to stores.** Send IPAs to App Store Connect or create Google Play internal-testing drafts.
+- **Use the app or CLI.** Work with the same machines, projects, and credentials.
 
 ## How it works
 
