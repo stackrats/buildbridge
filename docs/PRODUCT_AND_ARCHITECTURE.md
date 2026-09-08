@@ -1492,6 +1492,19 @@ The following decisions should be treated as settled until this document is deli
     no `xcodebuild` behind it, and a clean run afterwards both exported and repaired a default
     that an earlier interrupted run had left pointing at buildbridge's keychain.
 
+65. Finding a machine in the sidebar (2026-09-08). A host that builds for several teams ends up
+    with more machines than fit the eye, so the machine list takes a filter: one field under the
+    heading, matching the machine's name, the platform it builds for, its identifier, and
+    whatever its second line currently says, so "android", "signed" and half a remembered name
+    all find something. It is this session's filter and not a setting — emptied or escaped it is
+    gone, and it never changes what a page shows, only which rows are offered. The heading counts
+    what is shown against what exists while it is on, so a filter is never invisible. Reordering
+    is suspended while it is: dragging a row that is one of three shown, into a list of ten,
+    would move it relative to rows nobody can see. The field appears only once there is more than
+    one machine to tell apart, since a field that filters one row is furniture. The matching
+    itself is a model function with its own tests rather than a closure inside the component,
+    because what a machine answers to is a product decision and will grow.
+
 ### Credential loss and recovery
 
 The host's operating-system keyring holds two things: the runner token and every signing kit. A

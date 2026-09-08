@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { House, KeyRound, Layers, Variable, Plus, Radio } from '@lucide/vue';
+import { House, KeyRound, Layers, Variable, Plus, Radio, X } from '@lucide/vue';
 import { computed, nextTick, onBeforeUnmount, ref } from 'vue';
 
 import { machineStateDot, machineStateLabel } from '../lib/status';
 import { clamp } from '../lib/utils';
+import { filterMachines } from '../model/machine-filter';
 import { journeyHeadline } from '../model/steps';
 import { providerPlatform } from '../model/providers';
 import { useEnvSetsStore } from '../stores/envs';
@@ -15,6 +16,7 @@ import { useRunnerStore } from '../stores/runner';
 import { useSettingsStore } from '../stores/settings';
 import type { MachineSummary } from '../types/backend';
 import Button from './ui/Button.vue';
+import Input from './ui/Input.vue';
 import Spinner from './ui/Spinner.vue';
 import StatusDot from './ui/StatusDot.vue';
 import PlatformIcon from './ui/PlatformIcon.vue';
@@ -53,6 +55,15 @@ function machineSecondary(machine: MachineSummary): string {
 }
 
 const machineCount = computed(() => machines.machines.value.length);
+
+// Filtering the list by name, by platform, or by what the machine is doing, so a long list of
+// machines can be narrowed to the one being worked on. The filter is this session's, not a
+// setting: it is cleared by emptying it or by Escape, and it never changes what a page shows.
+const machineFilter = ref('');
+const filtering = computed(() => machineFilter.value.trim().length > 0);
+const shownMachines = computed(() =>
+    filterMachines(machines.sidebarMachines.value, machineFilter.value, machineSecondary),
+);
 
 const navigation = ref<HTMLElement | null>(null);
 const machineList = ref<HTMLElement | null>(null);
@@ -201,7 +212,7 @@ function cancelMachineDrag(event: KeyboardEvent): void {
 }
 
 function startMachineDrag(event: PointerEvent, id: string): void {
-    if (!event.isPrimary || event.button !== 0 || machineCount.value < 2) {
+    if (!event.isPrimary || event.button !== 0 || machineCount.value < 2 || filtering.value) {
         return;
     }
     stopMachineDrag();
@@ -231,7 +242,11 @@ function handleMachineClick(event: MouseEvent): void {
 }
 
 function reorderWithKeyboard(event: KeyboardEvent, id: string): void {
-    if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) {
+    if (
+        !event.altKey ||
+        (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') ||
+        filtering.value
+    ) {
         return;
     }
     event.preventDefault();
@@ -322,7 +337,12 @@ onBeforeUnmount(() => {
             <div class="mt-4 flex h-6 items-center justify-between pr-1 pl-2.5">
                 <span class="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
                     Machines
-                    <span v-if="machineCount" class="tabular-nums">· {{ machineCount }}</span>
+                    <span v-if="machineCount" class="tabular-nums">
+                        ·
+                        {{
+                            filtering ? `${shownMachines.length} of ${machineCount}` : machineCount
+                        }}
+                    </span>
                 </span>
                 <Button
                     variant="ghost"
@@ -335,6 +355,26 @@ onBeforeUnmount(() => {
                 </Button>
             </div>
 
+            <div v-if="machineCount > 1" class="relative mt-1 px-1.5">
+                <Input
+                    v-model="machineFilter"
+                    aria-label="Filter machines"
+                    placeholder="Filter machines"
+                    class="h-7 pr-7 text-xs"
+                    @keydown.escape="machineFilter = ''"
+                />
+                <button
+                    v-if="filtering"
+                    type="button"
+                    title="Clear the filter"
+                    aria-label="Clear the filter"
+                    class="absolute top-1/2 right-4 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-sm text-zinc-500 hover:text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-50 dark:focus-visible:outline-zinc-300"
+                    @click="machineFilter = ''"
+                >
+                    <X class="h-3 w-3" />
+                </button>
+            </div>
+
             <p id="machine-reorder-help" class="sr-only">
                 Drag a machine to reorder it, or focus it and press Alt with the Up and Down arrow
                 keys.
@@ -342,7 +382,7 @@ onBeforeUnmount(() => {
             <p class="sr-only" aria-live="polite" aria-atomic="true">{{ reorderAnnouncement }}</p>
             <ul ref="machineList" class="mt-0.5 flex flex-col gap-0.5">
                 <li
-                    v-for="machine in machines.sidebarMachines.value"
+                    v-for="machine in shownMachines"
                     :key="machine.id"
                     :data-machine-id="machine.id"
                     :class="[
@@ -405,6 +445,11 @@ onBeforeUnmount(() => {
                     <p class="px-2.5 py-1.5 text-[11px] leading-4 text-zinc-500 dark:text-zinc-400">
                         No machines yet. A machine is installed once and builds any number of
                         projects.
+                    </p>
+                </li>
+                <li v-else-if="filtering && !shownMachines.length">
+                    <p class="px-2.5 py-1.5 text-[11px] leading-4 text-zinc-500 dark:text-zinc-400">
+                        No machine matches “{{ machineFilter.trim() }}”.
                     </p>
                 </li>
             </ul>
