@@ -835,7 +835,9 @@ export function createMockBackend(): Backend {
     // numbers are invented around each running machine's profile; a build makes them climb.
     // Remote builds are on in the preview even though a real host starts with them off: the
     // preview exists to show the interface, and this is the only way to see that part of it.
-    let hostSettings: T.HostSettings = { browser: null, remoteBuilds: true };
+    // Off, as a host ships: `HostSettings::default()` in the engine says so, and the preview
+    // is worth nothing if it shows a pane and a warning a new host never has.
+    let hostSettings: T.HostSettings = { browser: null, remoteBuilds: false };
     let usageTimer: ReturnType<typeof setInterval> | null = null;
     let usageTick = 0;
     const GIB = 1024 ** 3;

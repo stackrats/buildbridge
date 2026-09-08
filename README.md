@@ -15,6 +15,10 @@ Your hardware. Your signing keys. No cloud build service required.
 
 [Features](#features) · [How it works](#how-it-works) · [Requirements](#requirements) · [Development](#development)
 
+<br>
+
+<img src="docs/images/buildbridge-tour.gif" alt="A tour of buildbridge: the machine overview, a machine's setup steps, a signed iOS archive, and a signed Android release" width="900">
+
 </div>
 
 ---
@@ -48,6 +52,13 @@ The desktop guides each machine through two workflows, and the command line driv
 1. **Setup:** Check the host and create the machine. For a managed macOS machine, install macOS, configure SSH, and download Xcode from Apple in a window of the app, signed in with your own Apple ID; an Android toolchain has nothing else to set up; **This Mac** reports the Xcode and signing identity it found.
 2. **Build:** Set up the project, run the unsigned test build or the debug build, attach signing credentials, and export the signed archive and IPA or the signed app bundle and APK. **On a real device** runs the debug build on a phone, and **Publishing** hands the retained file to its store.
 
+|  |  |
+| :-- | :-- |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshot-overview-dark.png"><img alt="The overview listing a macOS builder, a fresh machine and an Android toolchain, each with its progress and last build" src="docs/images/screenshot-overview-light.png"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshot-setup-dark.png"><img alt="A new machine's setup steps, numbered from checking the host through installing macOS, pinning the guest and importing Xcode" src="docs/images/screenshot-setup-light.png"></picture> |
+| **Every machine, at a glance.** What each one is, how far it has got, and what it built last. | **Setup, one step at a time.** Each step says what it needs and what it did; nothing runs behind your back. |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshot-archive-dark.png"><img alt="The signed iOS archive step, showing the exported IPA and Xcode archive with their sizes and checksum" src="docs/images/screenshot-archive-light.png"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshot-android-dark.png"><img alt="The signed Android release step, showing the app bundle and APK with their signing certificate fingerprint" src="docs/images/screenshot-android-light.png"></picture> |
+| **Signed iOS archives.** The IPA and the Xcode archive land on your host, with sizes and a checksum. | **Signed Android releases.** The app bundle for Play and the APK for direct installation, with the certificate they were signed by. |
+
 buildbridge never collects an Apple Account password or two-factor code. The local macOS login password is asked for once, to install the SSH key into a guest whose fingerprint is already pinned, and is discarded after that one session; the same step can be done by typing commands in the guest Terminal instead. For more detail, see [Product and Architecture](docs/PRODUCT_AND_ARCHITECTURE.md).
 
 ## Requirements
@@ -66,7 +77,7 @@ For the desktop on a Mac: Xcode with the iOS platform, and an Apple Distribution
 
 Optional, to run a Debug build on a real iPhone from a managed macOS machine: the phone on USB, polkit (`pkexec`) to install one udev rule that releases iPhones from `usbmuxd`, and a `plugdev` group. Host-side iPhone sync is off while that rule is installed; the desktop can remove it again. This route is experimental.
 
-Docker-OSX is an experimental, self-hosted route. Apple's licensing ties macOS virtualization to Apple hardware; review it before using buildbridge for production builds.
+Running macOS on hardware that is not Apple's is a self-hosted, experimental route, and Apple's software licence ties macOS virtualization to Apple-branded hardware. That applies to both macOS providers, Docker-OSX and dockur/macos; review it before using buildbridge for production builds. Building with **This Mac** on Apple hardware carries no such condition — it uses the Xcode and the signing identity already installed there. buildbridge signs with your own Apple Developer credentials through Xcode's own tooling either way; it circumvents nothing, and it is not a route around Apple's terms.
 
 ## Command line
 
