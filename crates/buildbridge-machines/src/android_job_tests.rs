@@ -232,11 +232,13 @@ fn a_worker_that_dies_without_its_trap_is_recorded_as_failed_not_waited_for() {
         "/usr/bin/printf '%s\\n' 'about to die'\n/bin/sh -c '/bin/kill -9 $PPID'\n/usr/bin/printf '%s\\n' 'still alive'",
     );
     assert_eq!(output.status.code(), Some(1), "{output:?}");
+    // Whole lines: a shell that reports the kill quotes the body's text, words and all.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("about to die"), "{stdout}");
-    assert!(!stdout.contains("still alive"), "{stdout}");
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert!(lines.contains(&"about to die"), "{stdout}");
+    assert!(!lines.contains(&"still alive"), "{stdout}");
     assert!(
-        stdout.contains("The job ended without reporting a status."),
+        lines.contains(&"The job ended without reporting a status."),
         "{stdout}"
     );
     let job = fixture.jobs.join("android-debug-build");
