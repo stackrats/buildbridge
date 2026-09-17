@@ -46,6 +46,7 @@ mod devices;
 mod env_sets;
 mod google_play;
 mod guest_access;
+mod live_reload;
 mod machine_lifecycle;
 pub mod machines;
 mod native_mac;

@@ -97,6 +97,11 @@ function build(): void {
             </div>
         </Callout>
         <div v-else class="space-y-4">
+            <Callout v-if="apk.liveReloadUrl" tone="neutral" title="Live reload APK">
+                This APK loads {{ apk.liveReloadUrl }}. Keep that dev server running to use it;
+                build again with live reload off to use the app without this server. Install and
+                open reconnects localhost through ADB until you stop the session.
+            </Callout>
             <Field
                 label="APK to install"
                 hint="A retained APK may predate your latest source or environment changes."
@@ -153,6 +158,10 @@ function build(): void {
                 <p class="mt-2 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                     Run it in this host's terminal and wait for Success, then open the app on your
                     phone. Copying a command does not mark this step complete.
+                    <template v-if="apk.liveReloadUrl">
+                        This manual command does not create the localhost dev server connection; use
+                        Install and open to let buildbridge connect it.
+                    </template>
                 </p>
             </details>
             <details>

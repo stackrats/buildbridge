@@ -382,6 +382,7 @@ function androidMachine(): MockMachine {
                 lastBuildSucceeded: true,
                 lastBuild: {
                     allowHttp: false,
+                    liveReloadUrl: null,
                     applicationId: 'com.example.app.debug',
                     versionName: '3.2.0',
                     versionCode: '12',
@@ -1642,7 +1643,12 @@ export function createMockBackend(): Backend {
                 };
             });
         },
-        async runAndroidDebugBuild(machineId, allowHttp = false, version = null) {
+        async runAndroidDebugBuild(
+            machineId,
+            allowHttp = false,
+            version = null,
+            liveReloadUrl = null,
+        ) {
             const machine = find(machineId);
             applyVersion(machine, version);
             const built = machine.projectVersion ?? { version: '3.2.0', build: '12' };
@@ -1672,7 +1678,8 @@ export function createMockBackend(): Backend {
                     await sleep(500);
                 }
                 const build: T.AndroidBuildResult = {
-                    allowHttp,
+                    allowHttp: allowHttp || !!liveReloadUrl?.startsWith('http:'),
+                    liveReloadUrl,
                     applicationId: 'com.example.app.debug',
                     versionName: built.version,
                     versionCode: built.build,
@@ -2179,7 +2186,13 @@ export function createMockBackend(): Backend {
                 };
             });
         },
-        async runAppleDeviceBuild(machineId, udid, _envSetId = null, version = null) {
+        async runAppleDeviceBuild(
+            machineId,
+            udid,
+            _envSetId = null,
+            version = null,
+            liveReloadUrl = null,
+        ) {
             const machine = find(machineId);
             machine.cancelRequested = false;
             const built = applyVersion(machine, version) ??
@@ -2230,7 +2243,7 @@ export function createMockBackend(): Backend {
                 await sleep(500);
                 const consoleLines = [
                     '[App] scene did become active',
-                    'Capacitor: loading app at capacitor://localhost',
+                    `Capacitor: loading app at ${liveReloadUrl ?? 'capacitor://localhost'}`,
                     '[Network] GET /v1/session 200 (84 ms)',
                 ];
                 let tick = 0;
@@ -2243,6 +2256,7 @@ export function createMockBackend(): Backend {
                 }
                 emit('completed', 'Stopped');
                 machine.deviceRun = {
+                    liveReloadUrl,
                     device: { ...device },
                     bundleIdentifier: 'com.example.app',
                     appPath:

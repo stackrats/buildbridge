@@ -10,6 +10,9 @@ import javax.xml.transform.stream.StreamResult
 def androidNamespace = 'http://schemas.android.com/apk/res/android'
 def toolsNamespace = 'http://schemas.android.com/tools'
 def xmlNamespace = 'http://www.w3.org/2000/xmlns/'
+def allowHttp = System.getenv('BUILDBRIDGE_ALLOW_HTTP') != 'false'
+def requestedLiveReloadUrl = System.getenv('BUILDBRIDGE_LIVE_RELOAD_URL') ?: ''
+def liveReloadModule = System.getenv('BUILDBRIDGE_LIVE_RELOAD_MODULE') ?: ':app'
 def parseXml = { File source ->
     def factory = DocumentBuilderFactory.newInstance()
     factory.setNamespaceAware(true)
@@ -42,6 +45,8 @@ def copyDirectories = { List<File> sources, File destination ->
 
 gradle.beforeProject { project ->
     project.pluginManager.withPlugin('com.android.application') {
+        if (!requestedLiveReloadUrl.isEmpty() && project.path != liveReloadModule) return
+        def liveReloadUrl = requestedLiveReloadUrl
         // finalizeDsl runs after the project's source-set customizations and before AGP
         // creates variants/tasks. afterEvaluate can be too late for these inputs.
         project.extensions.getByName('androidComponents').finalizeDsl { android ->
@@ -75,9 +80,25 @@ gradle.beforeProject { project ->
                     (capacitor.android != null && !(capacitor.android instanceof Map))) {
                     throw new IllegalStateException('The Capacitor Android config must contain an Android settings object.')
                 }
-                if (capacitor.android == null) capacitor.android = [:]
-                capacitor.android.allowMixedContent = true
+                if (allowHttp) {
+                    if (capacitor.android == null) capacitor.android = [:]
+                    capacitor.android.allowMixedContent = true
+                }
+                if (!liveReloadUrl.isEmpty()) {
+                    if (capacitor.server != null && !(capacitor.server instanceof Map)) {
+                        throw new IllegalStateException('The Capacitor config must contain a server settings object.')
+                    }
+                    if (capacitor.server == null) capacitor.server = [:]
+                    capacitor.server.url = liveReloadUrl
+                    if (liveReloadUrl.startsWith('http://')) capacitor.server.cleartext = true
+                }
                 config.setText(JsonOutput.toJson(capacitor), 'UTF-8')
+            } else if (!liveReloadUrl.isEmpty()) {
+                throw new IllegalStateException('Live reload requires the synchronized Capacitor Android config. Run Capacitor sync before building.')
+            }
+            if (!allowHttp) {
+                debug.assets.setSrcDirs([assets])
+                return
             }
 
             def manifest = new File(staging, 'AndroidManifest.xml')

@@ -22,6 +22,9 @@ class NamedInputs {
 
 def source = new File(args[0])
 def directory = new File(args[1])
+def allowHttp = System.getenv('BUILDBRIDGE_ALLOW_HTTP') != 'false'
+def liveReloadUrl = System.getenv('BUILDBRIDGE_LIVE_RELOAD_URL') ?: ''
+def liveReloadModule = System.getenv('BUILDBRIDGE_LIVE_RELOAD_MODULE') ?: ':app'
 def write = { String path, String value ->
     def file = new File(directory, path)
     file.parentFile.mkdirs()
@@ -36,10 +39,11 @@ def makeInputs = {
             res: new DirectoryInput(srcDirs: [new File(directory, "src/$name/res")] as Set))]
     })
 }
-def invoke = { inputs ->
+def invoke = { inputs, modulePath = liveReloadModule ->
     def android = new Expando(sourceSets: inputs)
     def components = new Expando(finalizeDsl: { callback -> callback(android) })
     def project = new Expando(
+        path: modulePath,
         buildDir: new File(directory, 'build'),
         delete: { File file -> file.deleteDir() },
         pluginManager: new Expando(withPlugin: { name, callback ->
@@ -78,7 +82,7 @@ write('src/debug/AndroidManifest.xml', '''<manifest xmlns:a="http://schemas.andr
     <meta-data a:name="keep" a:value="yes"/>
   </application>
 </manifest>''')
-write('src/debug/assets/capacitor.config.json', '''{"appId":"example.debug","android":{"allowMixedContent":false,"keepDebugSetting":17},"server":{"androidScheme":"https"},"plugins":{"Keep":{"value":"debug"}}}''')
+write('src/debug/assets/capacitor.config.json', '''{"appId":"example.debug","android":{"allowMixedContent":false,"keepDebugSetting":17},"server":{"androidScheme":"https","hostname":"debug.localhost","cleartext":false,"allowNavigation":["keep.example"]},"plugins":{"Keep":{"value":"debug"}}}''')
 write('src/debug/assets/keep.txt', 'custom debug asset')
 write('src/debug/res/values/strings.xml', '<resources><string name="keep">debug name</string></resources>')
 write('src/main/res/xml/network.xml', '''<network-security-config>
@@ -102,9 +106,13 @@ def debug = inputs.getByName('debug')
 def assets = debug.assets.srcDirs.first()
 def config = new JsonSlurper().parse(new File(assets, 'capacitor.config.json'))
 assert config.appId == 'example.debug'
-assert config.android.allowMixedContent
+assert config.android.allowMixedContent == allowHttp
 assert config.android.keepDebugSetting == 17
 assert config.server.androidScheme == 'https'
+assert config.server.hostname == 'debug.localhost'
+assert config.server.allowNavigation == ['keep.example']
+assert config.server.url == (liveReloadUrl ?: null)
+assert config.server.cleartext == liveReloadUrl.startsWith('http://')
 assert config.plugins.Keep.value == 'debug'
 assert new File(assets, 'keep.txt').text == 'custom debug asset'
 assert inputs.getByName('main').assets.srcDirs == originalMain
@@ -113,28 +121,36 @@ def manifest = parseXml(debug.manifest.srcFile)
 def app = manifest.getElementsByTagName('application').item(0)
 def a = 'http://schemas.android.com/apk/res/android'
 def t = 'http://schemas.android.com/tools'
-assert app.getAttributeNS(a, 'usesCleartextTraffic') == 'true'
+assert app.getAttributeNS(a, 'usesCleartextTraffic') == allowHttp.toString()
 assert app.getAttributeNS(a, 'label') == 'Debug app'
 assert app.getAttributeNS(t, 'replace').contains('a:label')
-assert app.getAttributeNS(t, 'remove') == 'a:backupAgent'
-assert app.getAttributeNS(t, 'strict') == ''
+assert app.getAttributeNS(t, 'remove') == (allowHttp ? 'a:backupAgent' : 'a:usesCleartextTraffic,a:backupAgent')
+assert app.getAttributeNS(t, 'strict') == (allowHttp ? '' : 'a:usesCleartextTraffic')
 assert app.getElementsByTagName('meta-data').item(0).getAttributeNS(a, 'value') == 'yes'
 assert manifest.getElementsByTagName('uses-permission').length == 1
 def resources = debug.res.srcDirs.first()
 assert new File(resources, 'values/strings.xml').text.contains('debug name')
-['xml', 'xml-v28'].each { qualifier ->
-    def network = parseXml(new File(resources, "$qualifier/network.xml"))
-    ['base-config', 'domain-config'].each { name ->
-        def nodes = network.getElementsByTagName(name)
-        assert nodes.length > 0
-        for (int i = 0; i < nodes.length; i++) {
-            assert nodes.item(i).getAttribute('cleartextTrafficPermitted') == 'true'
+if (allowHttp) {
+    ['xml', 'xml-v28'].each { qualifier ->
+        def network = parseXml(new File(resources, "$qualifier/network.xml"))
+        ['base-config', 'domain-config'].each { name ->
+            def nodes = network.getElementsByTagName(name)
+            assert nodes.length > 0
+            for (int i = 0; i < nodes.length; i++) {
+                assert nodes.item(i).getAttribute('cleartextTrafficPermitted') == 'true'
+            }
         }
     }
+    def network = new File(resources, 'xml/network.xml').text
+    assert network.contains('@raw/custom_ca') && network.contains('KEEP_PIN')
+    assert network.contains('@raw/debug_ca')
+} else {
+    // HTTPS live reload must only replace assets, leaving the project's network policy
+    // and manifest source inputs intact rather than granting the HTTP override.
+    assert debug.manifest.srcFile == new File(directory, 'src/debug/AndroidManifest.xml')
+    assert debug.res.srcDirs == [new File(directory, 'src/debug/res')] as Set
+    assert new File(directory, 'src/main/res/xml/network.xml').text.contains('cleartextTrafficPermitted="false"')
 }
-def network = new File(resources, 'xml/network.xml').text
-assert network.contains('@raw/custom_ca') && network.contains('KEEP_PIN')
-assert network.contains('@raw/debug_ca')
 def qualified = new File(resources, 'xml-v28/network.xml').text
 assert qualified.contains('debug-version.example.com') && !qualified.contains('main-version.example.com')
 assert qualified.contains('overridePins="false"')
@@ -145,6 +161,9 @@ assertOriginals()
 def later = makeInputs()
 assert !new JsonSlurper().parse(new File(later.getByName('debug').assets.srcDirs.first(), 'capacitor.config.json')).android.allowMixedContent
 assert !new JsonSlurper().parse(new File(later.getByName('release').assets.srcDirs.first(), 'capacitor.config.json')).android.allowMixedContent
+['main', 'debug', 'release'].each { name ->
+    assert !new JsonSlurper().parse(new File(later.getByName(name).assets.srcDirs.first(), 'capacitor.config.json')).server?.url
+}
 
 // Without project debug config/manifest, inherit all main Capacitor settings. Re-running
 // also discards earlier generated assets/resources instead of accidentally reusing them.
@@ -156,11 +175,19 @@ invoke(inherited)
 def inheritedAssets = inherited.getByName('debug').assets.srcDirs.first()
 def inheritedConfig = new JsonSlurper().parse(new File(inheritedAssets, 'capacitor.config.json'))
 assert inheritedConfig.appId == 'example.main'
-assert inheritedConfig.android.allowMixedContent
+assert inheritedConfig.android.allowMixedContent == allowHttp
 assert !inheritedConfig.android.webContentsDebuggingEnabled
 assert inheritedConfig.plugins.Keep.value == 'main'
+assert inheritedConfig.server.hostname == 'localhost'
+assert inheritedConfig.server.androidScheme == 'https'
+assert inheritedConfig.server.url == (liveReloadUrl ?: null)
+assert (inheritedConfig.server.cleartext ?: false) == liveReloadUrl.startsWith('http://')
 assert !new File(inheritedAssets, 'keep.txt').exists()
-assert parseXml(inherited.getByName('debug').manifest.srcFile).getElementsByTagName('application').length == 1
+if (allowHttp) {
+    assert parseXml(inherited.getByName('debug').manifest.srcFile).getElementsByTagName('application').length == 1
+} else {
+    assert !inherited.getByName('debug').manifest.srcFile.exists()
+}
 
 // A policy supplied only by an external library must not silently keep HTTP blocked
 // or be replaced with a default that drops its trust settings.
@@ -169,8 +196,9 @@ def originalManifest = mainManifest.text
 mainManifest.setText(originalManifest.replace('@xml/network', '@xml/library_policy'), 'UTF-8')
 try {
     invoke(makeInputs())
-    assert false: 'An external network policy needs an actionable error'
+    assert !allowHttp: 'An external network policy needs an actionable error when enabling HTTP'
 } catch (IllegalStateException expected) {
+    assert allowHttp
     assert expected.message.contains('network security XML')
 }
 assert mainManifest.text.contains('@xml/library_policy')
@@ -187,4 +215,49 @@ try {
 }
 assert mainConfig.text == '{"android":17}'
 assert new File(directory, 'src/main/AndroidManifest.xml').text == originalFiles[new File(directory, 'src/main/AndroidManifest.xml')]
-println 'Android HTTP overlay fixtures passed'
+
+if (!liveReloadUrl.isEmpty()) {
+    // Live reload cannot silently produce a static app when sync did not leave a config,
+    // and malformed server settings must not be discarded to make room for the URL.
+    mainConfig.setText('{"android":{},"server":17}', 'UTF-8')
+    try {
+        invoke(makeInputs())
+        assert false: 'Invalid server config should fail'
+    } catch (IllegalStateException expected) {
+        assert expected.message.contains('server settings object')
+    }
+    assert mainConfig.text == '{"android":{},"server":17}'
+
+    // A normal Capacitor config may have neither Android nor server options yet.
+    mainConfig.setText('{"appId":"example.no.server","plugins":{"Keep":{"value":"existing"}}}', 'UTF-8')
+    def noServer = makeInputs()
+    invoke(noServer)
+    def addedServer = new JsonSlurper().parse(new File(noServer.getByName('debug').assets.srcDirs.first(), 'capacitor.config.json'))
+    assert addedServer.appId == 'example.no.server'
+    assert addedServer.plugins.Keep.value == 'existing'
+    assert addedServer.server.url == liveReloadUrl
+    assert (addedServer.server.cleartext ?: false) == liveReloadUrl.startsWith('http://')
+    assert (addedServer.android?.allowMixedContent ?: false) == allowHttp
+    assert mainConfig.text == '{"appId":"example.no.server","plugins":{"Keep":{"value":"existing"}}}'
+
+    mainConfig.delete()
+    try {
+        invoke(makeInputs())
+        assert false: 'Missing synchronized config should fail'
+    } catch (IllegalStateException expected) {
+        assert expected.message.contains('synchronized Capacitor Android config')
+    }
+    assert !mainConfig.exists()
+    // Configuring Gradle's other application modules must not require Capacitor in a
+    // native companion app that is not the selected build target.
+    def unselected = makeInputs()
+    invoke(unselected, ':unselected-native-app')
+    assert unselected.getByName('debug').assets.srcDirs == [new File(directory, 'src/debug/assets')] as Set
+    assert unselected.getByName('debug').res.srcDirs == [new File(directory, 'src/debug/res')] as Set
+    assert unselected.getByName('debug').manifest.srcFile == new File(directory, 'src/debug/AndroidManifest.xml')
+    assert !new File(unselected.getByName('debug').assets.srcDirs.first(), 'capacitor.config.json').exists()
+    assert !mainConfig.exists()
+    assert new File(directory, 'src/main/AndroidManifest.xml').text == originalManifest
+    assert new File(directory, 'src/release/assets/capacitor.config.json').text == originalFiles[new File(directory, 'src/release/assets/capacitor.config.json')]
+}
+println "Android debug overlay fixtures passed (HTTP allowance: $allowHttp, live reload: ${!liveReloadUrl.isEmpty()})"

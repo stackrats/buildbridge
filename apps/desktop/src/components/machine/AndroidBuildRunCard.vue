@@ -6,6 +6,7 @@
 import { Hammer } from '@lucide/vue';
 import { computed, onMounted, ref, watch } from 'vue';
 
+import { androidLiveReloadUrlIssue } from '../../model/android-device';
 import { buildPrerequisite } from '../../model/build-flow';
 import { useBuildFlowStore } from '../../stores/build-flow';
 import { useEnvSetsStore } from '../../stores/envs';
@@ -17,6 +18,7 @@ import Card from '../ui/Card.vue';
 import Field from '../ui/Field.vue';
 import Select from '../ui/Select.vue';
 import AndroidHttpOption from './AndroidHttpOption.vue';
+import LiveReloadOptions from './LiveReloadOptions.vue';
 import VersionFields from './VersionFields.vue';
 
 const { session, busy, deviceReady } = defineProps<{
@@ -27,6 +29,12 @@ const { session, busy, deviceReady } = defineProps<{
 const flows = useBuildFlowStore();
 const envs = useEnvSetsStore();
 const ui = useUi();
+const preview = computed(() => flows.previewDraft(session.id));
+const capacitor = computed(() => session.view?.android?.workspace?.layout.kind === 'capacitor');
+const liveReload = computed(() => capacitor.value && preview.value.liveReloadEnabled);
+const liveReloadIssue = computed(() =>
+    liveReload.value ? androidLiveReloadUrlIssue(preview.value.liveReloadUrl) : null,
+);
 // The env for Build and run: written into the container with the source copy, the way the
 // guided build does it, so the next build starts from the same choice. Preselects the set the
 // last copy used.
@@ -67,13 +75,24 @@ function buildAndRun(): void {
             the selected device and streams the app's log until you stop it.
         </template>
         <template #actions>
-            <Button size="sm" :disabled="busy || !deviceReady" @click="buildAndRun">
+            <Button
+                size="sm"
+                :disabled="busy || !deviceReady || !!liveReloadIssue"
+                @click="buildAndRun"
+            >
                 <Hammer class="h-3.5 w-3.5" />
                 Build and run
             </Button>
         </template>
 
         <div class="space-y-4">
+            <LiveReloadOptions
+                v-if="capacitor"
+                v-model:enabled="preview.liveReloadEnabled"
+                v-model:url="preview.liveReloadUrl"
+                platform="android"
+                :disabled="busy"
+            />
             <Callout v-if="prerequisite" tone="neutral">
                 {{ prerequisite.message }}
                 <div class="mt-2">
@@ -90,12 +109,22 @@ function buildAndRun(): void {
             <Field
                 v-if="envs.sets.value.length"
                 label="Environment"
-                hint="Written into the container with the source copy and applied to the web build for this run."
+                :hint="
+                    liveReload
+                        ? 'Applied to the native build. Start your dev server with the environment you want for the live web app.'
+                        : 'Written into the container with the source copy and applied to the web build for this run.'
+                "
             >
                 <Select v-model="envSetId" :options="envOptions" :disabled="busy" />
             </Field>
             <VersionFields :session="session" :disabled="busy" />
-            <AndroidHttpOption :session="session" :disabled="busy" />
+            <AndroidHttpOption
+                :session="session"
+                :disabled="busy"
+                :required-for-live-reload="
+                    liveReload && preview.liveReloadUrl.trim().toLowerCase().startsWith('http:')
+                "
+            />
         </div>
     </Card>
 </template>

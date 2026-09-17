@@ -4,6 +4,7 @@ import type {
     AndroidDeviceRunResult,
     AndroidMachineView,
 } from '../types/backend';
+import { liveReloadUrlIssue } from './live-reload';
 
 export interface AndroidDeviceRun {
     kind: 'debug' | 'release';
@@ -21,6 +22,7 @@ export interface AndroidDeviceApk {
     applicationId: string;
     version: string;
     environment: string | null;
+    liveReloadUrl: string | null;
 }
 
 /** Only an actual retained APK can be installed; a retained AAB is not sufficient. */
@@ -32,11 +34,12 @@ export function androidDeviceApks(
     if (debug?.apk)
         apks.push({
             value: 'debug',
-            label: 'Debug APK',
+            label: debug.liveReloadUrl ? 'Live reload debug APK' : 'Debug APK',
             artifact: debug.apk,
             applicationId: debug.applicationId,
             version: `${debug.versionName} (${debug.versionCode})`,
             environment: null,
+            liveReloadUrl: debug.liveReloadUrl ?? null,
         });
     const release = android?.release;
     if (release?.apk)
@@ -47,8 +50,29 @@ export function androidDeviceApks(
             applicationId: release.applicationId,
             version: `${release.versionName} (${release.versionCode})`,
             environment: android?.releaseEnvSet ?? null,
+            liveReloadUrl: null,
         });
     return apks;
+}
+
+/** Early feedback; the engine validates the URL again before building or connecting. */
+export function androidLiveReloadUrlIssue(value: string): string | null {
+    return liveReloadUrlIssue(value, 'android');
+}
+
+export function androidLiveReloadUsesLocalhost(value: string): boolean {
+    try {
+        const host = new URL(value).hostname;
+        return host === 'localhost' || /^127\.\d+\.\d+\.\d+$/.test(host);
+    } catch {
+        return false;
+    }
+}
+
+export function androidRunStopDescription(liveReloadUrl: string | null): string {
+    return liveReloadUrl && androidLiveReloadUsesLocalhost(liveReloadUrl)
+        ? 'Ends the log session and removes the dev server connection created by buildbridge. The APK stays installed; live reload needs an active dev server connection.'
+        : 'Ends the log session. The app stays installed and running on the device.';
 }
 
 /** Displayed for the host's terminal, never executed by the desktop. */

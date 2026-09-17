@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vite-plus/test';
 
 import type { AndroidDevice, AndroidMachineView } from '../types/backend';
-import { androidDeviceApks, androidInstallCommand, androidNetworkWarning } from './android-device';
+import {
+    androidDeviceApks,
+    androidInstallCommand,
+    androidLiveReloadUrlIssue,
+    androidNetworkWarning,
+    androidRunStopDescription,
+} from './android-device';
 import { capacitorLayout } from './project-layout';
 
 function androidView(): AndroidMachineView {
@@ -18,6 +24,7 @@ function androidView(): AndroidMachineView {
             lastBuildSucceeded: true,
             lastBuild: {
                 allowHttp: false,
+                liveReloadUrl: null,
                 applicationId: 'com.example.app.debug',
                 versionName: '2.0',
                 versionCode: '20',
@@ -45,6 +52,14 @@ function androidView(): AndroidMachineView {
 }
 
 describe('Android device APKs', () => {
+    it('identifies a retained live reload APK and keeps releases standalone', () => {
+        const view = androidView();
+        view.workspace!.lastBuild!.liveReloadUrl = 'http://localhost:5173';
+        const [debug, release] = androidDeviceApks(view);
+        expect(debug?.label).toBe('Live reload debug APK');
+        expect(debug?.liveReloadUrl).toBe('http://localhost:5173');
+        expect(release?.liveReloadUrl).toBeNull();
+    });
     it('prefers the debug APK and keeps each retained build’s own metadata', () => {
         const view = androidView();
 
@@ -110,6 +125,47 @@ describe('Android device APKs', () => {
                 deviceRunError: null,
             }),
         ).toEqual([]);
+    });
+});
+
+describe('Android live reload server', () => {
+    it.each([
+        'http://localhost:5173',
+        'http://127.0.0.1:8080/app/',
+        'https://dev.example.test',
+        'http://192.168.1.4:5173',
+    ])('accepts %s', (url) => {
+        expect(androidLiveReloadUrlIssue(url)).toBeNull();
+    });
+
+    it.each([
+        '',
+        'localhost:5173',
+        'file:///app',
+        'ftp://localhost',
+        'http://user:secret@localhost:5173',
+        'http://localhost:5173?token=secret',
+        'http://localhost:5173#app',
+        'http://localhost:5173?',
+        'http://0.0.0.0:5173',
+        'http://[::]:5173',
+        'http://[::1]:5173',
+        'http://localhost:0',
+        'http://local\nhost:5173',
+        'http://localhost:5173\\app',
+    ])('rejects %s before building', (url) => {
+        expect(androidLiveReloadUrlIssue(url)).not.toBeNull();
+    });
+
+    it('explains which live reload connection Stop removes', () => {
+        expect(androidRunStopDescription('http://localhost:5173')).toContain(
+            'removes the dev server connection',
+        );
+        expect(androidRunStopDescription('http://127.0.0.1:5173')).toContain(
+            'removes the dev server connection',
+        );
+        expect(androidRunStopDescription('https://dev.example.test')).not.toContain('removes');
+        expect(androidRunStopDescription(null)).toContain('stays installed and running');
     });
 });
 

@@ -1105,12 +1105,14 @@ async fn run_android_debug_build(
     machine_id: String,
     allow_http: Option<bool>,
     version: Option<ProjectVersionInput>,
+    live_reload_url: Option<String>,
 ) -> Result<RunAndroidBuildResult, String> {
     buildbridge_engine::run_android_debug_build(
         &desktop.engine,
         machine_id,
         allow_http.unwrap_or(false),
         version,
+        live_reload_url,
     )
     .await
 }

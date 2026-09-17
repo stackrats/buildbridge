@@ -9,6 +9,7 @@ import type { MachineSession } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
 import type { AppleDeviceRunResult } from '../../types/backend';
 import Button from '../ui/Button.vue';
+import Callout from '../ui/Callout.vue';
 import Card from '../ui/Card.vue';
 import DisclosureSummary from '../ui/DisclosureSummary.vue';
 import FailureBlock from '../ui/FailureBlock.vue';
@@ -45,6 +46,7 @@ const facts = computed(() =>
                   mono: !run.projectBundleIdentifier,
               },
               { label: 'Version', value: `${run.marketingVersion} (${run.buildNumber})` },
+              { label: 'Dev server', value: run.liveReloadUrl ?? null, mono: true },
               { label: 'Installed', value: installed.value },
               {
                   label: 'Console ended',
@@ -103,6 +105,11 @@ const facts = computed(() =>
             />
 
             <template v-if="run">
+                <Callout v-if="run.liveReloadUrl" tone="neutral" title="Live reload app">
+                    This app loads {{ run.liveReloadUrl }}. Keep that dev server running and
+                    reachable from the iPhone. Stopping the console leaves live reload available;
+                    turn live reload off and build and run again for an app with bundled web assets.
+                </Callout>
                 <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
                     {{ run.bundleIdentifier }} {{ run.marketingVersion }} ({{ run.buildNumber }}) is
                     installed on {{ run.device.name }}, from a Debug build on {{ installed }}.

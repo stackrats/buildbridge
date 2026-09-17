@@ -732,9 +732,10 @@ pub(crate) fn android_gradle_command(
     gradle: &str,
     tasks: &str,
     allow_http: bool,
+    live_reload: bool,
 ) -> String {
     let mut scripts: Vec<(&str, &str)> = Vec::new();
-    if allow_http {
+    if allow_http || live_reload {
         scripts.push(("http.gradle", ANDROID_HTTP_DEBUG_INIT));
     }
     if matches!(layout.kind, ProjectKind::ReactNative | ProjectKind::Expo) {
@@ -756,7 +757,7 @@ pub(crate) fn android_gradle_command(
     }
     format!(
         r#"init_dir=$(/usr/bin/mktemp -d /tmp/buildbridge-gradle-init.XXXXXX)
-{written}if {gradle} --no-daemon --console=plain --no-configuration-cache{flags} {tasks}; then
+{written}if BUILDBRIDGE_ALLOW_HTTP={allow_http} {gradle} --no-daemon --console=plain --no-configuration-cache{flags} {tasks}; then
     /bin/rm -rf "$init_dir"
 else
     init_status=$?
@@ -911,10 +912,11 @@ mod tests {
         assert_eq!(android_task(&layout, "assembleDebug"), ":app:assembleDebug");
         assert!(android_has_wrapper(&layout));
         assert_eq!(
-            android_gradle_command(&layout, "./gradlew", ":app:assembleDebug", false),
+            android_gradle_command(&layout, "./gradlew", ":app:assembleDebug", false, false),
             "./gradlew --no-daemon --console=plain :app:assembleDebug"
         );
-        let with_http = android_gradle_command(&layout, "./gradlew", ":app:assembleDebug", true);
+        let with_http =
+            android_gradle_command(&layout, "./gradlew", ":app:assembleDebug", true, false);
         assert!(
             with_http.contains("--init-script \"$init_dir/http.gradle\""),
             "{with_http}"
@@ -987,7 +989,8 @@ mod tests {
         assert!(script.contains("installing_dependencies"), "{script}");
         assert!(!script.contains("building_web_assets"), "{script}");
         assert!(!script.contains("syncing_android"), "{script}");
-        let command = android_gradle_command(&layout, "./gradlew", ":app:assembleDebug", false);
+        let command =
+            android_gradle_command(&layout, "./gradlew", ":app:assembleDebug", false, false);
         assert!(command.contains("react-native.gradle"), "{command}");
         assert!(command.contains("debuggableVariants"), "{command}");
         assert!(android_environment_rebuild_script(&layout, "/root/w", &tools).is_empty());
@@ -1058,6 +1061,7 @@ mod tests {
             &layout,
             "'/tools/gradle-x/bin/gradle'",
             ":app:assembleDebug",
+            false,
             false,
         );
         assert_eq!(

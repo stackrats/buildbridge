@@ -46,10 +46,15 @@ describe('Android release file selection', () => {
                 null,
             );
 
-            expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', false, {
-                version: '3.2.0',
-                build: '12',
-            });
+            expect(machines.debugBuild).toHaveBeenCalledWith(
+                'pixel-builder',
+                false,
+                {
+                    version: '3.2.0',
+                    build: '12',
+                },
+                null,
+            );
             // The release carries the version the project declares, so the artifact matches
             // what the panel showed even when the snapshot is older.
             expect(machines.signedRelease).toHaveBeenCalledWith('pixel-builder', null, outputs, {
@@ -85,13 +90,16 @@ describe('Android build and run', () => {
         };
         machines.session.mockReturnValue(session);
         machines.sync.mockResolvedValue({ view });
-        machines.debugBuild.mockImplementation(async (_id, allowHttp = false) => {
-            const build = structuredClone(view.android!.workspace!.lastBuild!);
-            build.apk!.sha256 = 'fresh-apk';
-            build.allowHttp = allowHttp;
-            view.android!.workspace!.lastBuild = build;
-            return { view, build };
-        });
+        machines.debugBuild.mockImplementation(
+            async (_id, allowHttp = false, _version, liveReloadUrl = null) => {
+                const build = structuredClone(view.android!.workspace!.lastBuild!);
+                build.apk!.sha256 = 'fresh-apk';
+                build.allowHttp = allowHttp;
+                build.liveReloadUrl = liveReloadUrl;
+                view.android!.workspace!.lastBuild = build;
+                return { view, build };
+            },
+        );
         machines.runAndroidDevice.mockResolvedValue(true);
         const { useBuildFlowStore } = await import('./build-flow');
         return { store: useBuildFlowStore(), session };
@@ -101,10 +109,15 @@ describe('Android build and run', () => {
         const { store, session } = await fixture();
         await store.startAndroidPreview('pixel-builder', 'phone');
         expect(machines.sync).toHaveBeenCalledWith('pixel-builder');
-        expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', false, {
-            version: '3.2.0',
-            build: '12',
-        });
+        expect(machines.debugBuild).toHaveBeenCalledWith(
+            'pixel-builder',
+            false,
+            {
+                version: '3.2.0',
+                build: '12',
+            },
+            null,
+        );
         expect(machines.runAndroidDevice).toHaveBeenCalledWith('pixel-builder', {
             kind: 'debug',
             serial: 'phone',
@@ -121,10 +134,15 @@ describe('Android build and run', () => {
         expect(draft.androidAllowHttp).toBe(false);
         draft.androidAllowHttp = true;
         await store.startAndroidPreview('pixel-builder', 'phone');
-        expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', true, {
-            version: '3.2.0',
-            build: '12',
-        });
+        expect(machines.debugBuild).toHaveBeenCalledWith(
+            'pixel-builder',
+            true,
+            {
+                version: '3.2.0',
+                build: '12',
+            },
+            null,
+        );
         expect(store.builds['pixel-builder']?.request.androidAllowHttp).toBe(true);
         expect(session.view.android!.workspace!.lastBuild!.allowHttp).toBe(true);
         expect(machines.runAndroidDevice).toHaveBeenCalledWith('pixel-builder', {
@@ -134,6 +152,136 @@ describe('Android build and run', () => {
         });
         draft.androidAllowHttp = false;
         expect(store.builds['pixel-builder']?.request.androidAllowHttp).toBe(true);
+    });
+
+    it('freezes the live server URL before syncing and installs the APK built for it', async () => {
+        const { store, session } = await fixture();
+        const preview = store.previewDraft('pixel-builder');
+        expect(preview).toEqual({
+            liveReloadEnabled: false,
+            liveReloadUrl: 'http://localhost:5173',
+        });
+        preview.liveReloadEnabled = true;
+        preview.liveReloadUrl = '  http://localhost:5173/app/  ';
+        let finishSync!: () => void;
+        machines.sync.mockReturnValue(
+            new Promise<void>((resolve) => {
+                finishSync = resolve;
+            }),
+        );
+        const running = store.startAndroidPreview('pixel-builder', 'phone');
+        preview.liveReloadUrl = 'http://localhost:8080';
+        preview.liveReloadEnabled = false;
+        finishSync();
+        await running;
+        expect(machines.debugBuild).toHaveBeenCalledWith(
+            'pixel-builder',
+            false,
+            {
+                version: '3.2.0',
+                build: '12',
+            },
+            'http://localhost:5173/app/',
+        );
+        expect(store.builds['pixel-builder']?.androidLiveReloadUrl).toBe(
+            'http://localhost:5173/app/',
+        );
+        expect(session.view.android!.workspace!.lastBuild!.liveReloadUrl).toBe(
+            'http://localhost:5173/app/',
+        );
+        expect(machines.runAndroidDevice).toHaveBeenCalledWith('pixel-builder', {
+            kind: 'debug',
+            serial: 'phone',
+            expectedSha256: 'fresh-apk',
+        });
+    });
+
+    it.each(['test', 'release'] as const)(
+        'never uses preview live reload for a standalone %s build',
+        async (outcome) => {
+            const { store, session } = await fixture();
+            store.previewDraft('pixel-builder').liveReloadEnabled = true;
+            machines.signedRelease.mockResolvedValue({ view: session.view });
+            await store.start(
+                'pixel-builder',
+                { ...store.draft('pixel-builder'), source: 'snapshot', outcome },
+                null,
+            );
+            expect(machines.debugBuild).toHaveBeenCalledWith(
+                'pixel-builder',
+                false,
+                {
+                    version: '3.2.0',
+                    build: '12',
+                },
+                null,
+            );
+            expect(store.builds['pixel-builder']?.androidLiveReloadUrl).toBeNull();
+        },
+    );
+
+    it('rejects an invalid live reload URL before copying or building the project', async () => {
+        const { store, session } = await fixture();
+        const preview = store.previewDraft('pixel-builder');
+        preview.liveReloadEnabled = true;
+        preview.liveReloadUrl = 'http://user:secret@localhost:5173';
+        await store.startAndroidPreview('pixel-builder', 'phone');
+        expect(session.error).toContain('without credentials');
+        expect(machines.sync).not.toHaveBeenCalled();
+        expect(machines.debugBuild).not.toHaveBeenCalled();
+        expect(machines.runAndroidDevice).not.toHaveBeenCalled();
+    });
+
+    it('resets live reload when the approved project changes', async () => {
+        const { store, session } = await fixture();
+        const preview = store.previewDraft('pixel-builder');
+        preview.liveReloadEnabled = true;
+        preview.liveReloadUrl = 'http://localhost:8080';
+        session.view.android!.workspace!.localPath = '/home/you/another-project';
+        expect(store.previewDraft('pixel-builder')).toEqual({
+            liveReloadEnabled: false,
+            liveReloadUrl: 'http://localhost:5173',
+        });
+        expect(preview.liveReloadEnabled).toBe(false);
+        await store.startAndroidPreview('pixel-builder', 'phone');
+        expect(store.builds['pixel-builder']?.androidLiveReloadUrl).toBeNull();
+    });
+
+    it('clears the frozen live reload URL when a paused preview resumes with a different project', async () => {
+        const { store, session } = await fixture();
+        store.previewDraft('pixel-builder').liveReloadEnabled = true;
+        session.view.runtime.state = 'exited';
+        await store.startAndroidPreview('pixel-builder', 'phone');
+        expect(store.builds['pixel-builder']?.status).toBe('paused');
+        session.view.android!.workspace!.localPath = '/home/you/another-project';
+        session.view.runtime.state = 'running';
+        await store.resume('pixel-builder');
+        expect(machines.debugBuild).toHaveBeenCalledWith(
+            'pixel-builder',
+            false,
+            {
+                version: '3.2.0',
+                build: '12',
+            },
+            null,
+        );
+        expect(store.builds['pixel-builder']?.androidLiveReloadUrl).toBeNull();
+    });
+
+    it('does not send a live reload URL for a native Android project', async () => {
+        const { store, session } = await fixture();
+        store.previewDraft('pixel-builder').liveReloadEnabled = true;
+        session.view.android!.workspace!.layout.kind = 'native';
+        await store.startAndroidPreview('pixel-builder', 'phone');
+        expect(machines.debugBuild).toHaveBeenCalledWith(
+            'pixel-builder',
+            false,
+            {
+                version: '3.2.0',
+                build: '12',
+            },
+            null,
+        );
     });
 
     it('forwards the HTTP option for a standalone guided test build', async () => {
@@ -148,10 +296,15 @@ describe('Android build and run', () => {
             },
             null,
         );
-        expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', true, {
-            version: '3.2.0',
-            build: '12',
-        });
+        expect(machines.debugBuild).toHaveBeenCalledWith(
+            'pixel-builder',
+            true,
+            {
+                version: '3.2.0',
+                build: '12',
+            },
+            null,
+        );
         expect(store.builds['pixel-builder']?.status).toBe('complete');
         expect(machines.runAndroidDevice).not.toHaveBeenCalled();
     });
@@ -165,10 +318,15 @@ describe('Android build and run', () => {
         expect(store.draft('pixel-builder').androidAllowHttp).toBe(false);
         expect(draft.androidAllowHttp).toBe(false);
         await store.startAndroidPreview('pixel-builder', 'phone');
-        expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', false, {
-            version: '3.2.0',
-            build: '12',
-        });
+        expect(machines.debugBuild).toHaveBeenCalledWith(
+            'pixel-builder',
+            false,
+            {
+                version: '3.2.0',
+                build: '12',
+            },
+            null,
+        );
     });
 
     it('clears the HTTP opt-in when a paused preview continues with another project', async () => {
@@ -180,10 +338,15 @@ describe('Android build and run', () => {
         session.view.android!.workspace!.localPath = '/home/you/different-project';
         session.view.runtime.state = 'running';
         await store.resume('pixel-builder');
-        expect(machines.debugBuild).toHaveBeenCalledWith('pixel-builder', false, {
-            version: '3.2.0',
-            build: '12',
-        });
+        expect(machines.debugBuild).toHaveBeenCalledWith(
+            'pixel-builder',
+            false,
+            {
+                version: '3.2.0',
+                build: '12',
+            },
+            null,
+        );
         expect(store.builds['pixel-builder']?.request.androidAllowHttp).toBe(false);
     });
 
@@ -360,5 +523,32 @@ describe('the build draft', () => {
         draft.source = 'snapshot';
         expect(source.value).toBe('snapshot');
         expect(store.draft('pixel-builder')).toBe(draft);
+    });
+});
+
+describe('iPhone live reload draft', () => {
+    beforeEach(() => {
+        vi.resetModules();
+        vi.resetAllMocks();
+    });
+
+    it('starts disabled without a localhost default and resets when the project changes', async () => {
+        const view = await createMockBackend().getMachine('default');
+        machines.session.mockReturnValue({ view, operation: null, error: null });
+        const { useBuildFlowStore } = await import('./build-flow');
+        const store = useBuildFlowStore();
+        const draft = store.previewDraft('default');
+        expect(draft).toEqual({ liveReloadEnabled: false, liveReloadUrl: '' });
+        draft.liveReloadEnabled = true;
+        draft.liveReloadUrl = 'http://192.168.1.10:5173';
+        expect(store.previewDraft('default')).toBe(draft);
+        expect(store.previewDraft('default').liveReloadEnabled).toBe(true);
+
+        view.appleWorkspace!.localPath = '/home/you/another-app';
+        expect(store.previewDraft('default')).toEqual({
+            liveReloadEnabled: false,
+            liveReloadUrl: '',
+        });
+        expect(draft.liveReloadEnabled).toBe(false);
     });
 });

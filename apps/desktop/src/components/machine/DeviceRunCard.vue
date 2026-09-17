@@ -7,6 +7,7 @@ import { computed } from 'vue';
 
 import type { ListboxOption } from '../../lib/listbox';
 import { buildPrerequisite } from '../../model/build-flow';
+import { useBuildFlowStore } from '../../stores/build-flow';
 import { useEnvSetsStore } from '../../stores/envs';
 import type { MachineSession } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
@@ -18,6 +19,7 @@ import Field from '../ui/Field.vue';
 import type { KeyValueItem } from '../ui/KeyValue.vue';
 import KeyValue from '../ui/KeyValue.vue';
 import Select from '../ui/Select.vue';
+import LiveReloadOptions from './LiveReloadOptions.vue';
 import VersionFields from './VersionFields.vue';
 
 const { session } = defineProps<{
@@ -33,6 +35,10 @@ const { session } = defineProps<{
 const envSetId = defineModel<string>('envSetId', { required: true });
 const envs = useEnvSetsStore();
 const ui = useUi();
+const flows = useBuildFlowStore();
+const preview = computed(() => flows.previewDraft(session.id));
+const capacitor = computed(() => session.view?.appleWorkspace?.layout.kind === 'capacitor');
+const liveReload = computed(() => capacitor.value && preview.value.liveReloadEnabled);
 // Whatever blocks the run, one thing at a time, in the order it gets fixed: the machine, then
 // the project, then the phone. The phone's own card says how to fix its rung; this only names it.
 const blocker = computed(() => (session.view ? buildPrerequisite(session.view) : null));
@@ -50,6 +56,13 @@ const blocker = computed(() => (session.view ? buildPrerequisite(session.view) :
         </template>
 
         <div class="space-y-4">
+            <LiveReloadOptions
+                v-if="capacitor"
+                v-model:enabled="preview.liveReloadEnabled"
+                v-model:url="preview.liveReloadUrl"
+                platform="ios"
+                :disabled="busy"
+            />
             <Callout v-if="blocker" tone="neutral">
                 {{ blocker.message }}
                 <div class="mt-2">
@@ -97,7 +110,11 @@ const blocker = computed(() => (session.view ? buildPrerequisite(session.view) :
             <Field
                 v-if="envs.sets.value.length"
                 label="Environment"
-                hint="Rebuilds the web assets with this environment for this run."
+                :hint="
+                    liveReload
+                        ? 'Applied to the native build. Start your dev server with the environment you want for the live web app.'
+                        : 'Rebuilds the web assets with this environment for this run.'
+                "
             >
                 <Select v-model="envSetId" :options="envOptions" :disabled="busy" />
             </Field>

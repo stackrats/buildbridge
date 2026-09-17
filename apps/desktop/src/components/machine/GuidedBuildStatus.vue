@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 
+import { androidRunStopDescription } from '../../model/android-device';
 import { activityLabel, type MachineSession } from '../../stores/machines';
 import { useBuildFlowStore } from '../../stores/build-flow';
 import { buildPrerequisite, projectWorkspace, releasePrerequisite } from '../../model/build-flow';
@@ -50,7 +51,7 @@ const lastLine = computed(() =>
 );
 const label = computed(() =>
     streaming.value
-        ? `Live on ${build.value?.androidDeviceSerial ?? 'the device'}`
+        ? `${build.value?.androidLiveReloadUrl ? 'Live reload' : 'Live'} on ${build.value?.androidDeviceSerial ?? 'the device'}`
         : build.value?.androidDeviceSerial
           ? 'Building and running on Android'
           : build.value?.request.outcome === 'release'
@@ -72,7 +73,7 @@ const label = computed(() =>
             :stopping="build.status === 'stopping' || session.cancelling"
             :stop-title="
                 streaming
-                    ? 'Ends the log session. The app stays installed and running on the device.'
+                    ? androidRunStopDescription(build.androidLiveReloadUrl ?? null)
                     : 'Stop the current operation and the remaining build stages.'
             "
             @stop="flows.stop(session.id)"
@@ -122,7 +123,12 @@ const label = computed(() =>
                       : 'Test build passed'
             "
         >
-            <p>
+            <p v-if="build.androidLiveReloadUrl">
+                This debug APK loads {{ build.androidLiveReloadUrl }} and needs its dev server
+                running. The server's environment controls the web app. Install and open again to
+                reconnect localhost after stopping.
+            </p>
+            <p v-else>
                 {{
                     build.request.source === 'latest'
                         ? 'Built from the local source copied for this build.'

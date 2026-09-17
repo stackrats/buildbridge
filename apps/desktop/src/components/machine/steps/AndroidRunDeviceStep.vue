@@ -7,7 +7,7 @@
 // selected, whether the device can be run on, and the live strip for a run it started itself.
 import { computed, watch } from 'vue';
 
-import { androidDeviceApks } from '../../../model/android-device';
+import { androidDeviceApks, androidRunStopDescription } from '../../../model/android-device';
 import { androidDevicePhaseLabel } from '../../../model/phases';
 import type { JourneyStep } from '../../../model/steps';
 import { useBuildFlowStore } from '../../../stores/build-flow';
@@ -82,7 +82,7 @@ const strip = computed(() => {
     const progress = session.androidDevice;
     return {
         label: streaming.value
-            ? `Live on ${session.androidDeviceRun?.serial ?? session.androidDeviceSerial}`
+            ? `${apk.value?.liveReloadUrl ? 'Live reload' : 'Live'} on ${session.androidDeviceRun?.serial ?? session.androidDeviceSerial}`
             : progress
               ? androidDevicePhaseLabel[progress.phase]
               : 'Checking the device',
@@ -90,7 +90,7 @@ const strip = computed(() => {
         elapsed: progress?.elapsedSeconds ?? null,
         lastLine: session.deviceLog.at(-1)?.text ?? null,
         stopTitle: streaming.value
-            ? 'Ends the log session. The app stays installed and running on the device.'
+            ? androidRunStopDescription(apk.value?.liveReloadUrl ?? null)
             : undefined,
     };
 });

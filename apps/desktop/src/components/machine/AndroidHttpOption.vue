@@ -5,13 +5,18 @@ import { useBuildFlowStore } from '../../stores/build-flow';
 import type { MachineSession } from '../../stores/machines';
 import Checkbox from '../ui/Checkbox.vue';
 
-const { session, disabled = false } = defineProps<{
+const {
+    session,
+    disabled = false,
+    requiredForLiveReload = false,
+} = defineProps<{
     session: MachineSession;
     disabled?: boolean;
+    requiredForLiveReload?: boolean;
 }>();
 const flows = useBuildFlowStore();
 const allowHttp = computed({
-    get: () => flows.draft(session.id).androidAllowHttp,
+    get: () => requiredForLiveReload || flows.draft(session.id).androidAllowHttp,
     set: (value: boolean) => {
         flows.draft(session.id).androidAllowHttp = value;
     },
@@ -23,10 +28,13 @@ const allowHttp = computed({
         <Checkbox
             v-model="allowHttp"
             block
-            :disabled="disabled || !session.view?.android?.workspace"
+            :disabled="disabled || requiredForLiveReload || !session.view?.android?.workspace"
             >Allow HTTP APIs for debug builds</Checkbox
         >
         <p class="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+            <template v-if="requiredForLiveReload">
+                Enabled for this debug APK because the live reload server uses HTTP.
+            </template>
             Allows unencrypted API requests for local testing. Applies to the next debug build for
             this project; build and reinstall to change an installed app. Release builds use the
             project's settings.

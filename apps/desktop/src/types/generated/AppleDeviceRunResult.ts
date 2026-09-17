@@ -11,4 +11,4 @@ bundleIdentifier: string,
  * The project's own Debug identifier, when the build was signed under the approved one
  * instead because only that one has a development profile.
  */
-projectBundleIdentifier: string | null, appPath: string, marketingVersion: string, buildNumber: string, provisioningProfileUuid: string, installedAtEpochSeconds: number, consoleEnd: ConsoleEnd, exitStatus: number | null, reattached: boolean, buildTail: Array<string>, consoleTail: Array<string>, };
+projectBundleIdentifier: string | null, liveReloadUrl: string | null, appPath: string, marketingVersion: string, buildNumber: string, provisioningProfileUuid: string, installedAtEpochSeconds: number, consoleEnd: ConsoleEnd, exitStatus: number | null, reattached: boolean, buildTail: Array<string>, consoleTail: Array<string>, };

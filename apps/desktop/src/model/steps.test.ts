@@ -932,6 +932,7 @@ describe('run on the device', () => {
     it('keeps the last run on the row without calling the step done, and fails when the run failed', () => {
         const view = provisionedView();
         view.deviceRun = {
+            liveReloadUrl: null,
             device: {
                 identifier: 'E3F1A2B4-5C6D-4E7F-8A9B-0C1D2E3F4A5B',
                 udid: '00008030-000A1B2C3D4E5F6A',
@@ -1258,6 +1259,7 @@ describe('an Android machine', () => {
             lastBuildSucceeded: true,
             lastBuild: {
                 allowHttp: false,
+                liveReloadUrl: null,
                 applicationId: 'com.example.app.debug',
                 versionName: '1.0',
                 versionCode: '3',

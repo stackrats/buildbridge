@@ -2,6 +2,7 @@
 import { reactive } from 'vue';
 
 import { describeError } from '../lib/utils';
+import { androidLiveReloadUrlIssue } from '../model/android-device';
 import {
     executeBuildFlow,
     projectWorkspace,
@@ -35,11 +36,20 @@ export interface GuidedBuild {
     /** A preview builds fresh debug output and only then installs that exact APK. */
     androidDeviceSerial?: string;
     androidPreviewSha256?: string | null;
+    /** Frozen only for Build and run; standalone tests and releases never inherit this URL. */
+    androidLiveReloadUrl?: string | null;
+}
+
+export interface PreviewDraft {
+    liveReloadEnabled: boolean;
+    liveReloadUrl: string;
 }
 
 const builds = reactive<Record<string, GuidedBuild>>({});
 const drafts = reactive<Record<string, BuildRequest>>({});
 const draftProjects = new Map<string, string | null>();
+const previewDrafts = reactive<Record<string, PreviewDraft>>({});
+const previewProjects = new Map<string, string | null>();
 
 async function proceed(id: string, resume: boolean): Promise<void> {
     const build = builds[id]!;
@@ -96,6 +106,7 @@ async function proceed(id: string, resume: boolean): Promise<void> {
                                               request.outcome === 'test' &&
                                                   request.androidAllowHttp,
                                               requestedVersion(session.view!, request),
+                                              build.androidLiveReloadUrl ?? null,
                                           )
                                           .then((result) => {
                                               if (build.androidDeviceSerial)
@@ -211,11 +222,29 @@ export function useBuildFlowStore() {
         active(id: string): boolean {
             return builds[id]?.status === 'running' || builds[id]?.status === 'stopping';
         },
+        previewDraft(id: string): PreviewDraft {
+            const view = machines.session(id).view;
+            const projectPath = view ? (projectWorkspace(view)?.localPath ?? null) : null;
+            const defaultUrl =
+                view && isAndroid(view.profile.provider) ? 'http://localhost:5173' : '';
+            previewDrafts[id] ??= {
+                liveReloadEnabled: false,
+                liveReloadUrl: defaultUrl,
+            };
+            const draft = previewDrafts[id];
+            if (previewProjects.get(id) !== projectPath) {
+                draft.liveReloadEnabled = false;
+                draft.liveReloadUrl = defaultUrl;
+            }
+            previewProjects.set(id, projectPath);
+            return draft;
+        },
         async start(
             id: string,
             request: BuildRequest,
             environmentName: string | null,
             androidDeviceSerial?: string,
+            androidLiveReloadUrl: string | null = null,
         ): Promise<void> {
             const session = machines.session(id);
             if (!session.view || session.operation || session.view.busyOperation || this.active(id))
@@ -238,6 +267,12 @@ export function useBuildFlowStore() {
                 failure: null,
                 androidDeviceSerial,
                 androidPreviewSha256: null,
+                androidLiveReloadUrl:
+                    androidDeviceSerial &&
+                    request.outcome === 'test' &&
+                    session.view.android?.workspace?.layout.kind === 'capacitor'
+                        ? androidLiveReloadUrl
+                        : null,
             };
             await proceed(id, false);
         },
@@ -259,6 +294,19 @@ export function useBuildFlowStore() {
                 session.error = 'Refresh devices and select an authorized phone or emulator first.';
                 return;
             }
+            const preview = this.previewDraft(id);
+            const liveReloadUrl =
+                preview.liveReloadEnabled &&
+                session.view.android?.workspace?.layout.kind === 'capacitor'
+                    ? preview.liveReloadUrl.trim()
+                    : null;
+            if (liveReloadUrl !== null) {
+                const issue = androidLiveReloadUrlIssue(preview.liveReloadUrl);
+                if (issue) {
+                    session.error = issue;
+                    return;
+                }
+            }
             session.androidDeviceApk = 'debug';
             await this.start(
                 id,
@@ -275,6 +323,7 @@ export function useBuildFlowStore() {
                     ? (session.view.envSet?.name ?? null)
                     : (environmentName ?? null),
                 serial,
+                liveReloadUrl,
             );
         },
         async resume(id: string): Promise<void> {
@@ -290,8 +339,10 @@ export function useBuildFlowStore() {
                 return;
             // A pause before project approval has no source to preserve yet.
             if (!build.preparedSnapshot) {
-                if (build.projectPath !== (projectWorkspace(session.view)?.localPath ?? null))
+                if (build.projectPath !== (projectWorkspace(session.view)?.localPath ?? null)) {
                     build.request.androidAllowHttp = false;
+                    build.androidLiveReloadUrl = null;
+                }
                 build.projectPath = projectWorkspace(session.view)?.localPath ?? null;
             }
             await proceed(id, true);
