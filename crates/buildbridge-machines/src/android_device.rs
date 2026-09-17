@@ -1423,13 +1423,16 @@ fi
             let scope = OperationScope::new();
             let cancellation = Arc::clone(&scope);
             let _entered = enter_operation(scope);
-            let calls = self.root.join("adb.args");
+            // The Stop stands in for one from the desktop, and lands once the run has read
+            // both lines the fake logcat prints. Stopping as soon as logcat was merely
+            // called let a slow runner end the run before the lines had arrived.
+            let streamed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = Arc::clone(&streamed);
             let cancel = thread::spawn(move || {
                 let deadline = std::time::Instant::now() + Duration::from_secs(30);
-                while std::time::Instant::now() < deadline {
-                    if fs::read_to_string(&calls).is_ok_and(|logged| logged.contains("logcat")) {
-                        break;
-                    }
+                while std::time::Instant::now() < deadline
+                    && seen.load(std::sync::atomic::Ordering::SeqCst) < 2
+                {
                     thread::sleep(Duration::from_millis(10));
                 }
                 cancellation.cancel();
@@ -1442,7 +1445,13 @@ fi
                 &self.apk,
                 SHA256,
                 live_reload_url,
-                |progress| events.push(progress),
+                |progress| {
+                    streamed.fetch_add(
+                        progress.log_lines.len(),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    events.push(progress);
+                },
             );
             cancel.join().unwrap();
             (result, events)

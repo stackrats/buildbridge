@@ -282,6 +282,11 @@ fi
 /// The framework's own step between the dependencies and Xcode: `cap sync`, `cordova
 /// prepare`, `expo prebuild` when the native project is not committed, Flutter's project
 /// configuration. Nothing for React Native, which bundles inside Xcode, and for a native app.
+///
+/// `cap sync ios` rewrites the Podfile's plugin block and then runs `pod install` itself, with
+/// no switch to leave that out; only the `pod` it runs can be chosen. It is pointed at
+/// `/usr/bin/true` so CocoaPods runs once, in the next phase, where a committed lock a plugin
+/// upgrade outgrew is updated in the guest rather than failing the build.
 fn ios_framework_script(
     layout: &ProjectLayout,
     workspace: &str,
@@ -297,7 +302,7 @@ if /bin/test ! -x {root}/node_modules/.bin/cap; then
     /usr/bin/printf '%s\n' 'The project has no Capacitor command line: add @capacitor/cli to its devDependencies.' >&2
     exit 1
 fi
-{root}/node_modules/.bin/cap sync ios
+CAPACITOR_COCOAPODS_PATH=/usr/bin/true {root}/node_modules/.bin/cap sync ios
 "#
         ),
         ProjectKind::Cordova => format!(
@@ -902,8 +907,10 @@ mod tests {
         assert!(script.contains("js_run build"), "{script}");
         assert!(script.contains("phase syncing_ios"), "{script}");
         assert!(
-            script.contains("node_modules/.bin/cap sync ios"),
-            "{script}"
+            script.contains(
+                "CAPACITOR_COCOAPODS_PATH=/usr/bin/true '/Users/b/BuildBridge/workspaces/active'/node_modules/.bin/cap sync ios"
+            ),
+            "Capacitor must not run CocoaPods itself: {script}"
         );
         assert!(script.contains("phase resolving_pods"), "{script}");
         assert!(
