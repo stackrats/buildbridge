@@ -1230,14 +1230,22 @@ if /bin/test "$job_owner" -eq 1; then
     /usr/bin/printf '%s\n' "$job_meta" > "$job_state/meta"
     trap '' HUP
     (
+        job_done=0
         finish_job() {{
             worker_status=$?
+            # bash 3.2, the /bin/sh of a macOS guest, runs this trap with a status of 0
+            # after an assignment or expansion error has ended the shell, so a 0 is only
+            # believed once the body ran to its end.
+            if /bin/test "$worker_status" -eq 0 && /bin/test "$job_done" -ne 1; then
+                worker_status=1
+            fi
             /usr/bin/printf '%s\n' "$worker_status" > "$job_status.incoming"
             /bin/mv "$job_status.incoming" "$job_status"
         }}
         trap finish_job EXIT
         set -eu
 {body}
+        job_done=1
     ) > "$job_log" 2>&1 < /dev/null &
     job_pid=$!
     /usr/bin/printf '%s\n' "$job_pid" > "$job_state/pid"
