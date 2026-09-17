@@ -362,7 +362,10 @@ cd {root}
 /// update` for exactly the pods named. The lock then differs from the committed one, the
 /// marker below reports it, and the test build step offers the refreshed lock for adoption.
 /// Names are taken from CocoaPods' own message and limited to the characters a pod name can
-/// hold, so the retry receives words and never anything a shell would interpret.
+/// hold, so the retry receives words and never anything a shell would interpret. They are
+/// passed as positional parameters built one line at a time: the script is the ssh remote
+/// command, so the guest's login shell runs it, and zsh does not split an unquoted
+/// parameter into words the way sh does.
 fn pods_script(layout: &ProjectLayout, workspace: &str, tools: &RecipeTools) -> String {
     let (Some(ios), Some(pod)) = (&layout.ios, &tools.pod) else {
         return String::new();
@@ -391,13 +394,19 @@ if "{pod}" install --no-ansi > "$pods_log" 2>&1; then
 else
     pods_status=$?
     /bin/cat "$pods_log"
-    conflicting=$(/usr/bin/sed -n 's/.*could not find compatible versions for pod "\([A-Za-z0-9_.+\/-]*\)".*/\1/p' "$pods_log" | /usr/bin/sort -u | /usr/bin/tr '\n' ' ')
+    conflicting=$(/usr/bin/sed -n 's/.*could not find compatible versions for pod "\([A-Za-z0-9_.+\/-]*\)".*/\1/p' "$pods_log" | /usr/bin/sort -u)
     /bin/rm -f "$pods_log"
     if /bin/test -z "$conflicting"; then
         exit "$pods_status"
     fi
-    /usr/bin/printf 'The committed Podfile.lock pins %sat a version the project no longer accepts. Updating those pods in the guest only, as CocoaPods advises; the refreshed lock can be adopted into the project from the test build step.\n' "$conflicting"
-    "{pod}" update $conflicting --no-ansi
+    set --
+    while read -r pod_name; do
+        set -- "$@" "$pod_name"
+    done <<__BUILDBRIDGE_PODS__
+$conflicting
+__BUILDBRIDGE_PODS__
+    /usr/bin/printf 'The committed Podfile.lock pins %s at a version the project no longer accepts. Updating those pods in the guest only, as CocoaPods advises; the refreshed lock can be adopted into the project from the test build step.\n' "$*"
+    "{pod}" update "$@" --no-ansi
 fi
 lock_after=$({lock_after})
 if /bin/test "$lock_before" != "$lock_after"; then
@@ -962,7 +971,7 @@ mod tests {
             script.contains("install --no-ansi > \"$pods_log\""),
             "{script}"
         );
-        assert!(script.contains("update $conflicting --no-ansi"), "{script}");
+        assert!(script.contains("update \"$@\" --no-ansi"), "{script}");
         assert!(script.contains("exit \"$pods_status\""), "{script}");
 
         let mut open = ProjectLayout::capacitor_default();
@@ -1016,10 +1025,18 @@ esac
             lock_before_script(&layout, workspace, &tools),
             pods_script(&layout, workspace, &tools)
         );
-        let run = |mode: &str| {
+        // The script is the ssh remote command, so the guest's login shell runs it: zsh on
+        // any macOS since Catalina, which does not split an unquoted parameter into words.
+        // Every shell this host has stands in for it.
+        let shells = ["/bin/sh", "/bin/bash", "/bin/zsh"]
+            .into_iter()
+            .filter(|shell| Path::new(shell).is_file())
+            .collect::<Vec<_>>();
+        let run = |shell: &str, mode: &str| {
             std::fs::write(podfile_dir.join("Podfile.lock"), "pinned\n").unwrap();
             let calls = root.join(format!("calls-{mode}"));
-            let output = std::process::Command::new("/bin/sh")
+            let _ = std::fs::remove_file(&calls);
+            let output = std::process::Command::new(shell)
                 .args(["-c", &script])
                 .env("FIXTURE_MODE", mode)
                 .env("FIXTURE_CALLS", &calls)
@@ -1030,35 +1047,37 @@ esac
             (output.status.code(), stdout, calls)
         };
 
-        let (status, stdout, calls) = run("conflict");
-        assert_eq!(status, Some(0), "{stdout}");
-        assert_eq!(
-            calls,
-            "install --no-ansi\nupdate Firebase/Core IONCameraLib --no-ansi\n"
-        );
-        assert!(
-            stdout.contains("could not find compatible versions"),
-            "{stdout}"
-        );
-        assert!(
-            stdout.contains("pins Firebase/Core IONCameraLib at a version"),
-            "{stdout}"
-        );
-        assert!(
-            stdout.contains("__BUILDBRIDGE_NATIVE_LOCK_UPDATED__:yes"),
-            "{stdout}"
-        );
+        for shell in shells {
+            let (status, stdout, calls) = run(shell, "conflict");
+            assert_eq!(status, Some(0), "{shell}: {stdout}");
+            assert_eq!(
+                calls, "install --no-ansi\nupdate Firebase/Core IONCameraLib --no-ansi\n",
+                "{shell}"
+            );
+            assert!(
+                stdout.contains("could not find compatible versions"),
+                "{stdout}"
+            );
+            assert!(
+                stdout.contains("pins Firebase/Core IONCameraLib at a version"),
+                "{shell}: {stdout}"
+            );
+            assert!(
+                stdout.contains("__BUILDBRIDGE_NATIVE_LOCK_UPDATED__:yes"),
+                "{shell}: {stdout}"
+            );
 
-        let (status, stdout, calls) = run("broken");
-        assert_eq!(status, Some(7), "{stdout}");
-        assert_eq!(calls, "install --no-ansi\n");
-        assert!(stdout.contains("The Podfile is malformed"), "{stdout}");
-        assert!(!stdout.contains("NATIVE_LOCK_UPDATED"), "{stdout}");
+            let (status, stdout, calls) = run(shell, "broken");
+            assert_eq!(status, Some(7), "{shell}: {stdout}");
+            assert_eq!(calls, "install --no-ansi\n", "{shell}");
+            assert!(stdout.contains("The Podfile is malformed"), "{stdout}");
+            assert!(!stdout.contains("NATIVE_LOCK_UPDATED"), "{stdout}");
 
-        let (status, stdout, calls) = run("clean");
-        assert_eq!(status, Some(0), "{stdout}");
-        assert_eq!(calls, "install --no-ansi\n");
-        assert!(!stdout.contains("NATIVE_LOCK_UPDATED"), "{stdout}");
+            let (status, stdout, calls) = run(shell, "clean");
+            assert_eq!(status, Some(0), "{shell}: {stdout}");
+            assert_eq!(calls, "install --no-ansi\n", "{shell}");
+            assert!(!stdout.contains("NATIVE_LOCK_UPDATED"), "{stdout}");
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }

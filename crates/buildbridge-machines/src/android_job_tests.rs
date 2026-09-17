@@ -11,14 +11,7 @@ struct JobFixture {
 
 impl JobFixture {
     fn new() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "buildbridge-android-job-{}-{nonce}",
-            std::process::id()
-        ));
+        let directory = crate::test_scripts::fixture_dir("android-job");
         let tools = directory.join("tools");
         let jobs = tools.join("jobs");
         let workspace = directory.join("workspace");
@@ -226,4 +219,26 @@ fn completed_jobs_are_removed_for_sync_and_build_without_touching_other_state() 
             assert!(fixture.prepare(reattach_debug).status.success());
         }
     }
+}
+
+/// A worker whose shell ends without running its trap: killed outright here, which no shell's
+/// trap survives, and what zsh does by itself on an assignment or expansion error. The
+/// wrapper must notice the dead worker and record a failure rather than wait for a status
+/// that is never coming.
+#[test]
+fn a_worker_that_dies_without_its_trap_is_recorded_as_failed_not_waited_for() {
+    let fixture = JobFixture::new();
+    let output = fixture.run_debug_job(
+        "/usr/bin/printf '%s\\n' 'about to die'\n/bin/sh -c '/bin/kill -9 $PPID'\n/usr/bin/printf '%s\\n' 'still alive'",
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("about to die"), "{stdout}");
+    assert!(!stdout.contains("still alive"), "{stdout}");
+    assert!(
+        stdout.contains("The job ended without reporting a status."),
+        "{stdout}"
+    );
+    let job = fixture.jobs.join("android-debug-build");
+    assert_eq!(fs::read_to_string(job.join("status")).unwrap().trim(), "1");
 }

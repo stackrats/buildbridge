@@ -1233,9 +1233,10 @@ if /bin/test "$job_owner" -eq 1; then
         job_done=0
         finish_job() {{
             worker_status=$?
-            # bash 3.2, the /bin/sh of a macOS guest, runs this trap with a status of 0
-            # after an assignment or expansion error has ended the shell, so a 0 is only
-            # believed once the body ran to its end.
+            # bash 3.2 runs this trap with a status of 0 after an assignment or expansion
+            # error has ended the shell, so a 0 is only believed once the body ran to its
+            # end. zsh, the login shell that runs this script on a macOS guest, skips the
+            # trap on those errors altogether; the reader below covers that.
             if /bin/test "$worker_status" -eq 0 && /bin/test "$job_done" -ne 1; then
                 worker_status=1
             fi
@@ -1263,6 +1264,18 @@ while ! /bin/test -f "$job_status"; do
             /usr/bin/sed -n "$next_line,$line_count p" "$job_log"
             next_line=$((line_count + 1))
         fi
+    fi
+    if /bin/test -n "${{job_pid-}}" && ! /bin/kill -0 "$job_pid" 2>/dev/null; then
+        # The worker is gone. Its trap runs before it exits, so a status it wrote is already
+        # in place; none means its shell ended without running the trap at all, as zsh does
+        # on an assignment or expansion error, or it was killed. Either is a failure, and
+        # without this the wait would never end.
+        if ! /bin/test -f "$job_status"; then
+            /usr/bin/printf '%s\n' 'The job ended without reporting a status.' >> "$job_log"
+            /usr/bin/printf '1\n' > "$job_status.incoming"
+            /bin/mv "$job_status.incoming" "$job_status"
+        fi
+        break
     fi
     /bin/sleep 1
 done
