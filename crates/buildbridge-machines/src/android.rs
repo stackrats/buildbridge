@@ -2495,15 +2495,7 @@ mod tests {
 
     #[test]
     fn an_existing_release_job_is_rejected_without_modifying_its_state() {
-        let root = std::env::temp_dir().join(format!(
-            "buildbridge-release-retry-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
+        let root = crate::test_scripts::fixture_dir("release-retry");
         let job = root.join("android-release");
         let check = || {
             Command::new("/bin/sh")
@@ -2547,14 +2539,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stopped_job_cleanup_deletes_credentials_and_preserves_project_and_tools() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let home = std::env::temp_dir().join(format!(
-            "buildbridge-stop-signing-{}-{nonce}",
-            std::process::id()
-        ));
+        let home = crate::test_scripts::fixture_dir("stop-signing");
         let toolchain = android_toolchain(home.to_str().unwrap());
         fs::create_dir_all(&toolchain.signing).unwrap();
         fs::create_dir_all(&toolchain.workspace).unwrap();

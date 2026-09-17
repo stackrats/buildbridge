@@ -747,15 +747,7 @@ mod command_tests {
     #[test]
     fn macos_docker_resolution_respects_a_valid_explicit_executable() {
         use std::os::unix::fs::PermissionsExt;
-        let directory = std::env::temp_dir().join(format!(
-            "buildbridge-docker-command-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        fs::create_dir_all(&directory).unwrap();
+        let directory = crate::test_scripts::fixture_dir("docker-command");
         let executable = directory.join("docker");
         fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
@@ -768,14 +760,7 @@ mod command_tests {
     #[test]
     fn macos_docker_search_skips_unusable_candidates_and_falls_back_to_the_path_lookup() {
         use std::os::unix::fs::PermissionsExt;
-        let directory = std::env::temp_dir().join(format!(
-            "buildbridge-docker-search-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
+        let directory = crate::test_scripts::fixture_dir("docker-search");
         let not_executable = directory.join("not-executable");
         let folder = directory.join("folder");
         let missing = directory.join("missing");

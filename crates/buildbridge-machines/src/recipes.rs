@@ -972,12 +972,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_pinned_pod_the_project_outgrew_is_updated_in_the_guest_and_the_lock_change_reported() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("buildbridge-pods-{}-{nonce}", std::process::id()));
+        let root = crate::test_scripts::fixture_dir("pods");
         let podfile_dir = root.join("ios/App");
         std::fs::create_dir_all(&podfile_dir).unwrap();
         let fake_pod = root.join("pod");

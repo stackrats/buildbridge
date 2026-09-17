@@ -1278,15 +1278,7 @@ mod tests {
             let serial_guard = TEST_DEVICE
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let root = std::env::temp_dir().join(format!(
-                "buildbridge-adb-test-{}-{nonce}",
-                std::process::id()
-            ));
-            fs::create_dir(&root).unwrap();
+            let root = crate::test_scripts::fixture_dir("adb-test");
             let adb = root.join("adb");
             crate::test_scripts::write_runnable(
                 &adb,
