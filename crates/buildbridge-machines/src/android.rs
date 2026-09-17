@@ -127,6 +127,9 @@ pub struct AndroidBuildResult {
     // Whether buildbridge enabled HTTP APIs for this debug APK.
     #[serde(default)]
     pub allow_http: bool,
+    // A development server loaded by this debug APK instead of its bundled web assets.
+    #[serde(default)]
+    pub live_reload_url: Option<String>,
     pub output_tail: Vec<String>,
 }
 
@@ -1240,13 +1243,15 @@ fn run_container_job<M>(
     job_name: &str,
     toolchain: &AndroidToolchain,
     body: &str,
+    live_reload: Option<(&str, &str)>,
     mut on_line: M,
 ) -> Result<(Vec<String>, Vec<String>, bool), ProviderError>
 where
     M: FnMut(&str, &mut Vec<String>),
 {
-    let script = crate::device_run::guest_job_script(job_name, &toolchain.tools, "''", body);
-    let mut child = container_exec_command(container_name, &script, &[])
+    let script = android_job_script(job_name, &toolchain.tools, body);
+    let (url, module) = live_reload.unwrap_or(("", ""));
+    let mut child = container_exec_command(container_name, &script, &[url, module])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1297,6 +1302,15 @@ where
     Ok((output_tail, diagnostic_lines, status.success()))
 }
 
+fn android_job_script(job_name: &str, tools: &str, body: &str) -> String {
+    let job = crate::device_run::guest_job_script(job_name, tools, "''", body);
+    // The URL is data, separate from both the wrapper and its detached recipe. Exporting
+    // it here also makes an existing job keep the URL it originally started with.
+    format!(
+        "export BUILDBRIDGE_LIVE_RELOAD_URL=\"$1\"\nexport BUILDBRIDGE_LIVE_RELOAD_MODULE=\"$2\"\n{job}"
+    )
+}
+
 /// The debug build: prepares the toolchain, installs the project's dependencies, runs the
 /// framework's own preparation when it has one, compiles the application module's debug APK
 /// with Gradle, reads the app back from it, and brings the APK to `output_directory` with its
@@ -1307,12 +1321,26 @@ pub fn run_android_debug_build<F>(
     output_directory: &Path,
     allow_http: bool,
     version: Option<&ProjectVersion>,
+    live_reload_url: Option<&str>,
     mut on_progress: F,
 ) -> Result<AndroidBuildResult, ProviderError>
 where
     F: FnMut(AndroidBuildProgress),
 {
     validate_layout(layout).map_err(|error| ProviderError::AndroidToolchain(error.to_string()))?;
+    let live_reload_url = live_reload_url
+        .map(normalize_live_reload_url)
+        .transpose()
+        .map_err(ProviderError::AndroidToolchain)?;
+    if live_reload_url.is_some() && layout.kind != ProjectKind::Capacitor {
+        return Err(ProviderError::AndroidToolchain(
+            "Live reload currently requires a Capacitor project.".into(),
+        ));
+    }
+    let allow_http = allow_http
+        || live_reload_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("http://"));
     if let Some(version) = version {
         validate_android_version(version).map_err(ProviderError::AndroidToolchain)?;
     }
@@ -1368,10 +1396,13 @@ where
         &gradle_program,
         &android_task(layout, "assembleDebug"),
         allow_http,
+        live_reload_url.is_some(),
     );
     let body = format!(
         r#"phase() {{ /usr/bin/printf '__BUILDBRIDGE_PHASE__:%s\n' "$1"; }}
+readonly BUILDBRIDGE_LIVE_RELOAD_URL BUILDBRIDGE_LIVE_RELOAD_MODULE
 /usr/bin/printf '__BUILDBRIDGE_ALLOW_HTTP__\t%s\n' '{allow_http}'
+/usr/bin/printf '__BUILDBRIDGE_LIVE_RELOAD_URL__\t%s\n' "$BUILDBRIDGE_LIVE_RELOAD_URL"
 /bin/test -d "{workspace}"
 {environment}
 if /bin/test -f "{workspace}/.buildbridge/env.sh"; then
@@ -1413,6 +1444,7 @@ apk_sha256=$(/usr/bin/sha256sum "$apk" | /usr/bin/cut -d ' ' -f 1)
     let mut apk: Option<(u64, String)> = None;
     let mut jdk_version: Option<String> = None;
     let mut built_allow_http = None;
+    let mut built_live_reload_url = None;
     on_progress(android_progress(
         phase,
         0,
@@ -1426,7 +1458,22 @@ apk_sha256=$(/usr/bin/sha256sum "$apk" | /usr/bin/cut -d ' ' -f 1)
         "android-debug-build",
         &toolchain,
         &body,
+        live_reload_url.as_deref().map(|url| {
+            (
+                url,
+                layout
+                    .android
+                    .as_ref()
+                    .map_or(":app", |android| android.module_path.as_str()),
+            )
+        }),
         |line, tail| {
+            if let Some(fields) = marker_fields(line, "__BUILDBRIDGE_LIVE_RELOAD_URL__") {
+                if let [url] = fields.as_slice() {
+                    built_live_reload_url = Some((*url).to_string());
+                }
+                return;
+            }
             if let Some(fields) = marker_fields(line, "__BUILDBRIDGE_ALLOW_HTTP__") {
                 built_allow_http = match fields.as_slice() {
                     ["true"] => Some(true),
@@ -1523,6 +1570,10 @@ apk_sha256=$(/usr/bin/sha256sum "$apk" | /usr/bin/cut -d ' ' -f 1)
         }));
     }
     validate_android_debug_http_mode(allow_http, built_allow_http)?;
+    validate_android_debug_live_reload(
+        live_reload_url.as_deref(),
+        built_live_reload_url.as_deref(),
+    )?;
     let (application_id, version_name, version_code) = app.ok_or_else(|| {
         ProviderError::AndroidToolchain("the container did not report the built app".to_string())
     })?;
@@ -1618,6 +1669,7 @@ apk_sha256=$(/usr/bin/sha256sum "$apk" | /usr/bin/cut -d ' ' -f 1)
             sha256: apk_sha256.to_ascii_lowercase(),
         }),
         allow_http,
+        live_reload_url,
         output_tail,
     })
 }
@@ -1633,6 +1685,16 @@ fn validate_android_debug_http_mode(
         "The reattached Android build used different or unknown HTTP API settings. Retry the debug build to apply the selected option."
             .to_string(),
     ))
+}
+
+fn validate_android_debug_live_reload(
+    requested: Option<&str>,
+    built: Option<&str>,
+) -> Result<(), ProviderError> {
+    if built == Some(requested.unwrap_or_default()) {
+        return Ok(());
+    }
+    Err(ProviderError::AndroidToolchain("The reattached Android build used different or unknown live reload settings. Retry the debug build to apply the selected server.".into()))
 }
 
 pub(crate) fn valid_key_alias(value: &str) -> bool {
@@ -1917,6 +1979,7 @@ where
         &android_gradle_program(&toolchain, layout),
         &gradle_tasks,
         false,
+        false,
     );
     let body = format!(
         r#"phase() {{ /usr/bin/printf '__BUILDBRIDGE_PHASE__:%s\n' "$1"; }}
@@ -2003,6 +2066,7 @@ fi"#
         "android-release",
         &toolchain,
         &body,
+        None,
         |line, tail| {
             if let Some(value) = line.strip_prefix("__BUILDBRIDGE_PHASE__:") {
                 if let Some(next) = android_release_phase(value) {

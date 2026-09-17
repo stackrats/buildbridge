@@ -6,7 +6,7 @@
 //! new Xcode cannot break the listing, while identifiers and UDIDs are validated because they
 //! later become command arguments.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Stdio;
 
@@ -859,7 +859,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::{
     APPLE_BUILD_DIAGNOSTIC_LINES, APPLE_BUILD_OUTPUT_TAIL_LINES, AppleArchiveProgress,
-    GuestEnvFiles, ProjectLayout, ProjectVersion, ProvisioningProfileSummary,
+    GuestEnvFiles, ProjectKind, ProjectLayout, ProjectVersion, ProvisioningProfileSummary,
     SIGNING_KEYCHAIN_NAME, apple_archive_signing_xcconfig, apple_build_log_is_diagnostic,
     apple_version_xcconfig, build_setting_value, guest_env_source, ios_container_args,
     ios_container_path, profile_allows_bundle, rebuild_web_assets_with_env, run_guest_command,
@@ -921,6 +921,9 @@ pub struct AppleDeviceRunResult {
     /// instead because only that one has a development profile.
     #[serde(default)]
     pub project_bundle_identifier: Option<String>,
+    // The development server embedded in this Debug app, when live reload was selected.
+    #[serde(default)]
+    pub live_reload_url: Option<String>,
     pub app_path: String,
     pub marketing_version: String,
     pub build_number: String,
@@ -1227,14 +1230,22 @@ if /bin/test "$job_owner" -eq 1; then
     /usr/bin/printf '%s\n' "$job_meta" > "$job_state/meta"
     trap '' HUP
     (
+        job_done=0
         finish_job() {{
             worker_status=$?
+            # bash 3.2, the /bin/sh of a macOS guest, runs this trap with a status of 0
+            # after an assignment or expansion error has ended the shell, so a 0 is only
+            # believed once the body ran to its end.
+            if /bin/test "$worker_status" -eq 0 && /bin/test "$job_done" -ne 1; then
+                worker_status=1
+            fi
             /usr/bin/printf '%s\n' "$worker_status" > "$job_status.incoming"
             /bin/mv "$job_status.incoming" "$job_status"
         }}
         trap finish_job EXIT
         set -eu
 {body}
+        job_done=1
     ) > "$job_log" 2>&1 < /dev/null &
     job_pid=$!
     /usr/bin/printf '%s\n' "$job_pid" > "$job_state/pid"
@@ -1297,20 +1308,22 @@ pub(crate) struct DeviceRunMeta {
     pub marketing_version: String,
     pub build_number: String,
     pub installed_at_epoch_seconds: u64,
+    pub live_reload_url: Option<String>,
 }
 
 const META_PREFIX: &str = "__BUILDBRIDGE_DEVICE_RUN_META__\t";
 
 fn encode_device_run_meta(meta: &DeviceRunMeta) -> String {
     format!(
-        "{META_PREFIX}{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{META_PREFIX}{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         meta.device_identifier,
         meta.bundle_identifier,
         meta.app_path,
         meta.profile_uuid,
         meta.marketing_version,
         meta.build_number,
-        meta.installed_at_epoch_seconds
+        meta.installed_at_epoch_seconds,
+        meta.live_reload_url.as_deref().unwrap_or("-")
     )
 }
 
@@ -1319,7 +1332,22 @@ pub(crate) fn parse_device_run_meta(line: &str) -> Result<DeviceRunMeta, Provide
         ProviderError::GuestBridge("the guest returned an invalid run record".to_string())
     })?;
     let fields = values.split('\t').collect::<Vec<_>>();
-    let [device, bundle, app, profile, version, build, installed] = fields[..] else {
+    let (record, live_reload_url) = match fields.as_slice() {
+        [record @ .., url] if record.len() == 7 => (
+            record,
+            (*url != "-")
+                .then(|| crate::normalize_apple_live_reload_url(url))
+                .transpose()
+                .map_err(ProviderError::GuestBridge)?,
+        ),
+        record if record.len() == 7 => (record, None),
+        _ => {
+            return Err(ProviderError::GuestBridge(
+                "the guest returned an invalid run record".to_string(),
+            ));
+        }
+    };
+    let [device, bundle, app, profile, version, build, installed] = record else {
         return Err(ProviderError::GuestBridge(
             "the guest returned an invalid run record".to_string(),
         ));
@@ -1349,7 +1377,117 @@ pub(crate) fn parse_device_run_meta(line: &str) -> Result<DeviceRunMeta, Provide
         marketing_version: version.to_string(),
         build_number: build.to_string(),
         installed_at_epoch_seconds,
+        live_reload_url,
     })
+}
+
+fn validate_device_run_request(
+    meta: &DeviceRunMeta,
+    device_identifier: &str,
+    live_reload_url: Option<&str>,
+) -> Result<(), ProviderError> {
+    if meta.device_identifier != device_identifier {
+        return Err(ProviderError::GuestBridge(
+            "A session is already running on another iPhone. Close the running app on that iPhone to end its console session, then build and run again."
+                .into(),
+        ));
+    }
+    if meta.live_reload_url.as_deref() != live_reload_url {
+        return Err(ProviderError::GuestBridge(
+            "The running iPhone session uses different live reload settings. Close the running app on the iPhone to end its console session, then build and run again to apply the selected server."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+const DEVICE_LIVE_RELOAD_SCRIPT: &str = include_str!("device_live_reload.py");
+
+/// Only the disposable app copy receives the development URL. Cancellation at any point
+/// leaves the synchronized source and Xcode's reusable build product unchanged.
+#[allow(clippy::too_many_arguments)]
+fn prepare_device_live_reload(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+    source: &str,
+    destination: &str,
+    url: &str,
+    helper_path: &str,
+    signing: &DeviceSigning<'_>,
+    keychain_password: &str,
+) -> Result<(), ProviderError> {
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "source": source,
+        "destination": destination,
+        "url": url,
+    }))
+    .map_err(|error| {
+        ProviderError::GuestBridge(format!("could not prepare live reload: {error}"))
+    })?;
+    let mut child = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
+        .arg(format!(
+            "/usr/bin/python3 -c {}",
+            shell_single_quote(DEVICE_LIVE_RELOAD_SCRIPT)
+        ))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .tracked_spawn()
+        .map_err(|error| {
+            ProviderError::GuestBridge(format!("could not prepare live reload: {error}"))
+        })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| ProviderError::GuestBridge("could not open live reload input".into()))?;
+    stdin.write_all(&payload).map_err(|error| {
+        ProviderError::GuestBridge(format!("could not send live reload settings: {error}"))
+    })?;
+    drop(stdin);
+    let output = child.wait_with_output().map_err(|error| {
+        ProviderError::GuestBridge(format!("could not finish preparing live reload: {error}"))
+    })?;
+    if !output.status.success() {
+        return Err(ProviderError::GuestBridge(format!(
+            "could not prepare the live reload app: {}",
+            clean_output(&output.stderr)
+        )));
+    }
+
+    let mut child = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
+        .arg(format!(
+            "{} --device-resign {} {} {}",
+            shell_single_quote(helper_path),
+            shell_single_quote(signing.keychain_path),
+            shell_single_quote(signing.identity_sha1),
+            shell_single_quote(destination),
+        ))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .tracked_spawn()
+        .map_err(|error| {
+            ProviderError::GuestBridge(format!("could not sign the live reload app: {error}"))
+        })?;
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        ProviderError::GuestBridge("could not open protected signing input".into())
+    })?;
+    write_secret_frame(&mut stdin, keychain_password)?;
+    drop(stdin);
+    let output = child.wait_with_output().map_err(|error| {
+        ProviderError::GuestBridge(format!(
+            "could not finish signing the live reload app: {error}"
+        ))
+    })?;
+    if !output.status.success() {
+        return Err(ProviderError::GuestBridge(format!(
+            "could not sign the live reload app: {}",
+            clean_output(&output.stderr)
+        )));
+    }
+    Ok(())
 }
 
 /// Lines from `devicectl` worth surfacing on their own: what it prints when the phone is
@@ -1527,6 +1665,7 @@ pub fn run_apple_device_build<F>(
     keychain_password: &str,
     env: Option<&GuestEnvFiles>,
     version: Option<&ProjectVersion>,
+    live_reload_url: Option<&str>,
     mut on_progress: F,
 ) -> Result<AppleDeviceRunResult, ProviderError>
 where
@@ -1535,6 +1674,16 @@ where
     validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
     validate_signing_target(signing.development_team, signing.bundle_identifier)?;
     validate_layout(layout)?;
+    let live_reload_url = live_reload_url
+        .map(crate::normalize_apple_live_reload_url)
+        .transpose()
+        .map_err(ProviderError::GuestBridge)?;
+    if live_reload_url.is_some() && layout.kind != ProjectKind::Capacitor {
+        return Err(ProviderError::GuestBridge(
+            "Live reload is supported for Capacitor projects. Native and plugin changes still require a new build."
+                .into(),
+        ));
+    }
     let scheme: &str = layout
         .ios
         .as_ref()
@@ -1587,6 +1736,7 @@ where
     let container_args = ios_container_args(layout, &workspace_root);
     let env_source = guest_env_source(&workspace_root);
     let derived_data = format!("{workspace_root}/.buildbridge/DerivedData");
+    let live_reload_root = format!("{workspace_root}/.buildbridge/DeviceLiveReload");
     let operation_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1611,6 +1761,21 @@ where
 
     let mut build_tail = Vec::new();
     let mut meta = None;
+    if reattached {
+        let record = run_guest_command(
+            ssh_port,
+            username,
+            identity_path,
+            known_hosts_path,
+            &format!(
+                "/bin/cat {}",
+                shell_single_quote(&format!("{job_dir}/meta"))
+            ),
+        )?;
+        let existing = parse_device_run_meta(record.trim_end_matches(['\r', '\n']))?;
+        validate_device_run_request(&existing, &device.identifier, live_reload_url.as_deref())?;
+        meta = Some(existing);
+    }
     if !reattached {
         on_progress(device_progress(
             AppleDeviceRunPhase::Preparing,
@@ -1624,7 +1789,7 @@ where
             identity_path,
             known_hosts_path,
             &format!(
-                "set -eu; /bin/mkdir -p {} {} {}; /bin/chmod 700 {}; /bin/rm -rf {} {}; /bin/mkdir -p {}; /bin/chmod 700 {}",
+                "set -eu; /bin/mkdir -p {} {} {}; /bin/chmod 700 {}; /bin/rm -rf {} {} {}; /bin/mkdir -p {}; /bin/chmod 700 {}",
                 shell_single_quote(&guest_tools),
                 shell_single_quote(&format!(
                     "{guest_home}/Library/Caches/dev.buildbridge.desktop"
@@ -1633,6 +1798,7 @@ where
                 shell_single_quote(&guest_tools),
                 shell_single_quote(&staging),
                 shell_single_quote(&job_dir),
+                shell_single_quote(&live_reload_root),
                 shell_single_quote(&staging),
                 shell_single_quote(&staging),
             ),
@@ -1769,6 +1935,31 @@ where
                 device_phase_detail(AppleDeviceRunPhase::Verifying),
                 Vec::new(),
             ));
+            if let Some(url) = &live_reload_url {
+                let note = format!(
+                    "Preparing the iPhone app for live reload from {url}. Allow Local Network access on the phone when asked."
+                );
+                on_progress(device_progress(
+                    AppleDeviceRunPhase::Verifying,
+                    started_at,
+                    &note,
+                    vec![note.clone()],
+                ));
+                let live_app = format!("{live_reload_root}/{operation_id}/App.app");
+                prepare_device_live_reload(
+                    ssh_port,
+                    username,
+                    identity_path,
+                    known_hosts_path,
+                    &target.product_path,
+                    &live_app,
+                    url,
+                    &helper_binary,
+                    signing,
+                    keychain_password,
+                )?;
+                target.product_path = live_app;
+            }
             let inspection_output = run_guest_command(
                 ssh_port,
                 username,
@@ -1818,6 +2009,7 @@ where
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            live_reload_url: live_reload_url.clone(),
         });
     }
 
@@ -1825,6 +2017,7 @@ where
     // only tails. An empty body keeps the script well-formed.
     let body = meta
         .as_ref()
+        .filter(|_| !reattached)
         .map(|meta| {
             device_run_job_body(
                 &developer_dir,
@@ -1838,12 +2031,7 @@ where
         .as_ref()
         .map(encode_device_run_meta)
         .unwrap_or_default();
-    let script = guest_job_script(
-        DEVICE_RUN_JOB,
-        &guest_tools,
-        &shell_single_quote(&meta_line),
-        &body,
-    );
+    let script = guest_job_script(DEVICE_RUN_JOB, &guest_tools, "\"$(/bin/cat)\"", &body);
 
     on_progress(device_progress(
         AppleDeviceRunPhase::Installing,
@@ -1853,13 +2041,20 @@ where
     ));
     let mut child = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
         .arg(script)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .tracked_spawn()
         .map_err(|error| {
             ProviderError::GuestBridge(format!("could not start the device session: {error}"))
         })?;
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        ProviderError::GuestBridge("could not open the device session metadata input".into())
+    })?;
+    stdin.write_all(meta_line.as_bytes()).map_err(|error| {
+        ProviderError::GuestBridge(format!("could not send device session metadata: {error}"))
+    })?;
+    drop(stdin);
     let stdout = child.stdout.take().ok_or_else(|| {
         ProviderError::GuestBridge("could not capture the device session output".to_string())
     })?;
@@ -1902,9 +2097,9 @@ where
             continue;
         }
         if line.starts_with(META_PREFIX) {
-            if meta.is_none() {
-                meta = Some(parse_device_run_meta(&line)?);
-            }
+            let existing = parse_device_run_meta(&line)?;
+            validate_device_run_request(&existing, &device.identifier, live_reload_url.as_deref())?;
+            meta = Some(existing);
             continue;
         }
         let line = sanitize_build_log_line(&line);
@@ -2011,6 +2206,7 @@ where
         device: device.clone(),
         bundle_identifier: meta.bundle_identifier,
         project_bundle_identifier,
+        live_reload_url: meta.live_reload_url,
         app_path: meta.app_path,
         marketing_version: meta.marketing_version,
         build_number: meta.build_number,
@@ -2027,6 +2223,67 @@ where
 #[cfg(test)]
 mod run_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn iphone_live_reload_recipe_preserves_sources_and_scopes_network_permissions() {
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(include_str!("device_live_reload_test.py"))
+            .arg(DEVICE_LIVE_RELOAD_SCRIPT)
+            .output()
+            .expect("Python runs the same app-copy recipe used in macOS");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[test]
+    fn reattached_iphone_sessions_must_match_the_device_and_live_reload_url() {
+        let legacy = "__BUILDBRIDGE_DEVICE_RUN_META__\tE3F1A2B4-5C6D-4E7F-8A9B-0C1D2E3F4A5B\tcom.example.app\t/Users/b/App.app\t22222222-3333-4444-5555-666666666666\t3.2.0\t15\t1756900000";
+        let mut meta =
+            parse_device_run_meta(legacy).expect("existing packaged app sessions remain readable");
+        assert_eq!(meta.live_reload_url, None);
+        assert!(validate_device_run_request(&meta, &meta.device_identifier, None).is_ok());
+        assert!(
+            validate_device_run_request(
+                &meta,
+                &meta.device_identifier,
+                Some("http://dev.local:5173/")
+            )
+            .is_err()
+        );
+        assert!(validate_device_run_request(&meta, "another-phone", None).is_err());
+        meta.live_reload_url = Some("http://dev.local:5173/".into());
+        assert_eq!(
+            parse_device_run_meta(&encode_device_run_meta(&meta)).unwrap(),
+            meta
+        );
+        assert!(
+            validate_device_run_request(
+                &meta,
+                &meta.device_identifier,
+                Some("http://dev.local:5173/")
+            )
+            .is_ok()
+        );
+        assert!(validate_device_run_request(&meta, &meta.device_identifier, None).is_err());
+        assert!(
+            validate_device_run_request(
+                &meta,
+                &meta.device_identifier,
+                Some("http://other.local:5173/")
+            )
+            .is_err()
+        );
+        assert!(parse_device_run_meta(&format!("{legacy}\thttp://localhost:5173/")).is_err());
+        assert!(
+            parse_device_run_meta(&format!("{legacy}\thttp://dev.local/?password=secret")).is_err()
+        );
+    }
 
     #[test]
     fn device_build_targets_are_read_and_bounded() {
@@ -2082,6 +2339,7 @@ mod run_tests {
             marketing_version: "3.2.0".to_string(),
             build_number: "15".to_string(),
             installed_at_epoch_seconds: 1_756_900_000,
+            live_reload_url: None,
         };
         let encoded = encode_device_run_meta(&meta);
         assert_eq!(parse_device_run_meta(&encoded).expect("round trip"), meta);

@@ -713,6 +713,63 @@ cleanup:
     return result;
 }
 
+/*
+ * Live reload changes resources in a disposable copy of the signed Debug app. Keep the
+ * original app's entitlements and identity metadata; nested frameworks and extensions were
+ * not changed, so only the outer app is signed again. The same interruption cleanup used
+ * for builds locks the keychain even if the desktop disconnects during codesign.
+ */
+static int run_device_resign(int argc, char **argv) {
+    if (argc != 5) {
+        fprintf(stderr, "invalid_device_resign_arguments\n");
+        return 1;
+    }
+
+    uint32_t keychain_password_length = 0;
+    unsigned char *keychain_password = read_secret(&keychain_password_length);
+    if (keychain_password == NULL) {
+        fprintf(stderr, "invalid_secret_payload\n");
+        return 1;
+    }
+
+    int result = 1;
+    SecKeychainRef keychain = NULL;
+    int unlock = open_and_unlock_keychain(
+        argv[2], &keychain, keychain_password, keychain_password_length
+    );
+    if (unlock != 0) {
+        result = unlock;
+        goto cleanup;
+    }
+
+    char *sign_arguments[] = {
+        "/usr/bin/codesign",
+        "--force",
+        "--sign",
+        argv[3],
+        "--keychain",
+        argv[2],
+        "--preserve-metadata=identifier,entitlements,requirements,flags,runtime",
+        "--generate-entitlement-der",
+        argv[4],
+        NULL,
+    };
+    if (!run_tool("/usr/bin/codesign", sign_arguments)) {
+        fprintf(stderr, "live_reload_codesign_failed\n");
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    if (keychain != NULL) {
+        SecKeychainLock(keychain);
+        CFRelease(keychain);
+    }
+    secure_zero(keychain_password, keychain_password_length);
+    free(keychain_password);
+    return result;
+}
+
 int main(int argc, char **argv) {
     /* Every mode puts something back on the way out, so none of them may die on a signal. */
     catch_interruptions();
@@ -724,6 +781,9 @@ int main(int argc, char **argv) {
     }
     if (argc > 1 && strcmp(argv[1], "--device-build") == 0) {
         return run_device_build(argc, argv);
+    }
+    if (argc > 1 && strcmp(argv[1], "--device-resign") == 0) {
+        return run_device_resign(argc, argv);
     }
     /* --add imports a second identity into the keychain the first import created. */
     int add_mode = 0;

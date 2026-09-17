@@ -127,13 +127,15 @@ pub(crate) async fn sync_android_workspace_with_env(
 /// The debug build: the Android counterpart of the unsigned test build. The first run also
 /// prepares the toolchain, which is where its download shows its progress. `allow_http` applies
 /// only to this APK; neither the workspace nor a subsequent release inherits the override.
-/// The debug build. A requested version is written into the project on the host and into
+/// A live reload URL points a Capacitor debug APK at an already running development server.
+/// A requested version is written into the project on the host and into
 /// the synced copy in the container first, so the project and the APK say the same thing.
 pub async fn run_android_debug_build(
     app: &Engine,
     machine_id: String,
     allow_http: bool,
     version: Option<ProjectVersionInput>,
+    live_reload_url: Option<String>,
 ) -> Result<RunAndroidBuildResult, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;
     ensure_android_machine(app, &machine_id)?;
@@ -143,10 +145,23 @@ pub async fn run_android_debug_build(
     if workspace.last_snapshot_sha256.is_none() {
         return Err("Synchronize the approved project before running a debug build.".to_string());
     }
+    let live_reload_url = live_reload_url
+        .as_deref()
+        .map(buildbridge_machines::normalize_live_reload_url)
+        .transpose()?;
+    if live_reload_url.is_some() && workspace.layout.kind != ProjectKind::Capacitor {
+        return Err("Live reload is available for Capacitor Android projects.".to_string());
+    }
     let requested_version =
         resolve_android_project_version(&workspace.local_path, &workspace.layout, version)?;
     let current = build_machine_view(app, &paths).await?;
     ensure_android_container_ready(&current)?;
+    if let Some(url) = &live_reload_url {
+        crate::live_reload::check_live_reload_server(url).await?;
+    }
+    if guard.scope().is_cancelled() {
+        return Err(CANCELLED_MESSAGE.to_string());
+    }
     // Hold the operation lock before removing the previous APK so an in-flight device
     // installation can finish reading it. A new debug build replaces this retained output.
     remove_android_debug_outputs(&paths)?;
@@ -183,6 +198,7 @@ pub async fn run_android_debug_build(
             &operation_output_directory,
             allow_http,
             requested_version.as_ref(),
+            live_reload_url.as_deref(),
             |progress: AndroidBuildProgress| {
                 emit_machine_progress(
                     &event_app,
@@ -420,7 +436,7 @@ mod operation_tests {
             let errors = [
                 clear_android_workspace(&app, id.clone()).await.unwrap_err(),
                 clear_android_release(&app, id.clone()).await.unwrap_err(),
-                run_android_debug_build(&app, id.clone(), false, None)
+                run_android_debug_build(&app, id.clone(), false, None, None)
                     .await
                     .unwrap_err(),
                 run_android_signed_release(&app, id.clone(), None, None, None)

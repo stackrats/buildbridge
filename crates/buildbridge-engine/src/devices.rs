@@ -480,6 +480,9 @@ pub struct RunAppleDeviceBuildInput {
     /// A version to build with, written into the project first; none builds it as synced.
     #[serde(default)]
     pub(crate) version: Option<ProjectVersionInput>,
+    // A phone-reachable development server for this Capacitor Debug run only.
+    #[serde(default)]
+    pub(crate) live_reload_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -544,6 +547,14 @@ pub async fn run_apple_device_build(
     if !workspace.last_build_succeeded || workspace.last_snapshot_sha256.is_none() {
         return Err("Complete the unsigned project test build first.".to_string());
     }
+    let live_reload_url = input
+        .live_reload_url
+        .as_deref()
+        .map(buildbridge_machines::normalize_apple_live_reload_url)
+        .transpose()?;
+    if live_reload_url.is_some() && workspace.layout.kind != ProjectKind::Capacitor {
+        return Err("Live reload is available for Capacitor iPhone projects.".to_string());
+    }
     let requested_version =
         resolve_apple_project_version(&workspace.local_path, &workspace.layout, input.version)?;
     let current = build_machine_view(app, &paths).await?;
@@ -599,6 +610,12 @@ pub async fn run_apple_device_build(
     let known_hosts_path = paths.known_hosts();
     let layout = workspace.layout.clone();
     let guard = begin_machine_operation(app, &machine_id, "running_on_device")?;
+    if let Some(url) = &live_reload_url {
+        crate::live_reload::check_live_reload_server(url).await?;
+    }
+    if guard.scope().is_cancelled() {
+        return Err(CANCELLED_MESSAGE.to_string());
+    }
     // The project takes the version before the build does, so it is never behind the phone.
     if let Some(version) = &requested_version
         && let Err(error) =
@@ -632,6 +649,7 @@ pub async fn run_apple_device_build(
             &keychain_password,
             chosen_env.as_ref().map(|(_, files)| files),
             requested_version.as_ref(),
+            live_reload_url.as_deref(),
             |progress: AppleDeviceRunProgress| {
                 emit_machine_progress(
                     &event_app,

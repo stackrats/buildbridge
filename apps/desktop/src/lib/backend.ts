@@ -158,6 +158,7 @@ export interface Backend {
         machineId: string,
         allowHttp?: boolean,
         version?: T.ProjectVersionInput | null,
+        liveReloadUrl?: string | null,
     ): Promise<T.RunAndroidBuildResult>;
     /**
      * Selected signed release files, both by default, with the attached kit's key. `version`
@@ -220,13 +221,15 @@ export interface Backend {
     /** Returns when the console session ends; a Stop while running is the normal end. */
     /**
      * `envSetId` rebuilds the web assets with that environment for this run alone; `version`
-     * sets the version in the project and in this Debug build for the phone.
+     * sets the version in the project and in this Debug build for the phone. `liveReloadUrl`
+     * makes a Capacitor Debug app load a dev server reachable from the iPhone.
      */
     runAppleDeviceBuild(
         machineId: string,
         udid: string,
         envSetId?: string | null,
         version?: T.ProjectVersionInput | null,
+        liveReloadUrl?: string | null,
     ): Promise<T.RunAppleDeviceResult>;
     clearAppleDeviceRun(machineId: string): Promise<T.MachineView>;
 
@@ -422,8 +425,12 @@ async function createTauriBackend(): Promise<Backend> {
             invoke('approve_android_workspace', { machineId, input: { path, module } }),
         clearAndroidWorkspace: (machineId) => invoke('clear_android_workspace', { machineId }),
         syncAndroidWorkspace: (machineId) => invoke('sync_android_workspace', { machineId }),
-        runAndroidDebugBuild: (machineId, allowHttp = false, version = null) =>
-            invoke('run_android_debug_build', { machineId, allowHttp, version }),
+        runAndroidDebugBuild: (
+            machineId,
+            allowHttp = false,
+            version = null,
+            liveReloadUrl = null,
+        ) => invoke('run_android_debug_build', { machineId, allowHttp, version, liveReloadUrl }),
         runAndroidRelease: (machineId, envSetId, outputs = 'both', version = null) =>
             invoke('run_android_signed_release', { machineId, envSetId, outputs, version }),
         revealAndroidRelease: (machineId) => invoke('reveal_android_release', { machineId }),
@@ -461,8 +468,17 @@ async function createTauriBackend(): Promise<Backend> {
                 machineId,
                 input: { udid, deviceName, confirmed: true },
             }),
-        runAppleDeviceBuild: (machineId, udid, envSetId = null, version = null) =>
-            invoke('run_apple_device_build', { machineId, input: { udid, envSetId, version } }),
+        runAppleDeviceBuild: (
+            machineId,
+            udid,
+            envSetId = null,
+            version = null,
+            liveReloadUrl = null,
+        ) =>
+            invoke('run_apple_device_build', {
+                machineId,
+                input: { udid, envSetId, version, liveReloadUrl },
+            }),
         clearAppleDeviceRun: (machineId) => invoke('clear_apple_device_run', { machineId }),
 
         listSigningKits: () => invoke('list_signing_kits'),

@@ -12,6 +12,7 @@ import { deriveJourney, summarizeJourney, type JourneyStep } from '../model/step
 import { androidOutputLabel } from '../model/android-outputs';
 import { appleUploadBlocker, type AppleArchiveUpload } from '../model/apple-upload';
 import { androidDeviceApks, type AndroidDeviceRun } from '../model/android-device';
+import { liveReloadUrlIssue } from '../model/live-reload';
 import { googlePlayUploadBlocker, type GooglePlayUpload } from '../model/google-play-upload';
 import type { StoreBuildsState } from '../model/version';
 import { useMachineOrder } from './machine-order';
@@ -112,6 +113,8 @@ export interface MachineSession {
     usbAttach: UsbAttachProgress | null;
     deviceSigning: DeviceSigningProgress | null;
     device: AppleDeviceRunProgress | null;
+    /** The iPhone run's frozen dev server URL, independent of the next run's draft. */
+    deviceLiveReloadUrl: string | null;
     buildLog: LogLine[];
     archiveLog: LogLine[];
     /** The app's own console while it runs on the phone; an Android machine's app log too. */
@@ -188,6 +191,7 @@ function createSession(id: string): MachineSession {
         usbAttach: null,
         deviceSigning: null,
         device: null,
+        deviceLiveReloadUrl: null,
         buildLog: [],
         archiveLog: [],
         deviceLog: [],
@@ -1036,6 +1040,7 @@ export function useMachinesStore() {
             id: string,
             allowHttp = false,
             version: ProjectVersionInput | null = null,
+            liveReloadUrl: string | null = null,
         ) => {
             const target = session(id);
             return runOperation(
@@ -1044,7 +1049,7 @@ export function useMachinesStore() {
                 () => {
                     target.androidBuild = null;
                     target.buildLog = [];
-                    return useBackend().runAndroidDebugBuild(id, allowHttp, version);
+                    return useBackend().runAndroidDebugBuild(id, allowHttp, version, liveReloadUrl);
                 },
                 {
                     started: 'Running the debug build',
@@ -1667,14 +1672,30 @@ export function useMachinesStore() {
             udid: string,
             envSetId: string | null = null,
             version: ProjectVersionInput | null = null,
+            liveReloadUrl: string | null = null,
         ) => {
             const target = session(id);
-            target.device = null;
-            target.deviceLog = [];
+            if (liveReloadUrl !== null) {
+                const issue = liveReloadUrlIssue(liveReloadUrl, 'ios');
+                if (issue) {
+                    target.error = issue;
+                    return null;
+                }
+                if (target.view?.appleWorkspace?.layout.kind !== 'capacitor') {
+                    target.error = 'Live reload requires a Capacitor project.';
+                    return null;
+                }
+            }
+            const serverUrl = liveReloadUrl?.trim() ?? null;
             return runOperation(
                 id,
                 'run-device',
-                () => useBackend().runAppleDeviceBuild(id, udid, envSetId, version),
+                () => {
+                    target.device = null;
+                    target.deviceLog = [];
+                    target.deviceLiveReloadUrl = serverUrl;
+                    return useBackend().runAppleDeviceBuild(id, udid, envSetId, version, serverUrl);
+                },
                 {
                     started: 'Building the Debug configuration for the iPhone',
                     finished: (result) =>

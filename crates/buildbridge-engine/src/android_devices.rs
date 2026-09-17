@@ -73,44 +73,76 @@ pub async fn run_android_device(
     let cancel_probe = Arc::clone(&scope);
     let event_app = app.clone();
     let event_machine_id = machine_id.clone();
-    let record_paths = paths.clone();
-    let joined = tokio::task::spawn_blocking(move || {
-        let _operation = buildbridge_machines::enter_operation(scope);
+    let joined = async {
         // Read the record after claiming the machine; every hash/path comes from that record.
-        let (application_id, artifact, version_name, version_code) = match input.kind {
+        let (application_id, artifact, version_name, version_code, live_reload_url) = match input.kind {
             AndroidDeviceBuildKind::Debug => {
-                let build = load_android_workspace(&record_paths)?.and_then(|workspace| workspace.last_build)
-                    .ok_or_else(|| "Build and retain a debug APK before running it on a device.".to_string())?;
-                let apk = build.apk.ok_or_else(|| "No debug APK is retained. Run a new debug build.".to_string())?;
-                (build.application_id, apk, build.version_name, build.version_code)
+                let build = load_android_workspace(&paths)?
+                    .and_then(|workspace| workspace.last_build)
+                    .ok_or_else(|| {
+                        "Build and retain a debug APK before running it on a device.".to_string()
+                    })?;
+                let apk = build.apk.ok_or_else(|| {
+                    "No debug APK is retained. Run a new debug build.".to_string()
+                })?;
+                (
+                    build.application_id,
+                    apk,
+                    build.version_name,
+                    build.version_code,
+                    build.live_reload_url,
+                )
             }
             AndroidDeviceBuildKind::Release => {
-                let release = load_android_release(&record_paths)?
-                    .ok_or_else(|| "Build and retain a release APK before running it on a device.".to_string())?.result;
+                let release = load_android_release(&paths)?
+                    .ok_or_else(|| {
+                        "Build and retain a release APK before running it on a device.".to_string()
+                    })?
+                    .result;
                 let apk = release.apk.ok_or_else(|| "This release contains only an app bundle. Build a release APK to run it on a device.".to_string())?;
-                (release.application_id, apk, release.version_name, release.version_code)
+                (
+                    release.application_id,
+                    apk,
+                    release.version_name,
+                    release.version_code,
+                    None,
+                )
             }
         };
-        let apk = reviewed_android_apk_path(&record_paths, &artifact, input.kind, &input.expected_sha256)?;
-        verify_android_apk(&apk, artifact.bytes, &input.expected_sha256)?;
-        let run = buildbridge_machines::run_host_android_device(
-            &input.serial,
-            &application_id,
-            &apk,
+        let apk = reviewed_android_apk_path(
+            &paths,
+            &artifact,
+            input.kind,
             &input.expected_sha256,
-            |progress| {
-                emit_machine_progress(
-                    &event_app,
-                    ANDROID_DEVICE_RUN_PROGRESS_EVENT,
-                    &event_machine_id,
-                    progress,
-                );
-            },
         )?;
-        Ok((run, version_name, version_code))
-    })
-    .await
-    .map_err(|error| error.to_string());
+        if let Some(url) = &live_reload_url {
+            let url = buildbridge_machines::normalize_live_reload_url(url)?;
+            crate::live_reload::check_live_reload_server(&url).await?;
+        }
+        tokio::task::spawn_blocking(move || {
+            let _operation = buildbridge_machines::enter_operation(scope);
+            verify_android_apk(&apk, artifact.bytes, &input.expected_sha256)?;
+            let run = buildbridge_machines::run_host_android_device(
+                &input.serial,
+                &application_id,
+                &apk,
+                &input.expected_sha256,
+                live_reload_url.as_deref(),
+                |progress| {
+                    emit_machine_progress(
+                        &event_app,
+                        ANDROID_DEVICE_RUN_PROGRESS_EVENT,
+                        &event_machine_id,
+                        progress,
+                    );
+                },
+            )?;
+            Ok((run, version_name, version_code))
+        })
+        .await
+        .map_err(|error| error.to_string())
+    }
+    .await;
     drop(guard);
     let (run, version_name, version_code) = match finish_operation(&cancel_probe, joined) {
         Ok(value) => value,

@@ -5,4 +5,4 @@ export type RunAppleDeviceBuildInput = { udid: string, envSetId: string | null,
 /**
  * A version to build with, written into the project first; none builds it as synced.
  */
-version: ProjectVersionInput | null, };
+version: ProjectVersionInput | null, liveReloadUrl: string | null, };

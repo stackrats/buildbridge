@@ -89,6 +89,22 @@ beforeEach(() => {
 });
 
 describe('Android host device automation', () => {
+    it('forwards the live reload URL with the version and HTTP choice to the backend', async () => {
+        const { store, session, view } = await fixture();
+        const liveReloadUrl = 'http://localhost:5173';
+        const version = { version: '4.0', build: '40' };
+        backend.runAndroidDebugBuild.mockResolvedValue({
+            view,
+            build: { ...view.android!.workspace!.lastBuild!, liveReloadUrl },
+        });
+        await store.debugBuild(session.id, false, version, liveReloadUrl);
+        expect(backend.runAndroidDebugBuild).toHaveBeenCalledWith(
+            session.id,
+            false,
+            version,
+            liveReloadUrl,
+        );
+    });
     it.each([false, true])(
         'forwards the debug HTTP override %s to the backend',
         async (allowHttp) => {
@@ -97,7 +113,12 @@ describe('Android host device automation', () => {
             backend.runAndroidDebugBuild.mockResolvedValue({ view, build });
             if (allowHttp) await store.debugBuild(session.id, true);
             else await store.debugBuild(session.id);
-            expect(backend.runAndroidDebugBuild).toHaveBeenCalledWith(session.id, allowHttp, null);
+            expect(backend.runAndroidDebugBuild).toHaveBeenCalledWith(
+                session.id,
+                allowHttp,
+                null,
+                null,
+            );
         },
     );
 

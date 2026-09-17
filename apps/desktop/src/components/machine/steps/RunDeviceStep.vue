@@ -21,6 +21,7 @@ import {
     usbMigrationPhaseLabel,
 } from '../../../model/phases';
 import { requestedVersion } from '../../../model/build-flow';
+import { appleRunStopDescription, liveReloadUrlIssue } from '../../../model/live-reload';
 import { hasWebAssets } from '../../../model/project-layout';
 import type { JourneyStep } from '../../../model/steps';
 import { useBuildFlowStore } from '../../../stores/build-flow';
@@ -42,7 +43,17 @@ import DeviceRunCard from '../DeviceRunCard.vue';
 const { session, step } = defineProps<{ session: MachineSession; step: JourneyStep }>();
 const machines = useMachinesStore();
 // The version fields share the machine's build draft with the build page and the test step.
-const draft = useBuildFlowStore().draft(session.id);
+const flows = useBuildFlowStore();
+const draft = flows.draft(session.id);
+const preview = computed(() => flows.previewDraft(session.id));
+const liveReload = computed(
+    () =>
+        session.view?.appleWorkspace?.layout.kind === 'capacitor' &&
+        preview.value.liveReloadEnabled,
+);
+const liveReloadIssue = computed(() =>
+    liveReload.value ? liveReloadUrlIssue(preview.value.liveReloadUrl, 'ios') : null,
+);
 // The env is chosen per run: the web assets are rebuilt inside the guest with it before the
 // Debug build, without changing what the next build starts from. Preselects the set the last
 // copy used.
@@ -219,7 +230,7 @@ const strip = computed(() => {
         const progress = session.device;
         return {
             label: streaming.value
-                ? `Live on ${readiness.value.name}`
+                ? `${session.deviceLiveReloadUrl ? 'Live reload' : 'Live'} on ${readiness.value.name}`
                 : progress
                   ? devicePhaseLabel[progress.phase]
                   : 'Preparing the recipe',
@@ -231,7 +242,7 @@ const strip = computed(() => {
             lastLine: session.deviceLog.at(-1)?.text ?? null,
             stoppable: true,
             stopTitle: streaming.value
-                ? 'Ends the console session. The app stays installed and running on the iPhone.'
+                ? appleRunStopDescription(session.deviceLiveReloadUrl)
                 : undefined,
         };
     }
@@ -391,6 +402,7 @@ const primary = computed<DevicePrimary | null>(() => {
                 disabledReason: streaming.value
                     ? 'Stop the console session to run again'
                     : (needsLive() ??
+                      liveReloadIssue.value ??
                       (device.value?.udid ? null : 'The guest has not read the UDID yet')),
                 run: () =>
                     machines.runOnDevice(
@@ -398,6 +410,7 @@ const primary = computed<DevicePrimary | null>(() => {
                         device.value?.udid ?? '',
                         envSetId.value || null,
                         requestedVersion(view.value, draft),
+                        liveReload.value ? preview.value.liveReloadUrl : null,
                     ),
             };
     }

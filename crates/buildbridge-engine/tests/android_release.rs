@@ -119,8 +119,14 @@ async fn release_a_real_project() -> Result<(), String> {
         );
 
         let built = as_json(
-            buildbridge_engine::run_android_debug_build(&engine, machine_id.clone(), false, None)
-                .await?,
+            buildbridge_engine::run_android_debug_build(
+                &engine,
+                machine_id.clone(),
+                false,
+                None,
+                None,
+            )
+            .await?,
         );
         eprintln!(
             "== debug build: {} {} ({}) with {} / build tools {} after {:?}",

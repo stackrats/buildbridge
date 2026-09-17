@@ -979,7 +979,7 @@ pub(crate) async fn run_remote_android_release(
     sync_android_workspace_with_env(app, &payload.machine_id, source, Some(env_set_id.clone()))
         .await?;
     ensure_remote_active(aborted)?;
-    run_android_debug_build(app, payload.machine_id.clone(), false, None).await?;
+    run_android_debug_build(app, payload.machine_id.clone(), false, None, None).await?;
     ensure_remote_active(aborted)?;
     let released =
         run_android_signed_release(app, payload.machine_id.clone(), env_set_id, None, None).await?;

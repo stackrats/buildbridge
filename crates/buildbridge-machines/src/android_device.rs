@@ -161,6 +161,7 @@ pub fn run_host_android_device<F>(
     application_id: &str,
     apk: &Path,
     expected_sha256: &str,
+    live_reload_url: Option<&str>,
     on_progress: F,
 ) -> Result<AndroidDeviceRunResult, String>
 where
@@ -173,6 +174,7 @@ where
         application_id,
         apk,
         expected_sha256,
+        live_reload_url,
         on_progress,
     )
 }
@@ -561,11 +563,16 @@ fn run_device_with<F>(
     application_id: &str,
     apk: &Path,
     expected_sha256: &str,
+    live_reload_url: Option<&str>,
     mut on_progress: F,
 ) -> Result<AndroidDeviceRunResult, String>
 where
     F: FnMut(AndroidDeviceRunProgress),
 {
+    let reverse_port = live_reload_url
+        .map(live_reload_reverse_port)
+        .transpose()?
+        .flatten();
     if !valid_serial(serial) {
         return Err("Select a valid Android device serial from the device list.".into());
     }
@@ -614,6 +621,9 @@ where
     if !booted.success || booted.text.trim() != "1" {
         return Err("The selected Android device has not finished booting. Unlock it and try again once Android is ready.".into());
     }
+    let _reverse = reverse_port
+        .map(|port| AndroidReverseGuard::connect(adb, serial, port))
+        .transpose()?;
     // The source may be edited outside buildbridge while ADB probes the phone. Install a
     // private copy whose bytes we verify now, rather than reopening that mutable source.
     report(AndroidDeviceRunPhase::Staging);
@@ -722,6 +732,107 @@ where
         installed_at_epoch_seconds,
         console_end,
         console_tail,
+    })
+}
+
+/// Own only the mapping this run creates. A pre-existing matching mapping belongs to its
+/// creator, while a different mapping must never be rebound by a development run.
+struct AndroidReverseGuard<'a> {
+    adb: &'a Path,
+    serial: &'a str,
+    endpoint: String,
+    owned: bool,
+}
+
+impl<'a> AndroidReverseGuard<'a> {
+    fn connect(adb: &'a Path, serial: &'a str, port: u16) -> Result<Self, String> {
+        let endpoint = format!("tcp:{port}");
+        let listing = adb_output(
+            Command::new(adb).args(["-s", serial, "reverse", "--list"]),
+            ADB_PROBE_TIMEOUT,
+        )?;
+        if !listing.success {
+            return Err("ADB could not inspect live reload connections. Reconnect the selected device and retry.".into());
+        }
+        let existing = reverse_destination(&listing.text, &endpoint);
+        if existing.is_some_and(|destination| destination != endpoint) {
+            return Err(format!(
+                "The device's port {port} already forwards to another destination. Choose another development server port or remove that ADB reverse mapping before running."
+            ));
+        }
+        let mut guard = Self {
+            adb,
+            serial,
+            endpoint,
+            owned: false,
+        };
+        if existing.is_some() {
+            return Ok(guard);
+        }
+        // This short setup is bounded but not cancelled between its successful remote
+        // mutation and the ownership record. A Stop is observed by the next operation,
+        // which drops this guard and removes the mapping.
+        let connected = adb_output_with_cancellation(
+            Command::new(adb).args([
+                "-s",
+                serial,
+                "reverse",
+                "--no-rebind",
+                &guard.endpoint,
+                &guard.endpoint,
+            ]),
+            PROCESS_PROBE_TIMEOUT,
+            false,
+        )?;
+        if !connected.success {
+            return Err(format!(
+                "ADB could not connect the device to development server port {port}. Check that ADB reverse is supported and the device port is free."
+            ));
+        }
+        guard.owned = true;
+        Ok(guard)
+    }
+}
+
+impl Drop for AndroidReverseGuard<'_> {
+    fn drop(&mut self) {
+        if !self.owned {
+            return;
+        }
+        // Cleanup must still run after Stop, when the operation refuses all tracked
+        // processes. Bound both commands and leave a mapping another client replaced.
+        let listing = adb_output_with_cancellation(
+            Command::new(self.adb).args(["-s", self.serial, "reverse", "--list"]),
+            PROCESS_PROBE_TIMEOUT,
+            false,
+        );
+        if listing.is_ok_and(|listing| {
+            listing.success
+                && reverse_destination(&listing.text, &self.endpoint)
+                    == Some(self.endpoint.as_str())
+        }) {
+            let _ = adb_output_with_cancellation(
+                Command::new(self.adb).args([
+                    "-s",
+                    self.serial,
+                    "reverse",
+                    "--remove",
+                    &self.endpoint,
+                ]),
+                PROCESS_PROBE_TIMEOUT,
+                false,
+            );
+        }
+    }
+}
+
+fn reverse_destination<'a>(listing: &'a str, endpoint: &str) -> Option<&'a str> {
+    listing.lines().find_map(|line| {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        match fields.as_slice() {
+            [_, source, destination] if *source == endpoint => Some(*destination),
+            _ => None,
+        }
     })
 }
 
@@ -1068,6 +1179,14 @@ impl Drop for AdbCapture {
 }
 
 fn adb_output(command: &mut Command, timeout: Duration) -> Result<AdbOutput, String> {
+    adb_output_with_cancellation(command, timeout, true)
+}
+
+fn adb_output_with_cancellation(
+    command: &mut Command,
+    timeout: Duration,
+    cancellable: bool,
+) -> Result<AdbOutput, String> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?
@@ -1087,15 +1206,22 @@ fn adb_output(command: &mut Command, timeout: Duration) -> Result<AdbOutput, Str
         .open(&capture_path)
         .map_err(|error| format!("Could not capture ADB output: {error}"))?;
     let capture = AdbCapture(capture_path);
-    let mut child = command
+    command
         .stdin(Stdio::null())
         .stdout(file.try_clone().map_err(|error| error.to_string())?)
-        .stderr(file)
-        .tracked_spawn()
-        .map_err(|error| format!("Could not start host ADB: {error}. {MISSING_ADB}"))?;
+        .stderr(file);
+    let mut child = if cancellable {
+        command.tracked_spawn()
+    } else {
+        command.spawn().map(|child| crate::process::TrackedChild {
+            child: Some(child),
+            scope: None,
+        })
+    }
+    .map_err(|error| format!("Could not start host ADB: {error}. {MISSING_ADB}"))?;
     let started = Instant::now();
     let outcome = loop {
-        if current_scope().is_some_and(|scope| scope.is_cancelled()) {
+        if cancellable && current_scope().is_some_and(|scope| scope.is_cancelled()) {
             break Err("Android device operation stopped.".to_string());
         }
         if started.elapsed() >= timeout {
@@ -1177,6 +1303,15 @@ if [ "$1" = devices ]; then
         missing) :;;
         *) printf '%s\n' 'phone-123 device product:phone model:Pixel_9';;
     esac
+elif [ "$3" = reverse ]; then
+    case "$4" in
+        --list) if [ -f "$0.reverse" ]; then cat "$0.reverse"; fi;;
+        --no-rebind)
+            if [ -s "$0.reverse" ]; then printf '%s\n' 'already bound' >&2; exit 1; fi
+            printf 'UsbFfs %s %s\n' "$5" "$6" > "$0.reverse";;
+        --remove) rm -f "$0.reverse";;
+        *) exit 2;;
+    esac
 elif [ "$3" = install ]; then
     cp "$5" "$0.installed" || exit 2
     case "$scenario" in
@@ -1199,6 +1334,7 @@ elif [ "$4" = cmd ]; then
         *) printf '%s\n' 'priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true' 'com.example.app/.MainActivity';;
     esac
 elif [ "$4" = am ]; then
+    if [ "$scenario" = reverse_replaced ]; then printf '%s\n' 'UsbFfs tcp:5173 tcp:9000' > "$0.reverse"; fi
     if [ "$scenario" = launch_error ]; then
         printf '%s\n' 'Error: Activity class does not exist.'
     else
@@ -1221,7 +1357,7 @@ elif [ "$4" = pidof ]; then
     esac
 elif [ "$3" = logcat ]; then
     printf '%s\n' '09-07 10:00:00.000 I/Capacitor( 4242): Starting BridgeActivity' '09-07 10:00:00.100 D/Capacitor/Console( 4242): [log] app ready'
-    if [ "$scenario" = logcat_ends ]; then exit 0; fi
+    if [ "$scenario" = logcat_ends ] || [ "$scenario" = reverse_replaced ]; then exit 0; fi
     exec /bin/sleep 30
 else
     printf '%s\n' 'unexpected command' >&2
@@ -1255,7 +1391,20 @@ fi
                 "com.example.app",
                 &self.apk,
                 SHA256,
+                None,
                 on_progress,
+            )
+        }
+
+        fn run_live(&self, url: &str) -> Result<AndroidDeviceRunResult, String> {
+            run_device_with(
+                &self.adb,
+                "phone-123",
+                "com.example.app",
+                &self.apk,
+                SHA256,
+                Some(url),
+                |_| {},
             )
         }
 
@@ -1265,6 +1414,16 @@ fi
         /// before the launch was even confirmed and failed the run instead of stopping it.
         fn run_then_stop(
             &self,
+        ) -> (
+            Result<AndroidDeviceRunResult, String>,
+            Vec<AndroidDeviceRunProgress>,
+        ) {
+            self.run_then_stop_with_url(None)
+        }
+
+        fn run_then_stop_with_url(
+            &self,
+            live_reload_url: Option<&str>,
         ) -> (
             Result<AndroidDeviceRunResult, String>,
             Vec<AndroidDeviceRunProgress>,
@@ -1284,7 +1443,15 @@ fi
                 cancellation.cancel();
             });
             let mut events = Vec::new();
-            let result = self.run_with(|progress| events.push(progress));
+            let result = run_device_with(
+                &self.adb,
+                "phone-123",
+                "com.example.app",
+                &self.apk,
+                SHA256,
+                live_reload_url,
+                |progress| events.push(progress),
+            );
             cancel.join().unwrap();
             (result, events)
         }
@@ -1297,6 +1464,124 @@ fi
                 .map(|call| call.lines().map(str::to_string).collect())
                 .collect()
         }
+    }
+
+    #[test]
+    fn live_reload_forwards_one_port_before_install_and_cleans_up_on_stop() {
+        let fixture = Fixture::new("success");
+        let (result, _) = fixture.run_then_stop_with_url(Some("http://localhost:5173/"));
+        assert!(result.unwrap().launched);
+        let calls = fixture.calls();
+        let forward = calls
+            .iter()
+            .position(|call| call.iter().any(|arg| arg == "--no-rebind"))
+            .unwrap();
+        let install = calls
+            .iter()
+            .position(|call| call.iter().any(|arg| arg == "install"))
+            .unwrap();
+        assert!(forward < install);
+        assert_eq!(
+            calls[forward],
+            [
+                "-s",
+                "phone-123",
+                "reverse",
+                "--no-rebind",
+                "tcp:5173",
+                "tcp:5173"
+            ]
+        );
+        assert_eq!(
+            calls.last().unwrap(),
+            &["-s", "phone-123", "reverse", "--remove", "tcp:5173"]
+        );
+        assert!(!fixture.root.join("adb.reverse").exists());
+    }
+
+    #[test]
+    fn live_reload_cleans_its_mapping_when_install_fails() {
+        let fixture = Fixture::new("signature");
+        assert!(
+            fixture
+                .run_live("http://127.0.0.1:5173/")
+                .unwrap_err()
+                .contains("original signing key")
+        );
+        assert!(
+            fixture
+                .calls()
+                .last()
+                .unwrap()
+                .iter()
+                .any(|arg| arg == "--remove")
+        );
+        assert!(!fixture.root.join("adb.reverse").exists());
+    }
+
+    #[test]
+    fn live_reload_borrows_matching_mappings_and_refuses_conflicts_without_installing() {
+        let fixture = Fixture::new("logcat_ends");
+        let path = fixture.root.join("adb.reverse");
+        fs::write(&path, "UsbFfs tcp:5173 tcp:5173\n").unwrap();
+        assert!(fixture.run_live("http://localhost:5173/").unwrap().launched);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "UsbFfs tcp:5173 tcp:5173\n"
+        );
+        assert!(
+            !fixture
+                .calls()
+                .iter()
+                .flatten()
+                .any(|arg| arg == "--no-rebind" || arg == "--remove")
+        );
+        fs::write(&path, "UsbFfs tcp:5173 tcp:9000\n").unwrap();
+        fs::remove_file(fixture.root.join("adb.args")).unwrap();
+        assert!(
+            fixture
+                .run_live("http://localhost:5173/")
+                .unwrap_err()
+                .contains("another destination")
+        );
+        assert!(
+            !fixture
+                .calls()
+                .iter()
+                .flatten()
+                .any(|arg| arg == "install" || arg == "--no-rebind" || arg == "--remove")
+        );
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "UsbFfs tcp:5173 tcp:9000\n"
+        );
+    }
+
+    #[test]
+    fn live_reload_cleanup_preserves_a_mapping_replaced_by_another_client() {
+        let fixture = Fixture::new("reverse_replaced");
+        assert!(fixture.run_live("http://localhost:5173/").unwrap().launched);
+        assert_eq!(
+            fs::read_to_string(fixture.root.join("adb.reverse")).unwrap(),
+            "UsbFfs tcp:5173 tcp:9000\n"
+        );
+        assert!(
+            !fixture
+                .calls()
+                .iter()
+                .flatten()
+                .any(|arg| arg == "--remove")
+        );
+    }
+
+    #[test]
+    fn network_live_reload_needs_no_reverse_and_bad_urls_never_spawn_adb() {
+        let fixture = Fixture::new("logcat_ends");
+        assert!(fixture.run_live("https://dev.example/").unwrap().launched);
+        assert!(!fixture.calls().iter().flatten().any(|arg| arg == "reverse"));
+        fs::remove_file(fixture.root.join("adb.args")).unwrap();
+        assert!(fixture.run_live("http://user:password@localhost/").is_err());
+        assert!(fixture.calls().is_empty());
     }
 
     impl Drop for Fixture {
@@ -1695,6 +1980,7 @@ fi
             application_id,
             &fixture.apk,
             SHA256,
+            None,
             |_| {},
         )
         .unwrap_err();
@@ -1743,6 +2029,7 @@ fi
                     application_id,
                     &fixture.apk,
                     SHA256,
+                    None,
                     |_| {},
                 )
                 .is_err()
@@ -1756,6 +2043,7 @@ fi
                     "com.example.app",
                     &fixture.apk,
                     SHA256,
+                    None,
                     |_| {},
                 )
                 .is_err()
