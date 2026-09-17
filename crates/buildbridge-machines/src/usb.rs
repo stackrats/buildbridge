@@ -915,10 +915,15 @@ mod tests {
         );
         // A second rule line is a modification even when the first is intact.
         assert_eq!(
-            rule_state(Some(&format!("{USB_UDEV_RULE}SUBSYSTEM==\"usb\", MODE=\"0666\"\n"))),
+            rule_state(Some(&format!(
+                "{USB_UDEV_RULE}SUBSYSTEM==\"usb\", MODE=\"0666\"\n"
+            ))),
             UdevRuleState::Modified
         );
-        assert_eq!(rule_state(Some("# only a comment\n")), UdevRuleState::Modified);
+        assert_eq!(
+            rule_state(Some("# only a comment\n")),
+            UdevRuleState::Modified
+        );
     }
 
     #[test]
