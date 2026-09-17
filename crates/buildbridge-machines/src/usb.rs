@@ -227,10 +227,22 @@ pub(crate) fn parse_group_id(etc_group: &str, group: &str) -> Option<u32> {
     })
 }
 
+/// The lines udev acts on: comments and blank lines are not part of the rule, so a header
+/// written by an earlier release, or a note someone added, is not a modification.
+fn effective_rule_lines(content: &str) -> Vec<&str> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect()
+}
+
 pub(crate) fn rule_state(existing: Option<&str>) -> UdevRuleState {
     match existing {
         None => UdevRuleState::Missing,
-        Some(content) if content.trim() == USB_UDEV_RULE.trim() => UdevRuleState::Installed,
+        Some(content) if effective_rule_lines(content) == effective_rule_lines(USB_UDEV_RULE) => {
+            UdevRuleState::Installed
+        }
         Some(_) => UdevRuleState::Modified,
     }
 }
@@ -888,6 +900,25 @@ mod tests {
             rule_state(Some("SUBSYSTEM==\"usb\", MODE=\"0666\"\n")),
             UdevRuleState::Modified
         );
+        // The header is not the rule: a file written before the brand was lowercased, or with
+        // a note added, still lets usbmuxd release the phone exactly as this release's would.
+        let rule_line = USB_UDEV_RULE.lines().nth(1).unwrap();
+        assert_eq!(
+            rule_state(Some(&format!(
+                "# Written by BuildBridge; remove this file to restore usbmuxd handling of iPhones.\n{rule_line}\n"
+            ))),
+            UdevRuleState::Installed
+        );
+        assert_eq!(
+            rule_state(Some(&format!("\n# a note\n  {rule_line}  \n\n# another\n"))),
+            UdevRuleState::Installed
+        );
+        // A second rule line is a modification even when the first is intact.
+        assert_eq!(
+            rule_state(Some(&format!("{USB_UDEV_RULE}SUBSYSTEM==\"usb\", MODE=\"0666\"\n"))),
+            UdevRuleState::Modified
+        );
+        assert_eq!(rule_state(Some("# only a comment\n")), UdevRuleState::Modified);
     }
 
     #[test]

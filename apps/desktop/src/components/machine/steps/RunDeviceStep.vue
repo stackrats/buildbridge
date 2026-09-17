@@ -12,7 +12,12 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { ListboxOption } from '../../../lib/listbox';
 import { isLive } from '../../../lib/status';
 import { percent } from '../../../lib/format';
-import { deviceChecks, deviceNextSummary, deviceReadiness } from '../../../model/device';
+import {
+    deviceChecks,
+    deviceNextSummary,
+    deviceReadiness,
+    deviceRungNeedsBuild,
+} from '../../../model/device';
 import {
     devicePhaseLabel,
     deviceSigningPhaseLabel,
@@ -267,6 +272,12 @@ const primary = computed<DevicePrimary | null>(() => {
     const id = session.id;
     const name = readiness.value.name;
     const needsLive = (reason = 'Start the machine first') => (live.value ? null : reason);
+    // A pending step withholds only the rungs that build or sign; preparing the host and
+    // the phone never waited for the test build, and the button says what does.
+    const needsBuild = () =>
+        step.status === 'pending' && deviceRungNeedsBuild(readiness.value.substate)
+            ? 'Pass the unsigned test build and provision signing first'
+            : null;
     switch (readiness.value.substate) {
         case 'host-rule':
             return {
@@ -377,6 +388,7 @@ const primary = computed<DevicePrimary | null>(() => {
                       outline: false,
                       operation: 'device-signing',
                       disabledReason:
+                          needsBuild() ??
                           needsLive() ??
                           (device.value?.udid ? null : 'The guest has not read the UDID yet'),
                       run: () => (signingOpen.value = true),
@@ -401,7 +413,8 @@ const primary = computed<DevicePrimary | null>(() => {
                 operation: 'run-device',
                 disabledReason: streaming.value
                     ? 'Stop the console session to run again'
-                    : (needsLive() ??
+                    : (needsBuild() ??
+                      needsLive() ??
                       liveReloadIssue.value ??
                       (device.value?.udid ? null : 'The guest has not read the UDID yet')),
                 run: () =>
@@ -424,7 +437,6 @@ const primaryDisabled = computed(
     () =>
         busy.value ||
         primaryRefreshing.value ||
-        step.status === 'pending' ||
         primary.value === null ||
         primary.value.disabledReason !== null,
 );

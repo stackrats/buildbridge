@@ -93,6 +93,15 @@ export function deviceReadiness(view: MachineView): DeviceReadiness {
     return { substate, device, hostDevice, signingReady, canPrepareSigning, name };
 }
 
+/**
+ * The rungs that build or sign, and so wait for the step to open: everything below them
+ * prepares the host and the phone, which the test build never needs, so those rungs act
+ * while the step is still pending.
+ */
+export function deviceRungNeedsBuild(substate: DeviceSubstate): boolean {
+    return substate === 'signing' || substate === 'ready';
+}
+
 /** The row's fact line while the step is next: what the facts say to do. */
 export function deviceNextSummary(readiness: DeviceReadiness, view: MachineView): string {
     switch (readiness.substate) {
