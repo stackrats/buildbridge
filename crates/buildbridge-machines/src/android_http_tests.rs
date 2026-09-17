@@ -37,16 +37,7 @@ struct HttpFixture(PathBuf);
 
 impl HttpFixture {
     fn new() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "buildbridge-http-debug-{}-{nonce}",
-            std::process::id()
-        ));
-        fs::create_dir(&path).unwrap();
-        Self(path)
+        Self(crate::test_scripts::fixture_dir("http-debug"))
     }
 }
 

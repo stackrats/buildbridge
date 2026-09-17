@@ -350,6 +350,14 @@ cd {root}
 
 /// CocoaPods where the Podfile is. A lock the project committed is compared before and after,
 /// and a change is reported with the marker the callers already read.
+///
+/// `pod install` never moves a version the lock pins, so when a plugin upgrade on the host
+/// asks for a pod the lock holds at an older version, it stops and names that pod. The host
+/// has no CocoaPods to refresh the lock, so the guest does what CocoaPods advises: `pod
+/// update` for exactly the pods named. The lock then differs from the committed one, the
+/// marker below reports it, and the test build step offers the refreshed lock for adoption.
+/// Names are taken from CocoaPods' own message and limited to the characters a pod name can
+/// hold, so the retry receives words and never anything a shell would interpret.
 fn pods_script(layout: &ProjectLayout, workspace: &str, tools: &RecipeTools) -> String {
     let (Some(ios), Some(pod)) = (&layout.ios, &tools.pod) else {
         return String::new();
@@ -359,23 +367,38 @@ fn pods_script(layout: &ProjectLayout, workspace: &str, tools: &RecipeTools) -> 
     };
     let directory = under(workspace, podfile_dir);
     let lock = under(workspace, &join_relative(podfile_dir, "Podfile.lock"));
-    let lock_after = if ios.podfile_locked {
-        format!(
-            r#"lock_after=$({})
-if /bin/test "$lock_before" != "$lock_after"; then
-    /usr/bin/printf '__BUILDBRIDGE_NATIVE_LOCK_UPDATED__:yes\n'
-fi
-"#,
-            tools.file_sha256(&lock)
-        )
-    } else {
-        String::new()
-    };
+    if !ios.podfile_locked {
+        return format!(
+            r#"phase resolving_pods
+cd {directory}
+"{pod}" install --no-ansi
+"#
+        );
+    }
+    let lock_after = tools.file_sha256(&lock);
     format!(
         r#"phase resolving_pods
 cd {directory}
-"{pod}" install --no-ansi
-{lock_after}"#
+pods_log=$(/usr/bin/mktemp /tmp/buildbridge-pods.XXXXXX)
+if "{pod}" install --no-ansi > "$pods_log" 2>&1; then
+    /bin/cat "$pods_log"
+    /bin/rm -f "$pods_log"
+else
+    pods_status=$?
+    /bin/cat "$pods_log"
+    conflicting=$(/usr/bin/sed -n 's/.*could not find compatible versions for pod "\([A-Za-z0-9_.+\/-]*\)".*/\1/p' "$pods_log" | /usr/bin/sort -u | /usr/bin/tr '\n' ' ')
+    /bin/rm -f "$pods_log"
+    if /bin/test -z "$conflicting"; then
+        exit "$pods_status"
+    fi
+    /usr/bin/printf 'The committed Podfile.lock pins %sat a version the project no longer accepts. Updating those pods in the guest only, as CocoaPods advises; the refreshed lock can be adopted into the project from the test build step.\n' "$conflicting"
+    "{pod}" update $conflicting --no-ansi
+fi
+lock_after=$({lock_after})
+if /bin/test "$lock_before" != "$lock_after"; then
+    /usr/bin/printf '__BUILDBRIDGE_NATIVE_LOCK_UPDATED__:yes\n'
+fi
+"#
     )
 }
 
@@ -922,6 +945,115 @@ mod tests {
             "{with_http}"
         );
         assert!(!with_http.contains("react-native.gradle"), "{with_http}");
+    }
+
+    #[test]
+    fn a_committed_lock_retries_only_the_pods_cocoapods_names_and_an_open_one_never_does() {
+        let locked = ProjectLayout::capacitor_default();
+        let script = pods_script(&locked, "/w", &recipe_tools(true));
+        assert!(
+            script.contains("install --no-ansi > \"$pods_log\""),
+            "{script}"
+        );
+        assert!(script.contains("update $conflicting --no-ansi"), "{script}");
+        assert!(script.contains("exit \"$pods_status\""), "{script}");
+
+        let mut open = ProjectLayout::capacitor_default();
+        open.ios.as_mut().unwrap().podfile_locked = false;
+        let script = pods_script(&open, "/w", &recipe_tools(true));
+        assert!(script.contains("\" install --no-ansi\n"), "{script}");
+        assert!(!script.contains("update"), "{script}");
+        assert!(!script.contains("NATIVE_LOCK_UPDATED"), "{script}");
+    }
+
+    /// The recipe against a `pod` that answers as CocoaPods does: install refuses the pinned
+    /// pods a plugin upgrade outgrew, update rewrites the lock, and any other failure is
+    /// the build's failure.
+    #[cfg(unix)]
+    #[test]
+    fn a_pinned_pod_the_project_outgrew_is_updated_in_the_guest_and_the_lock_change_reported() {
+        let root = crate::test_scripts::fixture_dir("pods");
+        let podfile_dir = root.join("ios/App");
+        std::fs::create_dir_all(&podfile_dir).unwrap();
+        let fake_pod = root.join("pod");
+        crate::test_scripts::write_runnable(
+            &fake_pod,
+            r#"#!/bin/sh
+set -eu
+/usr/bin/printf '%s\n' "$*" >> "$FIXTURE_CALLS"
+case "$FIXTURE_MODE:$1" in
+    conflict:install)
+        /usr/bin/printf 'Analyzing dependencies\n[!] CocoaPods could not find compatible versions for pod "IONCameraLib":\n  In snapshot (Podfile.lock):\n    IONCameraLib (= 1.0.4, ~> 1.0.4)\n[!] CocoaPods could not find compatible versions for pod "Firebase/Core":\n  In snapshot (Podfile.lock):\n    Firebase/Core (= 10.0.0)\n' >&2
+        exit 1 ;;
+    conflict:update)
+        /usr/bin/printf 'updated\n' > Podfile.lock ;;
+    broken:install)
+        /usr/bin/printf '[!] The Podfile is malformed\n' >&2
+        exit 7 ;;
+    clean:install)
+        ;;
+esac
+"#,
+        );
+        let tools = RecipeTools {
+            tools: "/t".to_string(),
+            node_root: "/t/node".to_string(),
+            pnpm: "/t/pnpm".to_string(),
+            pod: Some(fake_pod.to_str().unwrap().to_string()),
+            macos: cfg!(target_os = "macos"),
+        };
+        let layout = ProjectLayout::capacitor_default();
+        let workspace = root.to_str().unwrap();
+        let script = format!(
+            "set -eu\nphase() {{ /usr/bin/printf '__BUILDBRIDGE_PHASE__:%s\\n' \"$1\"; }}\n{}{}",
+            lock_before_script(&layout, workspace, &tools),
+            pods_script(&layout, workspace, &tools)
+        );
+        let run = |mode: &str| {
+            std::fs::write(podfile_dir.join("Podfile.lock"), "pinned\n").unwrap();
+            let calls = root.join(format!("calls-{mode}"));
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-c", &script])
+                .env("FIXTURE_MODE", mode)
+                .env("FIXTURE_CALLS", &calls)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let calls = std::fs::read_to_string(&calls).unwrap_or_default();
+            (output.status.code(), stdout, calls)
+        };
+
+        let (status, stdout, calls) = run("conflict");
+        assert_eq!(status, Some(0), "{stdout}");
+        assert_eq!(
+            calls,
+            "install --no-ansi\nupdate Firebase/Core IONCameraLib --no-ansi\n"
+        );
+        assert!(
+            stdout.contains("could not find compatible versions"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("pins Firebase/Core IONCameraLib at a version"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("__BUILDBRIDGE_NATIVE_LOCK_UPDATED__:yes"),
+            "{stdout}"
+        );
+
+        let (status, stdout, calls) = run("broken");
+        assert_eq!(status, Some(7), "{stdout}");
+        assert_eq!(calls, "install --no-ansi\n");
+        assert!(stdout.contains("The Podfile is malformed"), "{stdout}");
+        assert!(!stdout.contains("NATIVE_LOCK_UPDATED"), "{stdout}");
+
+        let (status, stdout, calls) = run("clean");
+        assert_eq!(status, Some(0), "{stdout}");
+        assert_eq!(calls, "install --no-ansi\n");
+        assert!(!stdout.contains("NATIVE_LOCK_UPDATED"), "{stdout}");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

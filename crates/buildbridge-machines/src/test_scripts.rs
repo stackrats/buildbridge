@@ -10,9 +10,26 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+static FIXTURE_DIRECTORIES: AtomicU64 = AtomicU64::new(0);
+
+/// A fresh, empty directory under the system temp for one fixture. The name carries the
+/// process id and a counter rather than a clock: a test binary creates fixtures on many
+/// threads at once, and a macOS clock ticks in microseconds, so two fixtures born in the same
+/// instant collided on the name and one of them died in `create_dir`.
+pub(crate) fn fixture_dir(prefix: &str) -> PathBuf {
+    let ordinal = FIXTURE_DIRECTORIES.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "buildbridge-{prefix}-{}-{ordinal}",
+        std::process::id()
+    ));
+    fs::create_dir(&path).unwrap();
+    path
+}
 
 /// The argument a guarded script answers by doing nothing at all.
 const PROBE: &str = "--buildbridge-probe";
