@@ -11,9 +11,11 @@ import {
     deviceChecks,
     deviceNextSummary,
     deviceReadiness,
+    deviceRungNeedsBuild,
     deviceSigningReady,
     deviceWorkingSummary,
 } from './device';
+import type { DeviceSubstate } from './device';
 
 const UDID = '00008030-000A1B2C3D4E5F6A';
 
@@ -189,6 +191,24 @@ describe('deviceReadiness', () => {
         });
         expect(deviceReadiness(host).substate).toBe('replug');
         expect(deviceNextSummary(deviceReadiness(host), host)).toContain('restart the machine');
+    });
+});
+
+describe('deviceRungNeedsBuild', () => {
+    it('withholds only signing and the run from a pending step', () => {
+        const rungs: DeviceSubstate[] = [
+            'host-rule',
+            'container',
+            'plug-in',
+            'attach',
+            'unplugged',
+            'replug',
+            'trust',
+            'signing',
+            'developer-mode',
+            'ready',
+        ];
+        expect(rungs.filter(deviceRungNeedsBuild)).toEqual(['signing', 'ready']);
     });
 });
 
