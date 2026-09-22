@@ -61,7 +61,7 @@ const canStart = computed(
 const android = computed(() => isAndroid(view.value.profile.provider));
 
 const facts = computed(() => {
-    const uptime = secondsSince(view.value.runtime.startedAt, now);
+    const uptime = live.value ? secondsSince(view.value.runtime.startedAt, now) : null;
     const { diagnostics } = view.value.guest;
     if (android.value) {
         const lastBuild = view.value.android?.workspace?.lastBuild ?? null;

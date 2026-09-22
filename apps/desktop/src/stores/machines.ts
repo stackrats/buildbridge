@@ -43,6 +43,7 @@ import type {
     MachineTemplateSummary,
     SafariInspectorResult,
     SigningProvisioningProgress,
+    StopAllMachinesResult,
     TemplateSaveProgress,
     UnsignedBuildTarget,
     UsbAttachProgress,
@@ -135,6 +136,9 @@ const state = reactive({
     list: null as MachineListView | null,
     listLoading: false,
     listError: null as string | null,
+    stoppingAll: false,
+    stopAllResult: null as StopAllMachinesResult | null,
+    stopAllError: null as string | null,
     sessions: {} as Record<string, MachineSession>,
     dragActive: false,
     lastDrop: null as { paths: string[]; at: number } | null,
@@ -258,6 +262,7 @@ function maybeAdoptTemplate(target: MachineSession): void {
     const view = target.view;
     if (
         !view?.template ||
+        state.stoppingAll ||
         target.templateAdoptTried ||
         target.operation !== null ||
         view.busyOperation !== null ||
@@ -354,6 +359,53 @@ async function refreshMachine(id: string, options: { silent?: boolean } = {}): P
     }
 }
 
+/** The backend handles cancellation and safe stopping; every machine still gets a fresh view. */
+async function stopAll(): Promise<StopAllMachinesResult | null> {
+    if (state.stoppingAll) return null;
+    state.stoppingAll = true;
+    state.stopAllResult = null;
+    state.stopAllError = null;
+    let result: StopAllMachinesResult | null = null;
+    try {
+        result = await useBackend().stopAllMachines();
+        state.stopAllResult = result;
+        return result;
+    } catch (error) {
+        state.stopAllError = describeError(error);
+        return null;
+    } finally {
+        await loadList();
+        const ids = new Set([
+            ...Object.keys(state.sessions),
+            ...(state.list?.machines.map((machine) => machine.id) ?? []),
+            ...(result?.results.map((machine) => machine.machineId) ?? []),
+        ]);
+        await Promise.all([...ids].map((id) => refreshMachine(id, { silent: true })));
+        for (const machine of result?.results ?? []) {
+            const target = session(machine.machineId);
+            if (machine.outcome === 'failed') {
+                const message = machine.error ?? 'The machine could not be stopped.';
+                target.error = message;
+                target.notice = null;
+                target.lastFailure = { operation: 'stop', message, at: Date.now() };
+                note(target, message, 'stderr');
+            } else {
+                const message =
+                    machine.outcome === 'stopped'
+                        ? 'Stopped. Machine disks and retained builds are kept.'
+                        : 'Already stopped. Machine disks and retained builds are kept.';
+                target.notice = message;
+                if (target.lastFailure?.operation === 'stop') {
+                    if (target.error === target.lastFailure.message) target.error = null;
+                    target.lastFailure = null;
+                }
+                note(target, message, 'success');
+            }
+        }
+        state.stoppingAll = false;
+    }
+}
+
 function scheduleRefresh(id: string): void {
     if (refreshTimers[id]) {
         clearTimeout(refreshTimers[id]);
@@ -389,6 +441,10 @@ async function runOperation<R extends OperationOutcome>(
     } = {},
 ): Promise<R | null> {
     const target = session(id);
+    if (state.stoppingAll) {
+        target.notice = 'Machines are being stopped. Wait for Stop all machines to finish.';
+        return null;
+    }
     if (target.operation !== null) {
         target.error = 'Another operation is still running on this machine. Wait for it to finish.';
         return null;
@@ -757,6 +813,10 @@ export function useMachinesStore() {
             useMachineOrder().sortDashboard(state.list?.machines ?? []),
         ),
         host: computed(() => state.list?.host ?? null),
+        stoppingAll: computed(() => state.stoppingAll),
+        stopAllResult: computed(() => state.stopAllResult),
+        stopAllError: computed(() => state.stopAllError),
+        stopAll,
         session,
         loadList,
         refreshMachine,

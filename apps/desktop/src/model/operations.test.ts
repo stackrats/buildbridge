@@ -14,6 +14,8 @@ describe('operation vocabulary', () => {
         expect(activityLabel('uploading_google_play')).toBe('Uploading to Google Play');
         expect(activityLabel('upload-google-play')).toBe(operationLabel['upload-google-play']);
         expect(activityLabel('optimizing')).toBe('Applying an optimization');
+        expect(activityLabel('checking_device_signing')).toBe('Checking device signing');
+        expect(busyKeyStep.checking_device_signing).toBe('run-device');
         expect(activityLabel(null)).toBeNull();
         expect(activityLabel(undefined)).toBeNull();
         expect(activityLabel('')).toBeNull();

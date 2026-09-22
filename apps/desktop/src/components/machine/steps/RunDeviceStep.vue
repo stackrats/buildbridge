@@ -17,6 +17,7 @@ import {
     deviceNextSummary,
     deviceReadiness,
     deviceRungNeedsBuild,
+    matchingDeviceDevelopmentProfile,
 } from '../../../model/device';
 import {
     devicePhaseLabel,
@@ -450,8 +451,12 @@ const primarySpinning = computed(
             session.operation === primary.value.operation),
 );
 
-const developmentProfile = computed(
-    () => signing.value?.profiles.find((profile) => profile.kind === 'development') ?? null,
+const developmentProfile = computed(() =>
+    matchingDeviceDevelopmentProfile(
+        signing.value,
+        device.value?.udid ?? '',
+        workspace.value?.debugBundleIdentifier,
+    ),
 );
 const recipe = computed(() => [
     { label: 'Scheme', value: workspace.value?.scheme ?? 'App' },
@@ -462,10 +467,8 @@ const recipe = computed(() => [
     },
     { label: 'Profile', value: developmentProfile.value?.uuid ?? null, mono: true },
     {
-        label: workspace.value?.debugBundleIdentifier
-            ? 'Debug bundle identifier'
-            : 'Bundle identifier',
-        value: workspace.value?.debugBundleIdentifier ?? workspace.value?.bundleIdentifier,
+        label: 'Debug bundle identifier',
+        value: workspace.value?.debugBundleIdentifier ?? 'not checked yet',
         mono: true,
     },
     { label: 'Team', value: workspace.value?.developmentTeam, mono: true },
@@ -662,10 +665,8 @@ onBeforeUnmount(() => {
                 know: an App ID is a permanent entry in the developer portal (harmless, and it can
                 be deleted there), and capabilities that are their own resources at Apple, such as
                 app groups or iCloud containers, are not copied; if the app uses one, enable it on
-                the new App ID in the portal once. The other route is to sign the debug build under
-                the main identifier, which replaces the store build on that phone; buildbridge does
-                that only when the credentials hold no profile for the Debug identifier, and says
-                so.
+                the new App ID in the portal once. The Debug build keeps the bundle identifier
+                selected by the project; signing must cover that identifier before it can run.
             </p>
         </ConfirmDialog>
 

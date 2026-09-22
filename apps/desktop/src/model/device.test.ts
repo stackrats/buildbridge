@@ -14,10 +14,12 @@ import {
     deviceRungNeedsBuild,
     deviceSigningReady,
     deviceWorkingSummary,
+    matchingDeviceDevelopmentProfile,
 } from './device';
 import type { DeviceSubstate } from './device';
 
 const UDID = '00008030-000A1B2C3D4E5F6A';
+const DEBUG_BUNDLE_IDENTIFIER = 'com.example.app.debug';
 
 function hostDevice(): HostUsbDevice {
     return {
@@ -72,7 +74,7 @@ function signing(devices: string[] = [UDID]): SigningProvisioningResult {
             {
                 uuid: '22222222-3333-4444-5555-666666666666',
                 teamIdentifier: 'TEAM123456',
-                applicationIdentifier: 'TEAM123456.com.example.app',
+                applicationIdentifier: `TEAM123456.${DEBUG_BUNDLE_IDENTIFIER}`,
                 expiresAt: '2027-09-02T00:00:00Z',
                 developerCertificateSha256: ['dev256'],
                 kind: 'development',
@@ -90,6 +92,7 @@ function usbView(usb: Partial<MachineUsbStatus>, extra: Partial<MachineView> = {
         guest: { devices: [] },
         signing: null,
         signingKit: null,
+        appleWorkspace: { debugBundleIdentifier: DEBUG_BUNDLE_IDENTIFIER },
         usb: {
             host: {
                 supported: true,
@@ -171,6 +174,62 @@ describe('deviceReadiness', () => {
         expect(deviceNextSummary(deviceReadiness(withKey), withKey)).toContain('Register');
     });
 
+    it.each(['production profile', 'unknown Debug identifier'])(
+        'keeps Prepare signing reachable with a %s',
+        (scenario) => {
+            const prepared = signing();
+            prepared.profiles[0]!.applicationIdentifier = 'TEAM123456.com.example.app';
+            const view = usbView(
+                {
+                    host: { ...usbView({}).usb.host, devices: [hostDevice()] },
+                    attached: { bus: 1, port: '3', enumerated: true, issue: null },
+                },
+                {
+                    guest: { devices: [guestDevice()] },
+                    signing: prepared,
+                    signingKit: { appStoreConnectConfigured: true },
+                    appleWorkspace: {
+                        bundleIdentifier: 'com.example.app',
+                        debugBundleIdentifier:
+                            scenario === 'unknown Debug identifier'
+                                ? null
+                                : DEBUG_BUNDLE_IDENTIFIER,
+                    },
+                } as Partial<MachineView>,
+            );
+
+            const readiness = deviceReadiness(view);
+            expect(readiness.substate).toBe('signing');
+            expect(readiness.canPrepareSigning).toBe(true);
+            expect(readiness.signingReady).toBe(false);
+            expect(deviceChecks(view).find((check) => check.label === 'Signing')?.ok).toBe(false);
+        },
+    );
+
+    it('lets manual signing wait for a Debug identifier without requiring a Team key', () => {
+        const view = usbView(
+            {
+                host: { ...usbView({}).usb.host, devices: [hostDevice()] },
+                attached: { bus: 1, port: '3', enumerated: true, issue: null },
+            },
+            {
+                guest: { devices: [guestDevice()] },
+                signing: signing(),
+                appleWorkspace: {
+                    bundleIdentifier: 'com.example.app',
+                    debugBundleIdentifier: null,
+                },
+            } as Partial<MachineView>,
+        );
+        const readiness = deviceReadiness(view);
+        expect(readiness.substate).toBe('signing');
+        expect(readiness.canPrepareSigning).toBe(false);
+        expect(deviceNextSummary(readiness, view)).toContain('Check again');
+
+        view.appleWorkspace!.debugBundleIdentifier = DEBUG_BUNDLE_IDENTIFIER;
+        expect(deviceReadiness(view).substate).toBe('ready');
+    });
+
     it('names the phone from the host until the guest names it', () => {
         const attached = { bus: 1, port: '3', enumerated: true, issue: null };
         const host = usbView({
@@ -214,13 +273,72 @@ describe('deviceRungNeedsBuild', () => {
 
 describe('deviceSigningReady', () => {
     it('requires the development identity and a development profile listing the phone', () => {
-        expect(deviceSigningReady(null, UDID)).toBe(false);
-        expect(deviceSigningReady({ ...signing(), developmentIdentity: null }, UDID)).toBe(false);
-        expect(deviceSigningReady(signing(['00008030-FFFFFFFFFFFFFFFF']), UDID)).toBe(false);
-        expect(deviceSigningReady(signing([UDID.toLowerCase()]), UDID)).toBe(true);
+        expect(deviceSigningReady(null, UDID, DEBUG_BUNDLE_IDENTIFIER)).toBe(false);
+        expect(
+            deviceSigningReady(
+                { ...signing(), developmentIdentity: null },
+                UDID,
+                DEBUG_BUNDLE_IDENTIFIER,
+            ),
+        ).toBe(false);
+        expect(
+            deviceSigningReady(
+                signing(['00008030-FFFFFFFFFFFFFFFF']),
+                UDID,
+                DEBUG_BUNDLE_IDENTIFIER,
+            ),
+        ).toBe(false);
+        expect(
+            deviceSigningReady(signing([UDID.toLowerCase()]), UDID, DEBUG_BUNDLE_IDENTIFIER),
+        ).toBe(true);
         const appStoreOnly = signing();
         appStoreOnly.profiles[0]!.kind = 'app_store';
-        expect(deviceSigningReady(appStoreOnly, UDID)).toBe(false);
+        expect(deviceSigningReady(appStoreOnly, UDID, DEBUG_BUNDLE_IDENTIFIER)).toBe(false);
+    });
+
+    it.each([null, undefined, '', ' '])(
+        'requires a known Debug bundle identifier (%s)',
+        (bundle) => {
+            expect(deviceSigningReady(signing(), UDID, bundle)).toBe(false);
+        },
+    );
+
+    it.each([
+        ['TEAM123456.com.example.app.debug', true],
+        ['TEAM123456.com.example.app', false],
+        ['TEAM123456.com.example.*', true],
+        ['TEAM123456.*', true],
+        ['TEAM123456.com.other.*', false],
+        ['TEAM123456.com.example.app*', false],
+        ['TEAM123456.com.*.debug', false],
+        ['TEAM123456.com.*.*', false],
+        ['TEAM123456', false],
+    ])('checks the profile application identifier %s', (identifier, ready) => {
+        const prepared = signing();
+        prepared.profiles[0]!.applicationIdentifier = identifier;
+        expect(deviceSigningReady(prepared, UDID, DEBUG_BUNDLE_IDENTIFIER)).toBe(ready);
+    });
+
+    it('selects the matching Debug profile even when a production profile comes first', () => {
+        const prepared = signing();
+        const debugProfile = prepared.profiles[0]!;
+        prepared.profiles.unshift({
+            ...debugProfile,
+            uuid: 'production-profile',
+            applicationIdentifier: 'TEAM123456.com.example.app',
+        });
+        expect(matchingDeviceDevelopmentProfile(prepared, UDID, DEBUG_BUNDLE_IDENTIFIER)).toBe(
+            debugProfile,
+        );
+    });
+
+    it('requires the provisioned development identity and team to match the profile', () => {
+        const prepared = signing();
+        prepared.profiles[0]!.developerCertificateSha256 = ['other-certificate'];
+        expect(deviceSigningReady(prepared, UDID, DEBUG_BUNDLE_IDENTIFIER)).toBe(false);
+        prepared.profiles[0]!.developerCertificateSha256 = ['dev256'];
+        prepared.profiles[0]!.teamIdentifier = 'OTHERTEAM';
+        expect(deviceSigningReady(prepared, UDID, DEBUG_BUNDLE_IDENTIFIER)).toBe(false);
     });
 });
 

@@ -547,6 +547,11 @@ async fn stop_machine(
 }
 
 #[tauri::command]
+async fn stop_all_machines(desktop: State<'_, Desktop>) -> Result<StopAllMachinesResult, String> {
+    buildbridge_engine::stop_all_machines(&desktop.engine).await
+}
+
+#[tauri::command]
 async fn install_usb_release_rule(
     desktop: State<'_, Desktop>,
 ) -> Result<buildbridge_machines::HostUsbStatus, String> {
@@ -1220,6 +1225,7 @@ pub fn run() {
             configure_machine,
             launch_machine,
             stop_machine,
+            stop_all_machines,
             install_usb_release_rule,
             remove_usb_release_rule,
             migrate_machine_for_usb,

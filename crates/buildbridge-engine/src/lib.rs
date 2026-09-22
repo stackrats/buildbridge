@@ -626,9 +626,8 @@ pub struct StoredAppleWorkspace {
     /// Which SDK the last unsigned build compiled against; None on records from before the choice.
     #[serde(default)]
     last_build_target: Option<UnsignedBuildTarget>,
-    /// The identifier the App target's Debug configuration builds, once the device step has
-    /// registered it at Apple; the device build is signed for it and installs beside the store
-    /// build. None until then, or when it is the approved identifier.
+    /// The identifier resolved from the App target's Debug build settings, even when it is
+    /// the same as the release identifier. None until device signing or a device run resolves it.
     #[serde(default)]
     debug_bundle_identifier: Option<String>,
     /// What the last snapshot was taken from: the approved folder as it was, or a checked-out

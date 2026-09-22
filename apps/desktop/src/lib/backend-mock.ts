@@ -77,6 +77,7 @@ const hostUsbDevices: T.HostUsbDevice[] = [
 ];
 
 const DEVICE_UDID = '00008030-000A1B2C3D4E5F6A';
+const DEBUG_BUNDLE_IDENTIFIER = 'com.example.app.debug';
 const DEVELOPMENT_CERT_SHA256 = 'bbbb1111cccc2222dddd3333eeee4444ffff5555aaaa6666bbbb7777cccc8888';
 
 function readyPhone(): T.GuestDevice {
@@ -99,7 +100,7 @@ function developmentProfile(udid: string): T.ProvisioningProfileSummary {
     return {
         uuid: '22222222-3333-4444-5555-666666666666',
         teamIdentifier: 'TEAM123456',
-        applicationIdentifier: 'TEAM123456.com.example.app',
+        applicationIdentifier: `TEAM123456.${DEBUG_BUNDLE_IDENTIFIER}`,
         expiresAt: '2027-09-02T10:14:00Z',
         developerCertificateSha256: [DEVELOPMENT_CERT_SHA256],
         kind: 'development',
@@ -228,7 +229,7 @@ function readyMachine(): MockMachine {
             lastXcodeVersion: '26.6',
             lastNativeLockUpdated: lockDrift,
             lastBuildTarget: 'simulator',
-            debugBundleIdentifier: null,
+            debugBundleIdentifier: deviceReady ? DEBUG_BUNDLE_IDENTIFIER : null,
         },
         projectVersion: { version: '3.2.0', build: '15' },
         signing: {
@@ -1145,6 +1146,54 @@ export function createMockBackend(): Backend {
                 machine.startedAt = null;
                 return view(machine);
             });
+        },
+        async stopAllMachines() {
+            const results = await Promise.all(
+                machines.map(async (machine): Promise<T.StopMachineResult> => {
+                    try {
+                        if (machine.busy === 'Enabling USB on the machine') {
+                            throw new Error(
+                                'Wait for the disk migration to finish before stopping this machine.',
+                            );
+                        }
+                        machine.cancelRequested = true;
+                        for (let attempt = 0; machine.busy && attempt < 100; attempt++) {
+                            await sleep(100);
+                        }
+                        if (machine.busy) {
+                            throw new Error(
+                                'The current operation has not stopped yet. Try again after it finishes.',
+                            );
+                        }
+                        const alreadyStopped = ['missing', 'created', 'exited', 'dead'].includes(
+                            machine.state,
+                        );
+                        if (!alreadyStopped) {
+                            await busy(machine, 'Stopping the machine', async () => {
+                                await sleep(800);
+                                machine.state = 'exited';
+                                machine.startedAt = null;
+                            });
+                        }
+                        return {
+                            machineId: machine.id,
+                            name: machine.config.name,
+                            outcome: alreadyStopped ? 'already_stopped' : 'stopped',
+                            error: null,
+                        };
+                    } catch (error) {
+                        return {
+                            machineId: machine.id,
+                            name: machine.config.name,
+                            outcome: 'failed',
+                            error: error instanceof Error ? error.message : String(error),
+                        };
+                    }
+                }),
+            );
+            changed(null);
+            emitter.emit('host-usage', usageSample());
+            return { results };
         },
         async configureGuestAccess(machineId, username) {
             const machine = find(machineId);
@@ -2116,6 +2165,9 @@ export function createMockBackend(): Backend {
         async listGuestDevices(machineId) {
             const machine = find(machineId);
             await sleep(400);
+            if (machine.workspace?.lastBuildSucceeded && machine.workspace.lastSnapshotSha256) {
+                machine.workspace.debugBundleIdentifier = DEBUG_BUNDLE_IDENTIFIER;
+            }
             machine.deviceRefreshes += 1;
             const device = machine.guestDevices[0];
             if (device) {
@@ -2169,6 +2221,9 @@ export function createMockBackend(): Backend {
                 kit.developmentCertificateConfigured = true;
                 kit.developmentCertificateName = 'development.p12';
                 kit.developmentCertificatePasswordStored = true;
+                if (machine.workspace) {
+                    machine.workspace.debugBundleIdentifier = DEBUG_BUNDLE_IDENTIFIER;
+                }
                 if (machine.signing) {
                     machine.signing.developmentIdentity = developmentIdentity();
                     machine.signing.profiles = [
@@ -2235,10 +2290,12 @@ export function createMockBackend(): Backend {
                 await sleep(600);
                 emit('verifying', 'Verifying the signature');
                 await sleep(400);
-                emit('installing', 'Installing on the iPhone', ['App installed: com.example.app']);
+                emit('installing', 'Installing on the iPhone', [
+                    `App installed: ${DEBUG_BUNDLE_IDENTIFIER}`,
+                ]);
                 await sleep(700);
                 emit('launching', 'Launching', [
-                    'Launched application with com.example.app bundle identifier and pid 4211',
+                    `Launched application with ${DEBUG_BUNDLE_IDENTIFIER} bundle identifier and pid 4211`,
                 ]);
                 await sleep(500);
                 const consoleLines = [
@@ -2258,7 +2315,7 @@ export function createMockBackend(): Backend {
                 machine.deviceRun = {
                     liveReloadUrl,
                     device: { ...device },
-                    bundleIdentifier: 'com.example.app',
+                    bundleIdentifier: DEBUG_BUNDLE_IDENTIFIER,
                     appPath:
                         '/Users/builder/BuildBridge/workspaces/active/.buildbridge/DerivedData/Build/Products/Debug-iphoneos/App.app',
                     marketingVersion: built.version,

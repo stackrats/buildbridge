@@ -308,6 +308,188 @@ pub async fn stop_machine(app: &Engine, machine_id: String) -> Result<MachineVie
     build_machine_view(app, &paths).await
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum StopMachineOutcome {
+    Stopped,
+    AlreadyStopped,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct StopMachineResult {
+    pub machine_id: String,
+    pub name: String,
+    pub outcome: StopMachineOutcome,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct StopAllMachinesResult {
+    pub results: Vec<StopMachineResult>,
+}
+
+/// Stops only the machines in this registry, preserving their containers and stored data.
+/// Independent machines stop concurrently, so one protected or failed operation cannot hold
+/// up the others. A machine owned by another process remains protected by its operation lock.
+pub async fn stop_all_machines(app: &Engine) -> Result<StopAllMachinesResult, String> {
+    let registry = machines::load_registry(app)?;
+    let pending = registry
+        .machines
+        .into_iter()
+        .map(|machine| {
+            let app = app.clone();
+            let machine_id = machine.id.clone();
+            let task = tokio::spawn(async move {
+                stop_registered_machine(&EngineMachineStop { app: &app }, &machine_id).await
+            });
+            (machine, task)
+        })
+        .collect::<Vec<_>>();
+    let mut results = Vec::with_capacity(pending.len());
+    for (machine, task) in pending {
+        let outcome = task
+            .await
+            .map_err(|error| format!("The stop operation could not finish: {error}"))
+            .and_then(|result| result);
+        results.push(stop_machine_result(
+            machine.id,
+            machine.config.name,
+            outcome,
+        ));
+    }
+    app.notify_machines_changed();
+
+    Ok(StopAllMachinesResult { results })
+}
+
+fn stop_machine_result(
+    machine_id: String,
+    name: String,
+    result: Result<StopMachineOutcome, String>,
+) -> StopMachineResult {
+    let (outcome, error) = match result {
+        Ok(outcome) => (outcome, None),
+        Err(error) => (StopMachineOutcome::Failed, Some(error)),
+    };
+    StopMachineResult {
+        machine_id,
+        name,
+        outcome,
+        error,
+    }
+}
+
+const STOP_CANCEL_WAIT_POLLS: usize = 100;
+
+trait MachineStopControl: Sync {
+    fn busy(&self, machine_id: &str) -> Result<Option<String>, String>;
+    fn cancel(&self, machine_id: &str) -> impl Future<Output = Result<(), String>> + Send;
+    fn state(
+        &self,
+        machine_id: &str,
+    ) -> impl Future<Output = Result<ContainerState, String>> + Send;
+    fn stop(&self, machine_id: &str)
+    -> impl Future<Output = Result<ContainerState, String>> + Send;
+    fn wait_for_cancellation(&self) -> impl Future<Output = ()> + Send;
+}
+
+struct EngineMachineStop<'a> {
+    app: &'a Engine,
+}
+
+impl MachineStopControl for EngineMachineStop<'_> {
+    fn busy(&self, machine_id: &str) -> Result<Option<String>, String> {
+        busy_operation(self.app, machine_id)
+    }
+
+    async fn cancel(&self, machine_id: &str) -> Result<(), String> {
+        cancel_machine_operation(self.app, machine_id.to_string()).await
+    }
+
+    async fn state(&self, machine_id: &str) -> Result<ContainerState, String> {
+        let provider = machines::load_registry(self.app)?
+            .find(machine_id)?
+            .config
+            .provider;
+        let paths = MachinePaths::resolve(self.app, machine_id)?;
+        tokio::task::spawn_blocking(move || {
+            buildbridge_machines::status_for(&paths.container_name, provider)
+                .map(|runtime| runtime.state)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn stop(&self, machine_id: &str) -> Result<ContainerState, String> {
+        stop_machine(self.app, machine_id.to_string())
+            .await
+            .map(|view| view.runtime.state)
+    }
+
+    async fn wait_for_cancellation(&self) {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn stop_registered_machine(
+    control: &impl MachineStopControl,
+    machine_id: &str,
+) -> Result<StopMachineOutcome, String> {
+    if let Some(operation) = control.busy(machine_id)? {
+        if operation == "migrating_usb" {
+            return Err("The disk migration cannot be stopped; wait for it to finish.".into());
+        }
+        if let Err(error) = control.cancel(machine_id).await
+            && control.busy(machine_id)?.is_some()
+        {
+            return Err(format!(
+                "The {operation} operation could not be cancelled: {error}"
+            ));
+        }
+        for attempt in 0..=STOP_CANCEL_WAIT_POLLS {
+            if control.busy(machine_id)?.is_none() {
+                break;
+            }
+            if attempt == STOP_CANCEL_WAIT_POLLS {
+                return Err(
+                    "The active operation is still finishing after cancellation. Try Stop all again when it has finished."
+                        .into(),
+                );
+            }
+            control.wait_for_cancellation().await;
+        }
+    }
+
+    match control.state(machine_id).await? {
+        ContainerState::Running | ContainerState::Paused | ContainerState::Restarting => {
+            match control.stop(machine_id).await? {
+                ContainerState::Missing
+                | ContainerState::Created
+                | ContainerState::Exited
+                | ContainerState::Dead => Ok(StopMachineOutcome::Stopped),
+                _ => {
+                    Err("The machine did not reach a stopped state. Check it and try again.".into())
+                }
+            }
+        }
+        ContainerState::Missing
+        | ContainerState::Created
+        | ContainerState::Exited
+        | ContainerState::Dead => Ok(StopMachineOutcome::AlreadyStopped),
+        ContainerState::Unavailable | ContainerState::Unknown => Err(
+            "The machine's current container state could not be read. Check Docker and try again."
+                .into(),
+        ),
+    }
+}
+
 /// A machine and its container state, for a host that lists machines outside the window (the
 /// desktop's tray) without building the full view.
 #[derive(Debug, Clone)]
@@ -343,4 +525,186 @@ pub fn machine_runtimes(app: &Engine) -> Vec<MachineRuntime> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod stop_all_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    struct FakeStopControl {
+        operation: Option<&'static str>,
+        cancellation_error: Option<&'static str>,
+        cancelled: AtomicBool,
+        waits: AtomicUsize,
+        release_after: usize,
+        runtime: Result<ContainerState, &'static str>,
+        stopped: Result<ContainerState, &'static str>,
+        calls: Mutex<Vec<&'static str>>,
+    }
+
+    impl FakeStopControl {
+        fn new(runtime: ContainerState) -> Self {
+            Self {
+                operation: None,
+                cancellation_error: None,
+                cancelled: AtomicBool::new(false),
+                waits: AtomicUsize::new(0),
+                release_after: 0,
+                runtime: Ok(runtime),
+                stopped: Ok(ContainerState::Exited),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn record(&self, call: &'static str) {
+            self.calls.lock().unwrap().push(call);
+        }
+    }
+
+    impl MachineStopControl for FakeStopControl {
+        fn busy(&self, _machine_id: &str) -> Result<Option<String>, String> {
+            Ok(
+                if self.cancelled.load(Ordering::Acquire)
+                    && self.waits.load(Ordering::Acquire) >= self.release_after
+                {
+                    None
+                } else {
+                    self.operation.map(str::to_string)
+                },
+            )
+        }
+
+        async fn cancel(&self, _machine_id: &str) -> Result<(), String> {
+            self.record("cancel");
+            if let Some(error) = self.cancellation_error {
+                return Err(error.to_string());
+            }
+            self.cancelled.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        async fn state(&self, _machine_id: &str) -> Result<ContainerState, String> {
+            self.record("state");
+            self.runtime.map_err(str::to_string)
+        }
+
+        async fn stop(&self, _machine_id: &str) -> Result<ContainerState, String> {
+            self.record("stop");
+            self.stopped.map_err(str::to_string)
+        }
+
+        async fn wait_for_cancellation(&self) {
+            self.record("wait");
+            self.waits.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[tokio::test]
+    async fn active_build_finishes_cancelling_before_fresh_state_and_stop() {
+        let mut control = FakeStopControl::new(ContainerState::Running);
+        control.operation = Some("archiving");
+        control.release_after = 2;
+
+        assert_eq!(
+            stop_registered_machine(&control, "one").await.unwrap(),
+            StopMachineOutcome::Stopped
+        );
+        assert_eq!(
+            *control.calls.lock().unwrap(),
+            ["cancel", "wait", "wait", "state", "stop"]
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_migrations_are_not_cancelled_or_stopped() {
+        let mut control = FakeStopControl::new(ContainerState::Running);
+        control.operation = Some("migrating_usb");
+
+        let error = stop_registered_machine(&control, "one").await.unwrap_err();
+        assert!(error.contains("disk migration cannot be stopped"));
+        assert!(control.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_foreign_operation_or_cancellation_timeout_keeps_the_machine_running() {
+        let mut foreign = FakeStopControl::new(ContainerState::Running);
+        foreign.operation = Some("archiving");
+        foreign.cancellation_error = Some("Nothing is running on this machine.");
+        assert!(stop_registered_machine(&foreign, "one").await.is_err());
+        assert_eq!(*foreign.calls.lock().unwrap(), ["cancel"]);
+
+        let mut slow = FakeStopControl::new(ContainerState::Running);
+        slow.operation = Some("archiving");
+        slow.release_after = STOP_CANCEL_WAIT_POLLS + 1;
+        let error = stop_registered_machine(&slow, "one").await.unwrap_err();
+        assert!(error.contains("still finishing"));
+        assert_eq!(slow.waits.load(Ordering::Acquire), STOP_CANCEL_WAIT_POLLS);
+        assert!(!slow.calls.lock().unwrap().contains(&"stop"));
+    }
+
+    #[tokio::test]
+    async fn only_fresh_live_states_are_stopped() {
+        for state in [
+            ContainerState::Running,
+            ContainerState::Paused,
+            ContainerState::Restarting,
+        ] {
+            let control = FakeStopControl::new(state);
+            assert_eq!(
+                stop_registered_machine(&control, "one").await.unwrap(),
+                StopMachineOutcome::Stopped
+            );
+            assert_eq!(*control.calls.lock().unwrap(), ["state", "stop"]);
+        }
+        for state in [
+            ContainerState::Missing,
+            ContainerState::Created,
+            ContainerState::Exited,
+            ContainerState::Dead,
+        ] {
+            let control = FakeStopControl::new(state);
+            assert_eq!(
+                stop_registered_machine(&control, "one").await.unwrap(),
+                StopMachineOutcome::AlreadyStopped
+            );
+            assert_eq!(*control.calls.lock().unwrap(), ["state"]);
+        }
+        for state in [ContainerState::Unavailable, ContainerState::Unknown] {
+            let control = FakeStopControl::new(state);
+            assert!(stop_registered_machine(&control, "one").await.is_err());
+            assert_eq!(*control.calls.lock().unwrap(), ["state"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn failures_remain_per_machine_and_success_requires_a_stopped_state() {
+        let mut failed = FakeStopControl::new(ContainerState::Running);
+        failed.stopped = Err("Docker refused to stop the container.");
+        let stopped = FakeStopControl::new(ContainerState::Running);
+        let mut still_running = FakeStopControl::new(ContainerState::Running);
+        still_running.stopped = Ok(ContainerState::Running);
+        let mut results = Vec::new();
+        for (id, control) in [
+            ("failed", &failed),
+            ("stopped", &stopped),
+            ("live", &still_running),
+        ] {
+            results.push(stop_machine_result(
+                id.to_string(),
+                format!("Machine {id}"),
+                stop_registered_machine(control, id).await,
+            ));
+        }
+        assert_eq!(results[0].machine_id, "failed");
+        assert_eq!(results[0].outcome, StopMachineOutcome::Failed);
+        assert_eq!(
+            results[0].error.as_deref(),
+            Some("Docker refused to stop the container.")
+        );
+        assert_eq!(results[1].outcome, StopMachineOutcome::Stopped);
+        assert_eq!(results[1].error, None);
+        assert_eq!(results[2].outcome, StopMachineOutcome::Failed);
+        assert!(results[2].error.as_ref().unwrap().contains("stopped state"));
+    }
 }

@@ -653,39 +653,54 @@ mod tests {
     }"#;
 
     #[test]
-    fn a_debug_identifier_the_profile_does_not_cover_falls_back_to_the_approved_one() {
-        let profile = "TEAM123456.com.example.app";
-        assert_eq!(
-            device_bundle_identifier("com.example.app", "com.example.app", profile).unwrap(),
-            ("com.example.app".to_string(), None)
-        );
-        assert_eq!(
-            device_bundle_identifier("com.example.app.debug", "com.example.app", profile).unwrap(),
-            (
-                "com.example.app".to_string(),
-                Some("com.example.app.debug".to_string())
+    fn a_debug_build_requires_a_profile_for_its_own_identifier() {
+        for profile in [
+            "TEAM123456.com.example.app.debug",
+            "TEAM123456.com.example.*",
+            "TEAM123456.*",
+        ] {
+            assert!(
+                validate_device_bundle_identifier(
+                    "com.example.app.debug",
+                    "com.example.app.debug",
+                    profile
+                )
+                .is_ok()
+            );
+        }
+        assert!(
+            validate_device_bundle_identifier(
+                "com.example.app",
+                "com.example.app",
+                "TEAM123456.com.example.app"
             )
+            .is_ok()
         );
-        // A wildcard profile covers the Debug identifier and it is kept.
-        assert_eq!(
-            device_bundle_identifier("com.example.app.debug", "com.example.app", "TEAM123456.*")
-                .unwrap(),
-            ("com.example.app.debug".to_string(), None)
-        );
-        let error = device_bundle_identifier("com.other.app.debug", "com.other.app", profile)
-            .expect_err("neither covered");
-        assert!(error.to_string().contains("com.other.app.debug"));
-        assert!(error.to_string().contains("does not cover"));
 
-        let plain = device_signing_xcconfig("App", "TEAM123456", "ABCD", "uuid", None);
-        assert!(!plain.contains("PRODUCT_BUNDLE_IDENTIFIER"));
-        let renamed =
-            device_signing_xcconfig("App", "TEAM123456", "ABCD", "uuid", Some("com.example.app"));
-        assert!(renamed.contains("BUILDBRIDGE_BUNDLE_App = com.example.app"));
-        // Only the app target: every other target inherits its own identifier.
-        assert!(renamed.contains(
-            "PRODUCT_BUNDLE_IDENTIFIER = $(BUILDBRIDGE_BUNDLE_$(TARGET_NAME):default=$(inherited))"
-        ));
+        let error = validate_device_bundle_identifier(
+            "com.example.app.debug",
+            "com.example.app.debug",
+            "TEAM123456.com.example.app",
+        )
+        .expect_err("a production profile must not rename the Debug app");
+        assert!(error.to_string().contains("com.example.app.debug"));
+        assert!(error.to_string().contains("Prepare signing"));
+        assert!(
+            validate_device_bundle_identifier(
+                "com.other.app.debug",
+                "com.other.app.debug",
+                "TEAM123456.com.example.*"
+            )
+            .is_err()
+        );
+        let error = validate_device_bundle_identifier(
+            "com.example.app.other-debug",
+            "com.example.app.debug",
+            "TEAM123456.*",
+        )
+        .expect_err("an environment change must not install another app under a wildcard profile");
+        assert!(error.to_string().contains("changed"));
+        assert!(error.to_string().contains("Prepare signing"));
     }
 
     #[test]
@@ -984,52 +999,24 @@ pub(crate) struct DeviceBuildTarget {
     product_path: String,
 }
 
-/// Which identifier the Debug build is signed under. A project often gives its Debug
-/// configuration a suffixed identifier so both builds can sit on one phone, but the development
-/// profile is made for the approved identifier — the one the project was verified and the
-/// archive signs with — and Apple profiles are per App ID. When the profile covers the Debug
-/// identifier it is used as it is; when it covers only the approved one, the build is signed
-/// under that and the project's own identifier is reported back; otherwise the mismatch is
-/// named in full.
-pub(crate) fn device_bundle_identifier(
+/// A device build must keep the project's Debug identifier. Renaming it to fit another
+/// profile can replace the store app and leave two installations claiming the Debug URL scheme.
+pub(crate) fn validate_device_bundle_identifier(
     debug_identifier: &str,
-    approved_identifier: &str,
+    expected_identifier: &str,
     profile_application_identifier: &str,
-) -> Result<(String, Option<String>), ProviderError> {
-    if profile_allows_bundle(profile_application_identifier, debug_identifier) {
-        return Ok((debug_identifier.to_string(), None));
+) -> Result<(), ProviderError> {
+    if debug_identifier != expected_identifier {
+        return Err(ProviderError::GuestBridge(format!(
+            "the Debug bundle identifier changed from {expected_identifier} to {debug_identifier} while preparing this build. Prepare signing for this iPhone again before building; no app has been installed"
+        )));
     }
-    if profile_allows_bundle(profile_application_identifier, approved_identifier) {
-        return Ok((
-            approved_identifier.to_string(),
-            Some(debug_identifier.to_string()),
-        ));
+    if profile_allows_bundle(profile_application_identifier, debug_identifier) {
+        return Ok(());
     }
     Err(ProviderError::GuestBridge(format!(
-        "the Debug configuration builds bundle identifier {debug_identifier}, which the development profile for {approved_identifier} does not cover"
+        "the development profile allows {profile_application_identifier}, not the Debug bundle identifier {debug_identifier}. Prepare signing for this iPhone to create or download a matching profile; the app's identifier will not be changed"
     )))
-}
-
-/// The archive's target-scoped signing settings, plus — when the Debug build is signed under
-/// the approved identifier — that identifier for the app target alone. Every other target keeps
-/// its own: a bare override would rename every Pod framework too.
-pub(crate) fn device_signing_xcconfig(
-    target: &str,
-    development_team: &str,
-    identity_sha1: &str,
-    profile_uuid: &str,
-    bundle_override: Option<&str>,
-) -> String {
-    let mut xcconfig =
-        apple_archive_signing_xcconfig(target, development_team, identity_sha1, profile_uuid);
-    if let Some(bundle) = bundle_override {
-        xcconfig.push_str(&format!(
-            "BUILDBRIDGE_BUNDLE_{target} = {bundle}\n\
-PRODUCT_BUNDLE_IDENTIFIER = $(BUILDBRIDGE_BUNDLE_$(TARGET_NAME):default=$(inherited))\n"
-        ));
-    }
-
-    xcconfig
 }
 
 /// The bundle identifier the App target's Debug configuration builds, read from the guest's
@@ -1397,6 +1384,7 @@ pub(crate) fn parse_device_run_meta(line: &str) -> Result<DeviceRunMeta, Provide
 fn validate_device_run_request(
     meta: &DeviceRunMeta,
     device_identifier: &str,
+    bundle_identifier: &str,
     live_reload_url: Option<&str>,
 ) -> Result<(), ProviderError> {
     if meta.device_identifier != device_identifier {
@@ -1404,6 +1392,12 @@ fn validate_device_run_request(
             "A session is already running on another iPhone. Close the running app on that iPhone to end its console session, then build and run again."
                 .into(),
         ));
+    }
+    if meta.bundle_identifier != bundle_identifier {
+        return Err(ProviderError::GuestBridge(format!(
+            "The running iPhone session uses {}, but this Debug build uses {bundle_identifier}. Close the running app on the iPhone to end its console session, then build and run again with the matching development profile.",
+            meta.bundle_identifier
+        )));
     }
     if meta.live_reload_url.as_deref() != live_reload_url {
         return Err(ProviderError::GuestBridge(
@@ -1707,8 +1701,6 @@ where
     if let Some(version) = version {
         validate_apple_version(version).map_err(ProviderError::GuestBridge)?;
     }
-    // Set while the target is resolved; a reattached run does not resolve it again.
-    let mut project_bundle_identifier: Option<String> = None;
     if keychain_password.is_empty() || keychain_password.len() > 512 {
         return Err(ProviderError::GuestBridge(
             "the signing keychain credential is missing or invalid".to_string(),
@@ -1786,7 +1778,12 @@ where
             ),
         )?;
         let existing = parse_device_run_meta(record.trim_end_matches(['\r', '\n']))?;
-        validate_device_run_request(&existing, &device.identifier, live_reload_url.as_deref())?;
+        validate_device_run_request(
+            &existing,
+            &device.identifier,
+            signing.bundle_identifier,
+            live_reload_url.as_deref(),
+        )?;
         meta = Some(existing);
     }
     if !reattached {
@@ -1860,33 +1857,17 @@ where
                 ),
             )?;
             let mut target = parse_device_build_target(&settings, &derived_data)?;
-            let (signed_as, project_identifier) = device_bundle_identifier(
+            validate_device_bundle_identifier(
                 &target.bundle_identifier,
                 signing.bundle_identifier,
                 &signing.profile.application_identifier,
             )?;
-            if let Some(project) = &project_identifier {
-                let note = format!(
-                    "Signing the Debug build as {signed_as}: the project's Debug identifier {project} has no development profile, and the app target alone is renamed for this build."
-                );
-                on_progress(device_progress(
-                    AppleDeviceRunPhase::ResolvingTarget,
-                    started_at,
-                    &note,
-                    vec![note.clone()],
-                ));
-            }
-            target.bundle_identifier = signed_as;
-            project_bundle_identifier = project_identifier;
 
-            let mut xcconfig = device_signing_xcconfig(
+            let mut xcconfig = apple_archive_signing_xcconfig(
                 &target.target,
                 signing.development_team,
                 signing.identity_sha1,
                 &signing.profile.uuid,
-                project_bundle_identifier
-                    .as_deref()
-                    .map(|_| target.bundle_identifier.as_str()),
             );
             // The requested version rides in the same settings file as the signing, the way
             // the archive carries it; the built app is checked against it below.
@@ -2111,7 +2092,12 @@ where
         }
         if line.starts_with(META_PREFIX) {
             let existing = parse_device_run_meta(&line)?;
-            validate_device_run_request(&existing, &device.identifier, live_reload_url.as_deref())?;
+            validate_device_run_request(
+                &existing,
+                &device.identifier,
+                signing.bundle_identifier,
+                live_reload_url.as_deref(),
+            )?;
             meta = Some(existing);
             continue;
         }
@@ -2218,7 +2204,7 @@ where
     Ok(AppleDeviceRunResult {
         device: device.clone(),
         bundle_identifier: meta.bundle_identifier,
-        project_bundle_identifier,
+        project_bundle_identifier: None,
         live_reload_url: meta.live_reload_url,
         app_path: meta.app_path,
         marketing_version: meta.marketing_version,
@@ -2255,21 +2241,35 @@ mod run_tests {
     }
 
     #[test]
-    fn reattached_iphone_sessions_must_match_the_device_and_live_reload_url() {
+    fn reattached_iphone_sessions_must_match_the_device_bundle_and_live_reload_url() {
         let legacy = "__BUILDBRIDGE_DEVICE_RUN_META__\tE3F1A2B4-5C6D-4E7F-8A9B-0C1D2E3F4A5B\tcom.example.app\t/Users/b/App.app\t22222222-3333-4444-5555-666666666666\t3.2.0\t15\t1756900000";
         let mut meta =
             parse_device_run_meta(legacy).expect("existing packaged app sessions remain readable");
         assert_eq!(meta.live_reload_url, None);
-        assert!(validate_device_run_request(&meta, &meta.device_identifier, None).is_ok());
+        assert!(
+            validate_device_run_request(&meta, &meta.device_identifier, "com.example.app", None)
+                .is_ok()
+        );
+        let error = validate_device_run_request(
+            &meta,
+            &meta.device_identifier,
+            "com.example.app.debug",
+            None,
+        )
+        .expect_err("a legacy production-ID run must not be reused for the Debug app");
+        assert!(error.to_string().contains("com.example.app.debug"));
         assert!(
             validate_device_run_request(
                 &meta,
                 &meta.device_identifier,
+                "com.example.app",
                 Some("http://dev.local:5173/")
             )
             .is_err()
         );
-        assert!(validate_device_run_request(&meta, "another-phone", None).is_err());
+        assert!(
+            validate_device_run_request(&meta, "another-phone", "com.example.app", None).is_err()
+        );
         meta.live_reload_url = Some("http://dev.local:5173/".into());
         assert_eq!(
             parse_device_run_meta(&encode_device_run_meta(&meta)).unwrap(),
@@ -2279,15 +2279,20 @@ mod run_tests {
             validate_device_run_request(
                 &meta,
                 &meta.device_identifier,
+                "com.example.app",
                 Some("http://dev.local:5173/")
             )
             .is_ok()
         );
-        assert!(validate_device_run_request(&meta, &meta.device_identifier, None).is_err());
+        assert!(
+            validate_device_run_request(&meta, &meta.device_identifier, "com.example.app", None)
+                .is_err()
+        );
         assert!(
             validate_device_run_request(
                 &meta,
                 &meta.device_identifier,
+                "com.example.app",
                 Some("http://other.local:5173/")
             )
             .is_err()

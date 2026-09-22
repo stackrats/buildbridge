@@ -24,9 +24,8 @@ lastSyncedAtEpochSeconds: number | null, lastBuildSucceeded: boolean, lastXcodeV
  */
 lastBuildTarget: UnsignedBuildTarget | null, 
 /**
- * The identifier the App target's Debug configuration builds, once the device step has
- * registered it at Apple; the device build is signed for it and installs beside the store
- * build. None until then, or when it is the approved identifier.
+ * The identifier resolved from the App target's Debug build settings, even when it is
+ * the same as the release identifier. None until device signing or a device run resolves it.
  */
 debugBundleIdentifier: string | null, 
 /**

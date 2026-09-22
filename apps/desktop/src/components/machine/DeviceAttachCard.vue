@@ -151,11 +151,18 @@ const issues = computed(() =>
             <Callout
                 v-if="readiness.substate === 'signing' && !readiness.canPrepareSigning"
                 tone="warn"
-                title="The attached credentials have no Team key"
+                title="Device signing is not ready"
             >
-                Registering the phone and creating a development profile happen at Apple through the
-                App Store Connect key in the credentials. Add one under Signing, or store a
-                development identity and a profile that already lists this phone.
+                <template v-if="!session.view?.appleWorkspace?.debugBundleIdentifier">
+                    Choose <b>Check again</b> to read the project's Debug bundle identifier and
+                    verify the imported signing. This check does not need a Team key.
+                </template>
+                <template v-else>
+                    Import a development identity and a development profile for the Debug bundle
+                    identifier that lists this phone, then provision them in macOS. To have
+                    buildbridge register the phone and create the profile at Apple, add an App Store
+                    Connect Team key under Signing.
+                </template>
             </Callout>
             <Callout
                 v-if="readiness.substate === 'developer-mode'"

@@ -11,7 +11,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -54,27 +54,38 @@ fn guarded(script: &str) -> String {
     }
 }
 
+/// Retry only the kernel's transient refusal to execute a file another test's fork still
+/// has open for writing. Every other error and every actual process exit returns immediately.
+fn retry_executable_busy<T>(mut attempt: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let deadline = Instant::now() + GIVE_UP_AFTER;
+    loop {
+        match attempt() {
+            Err(error)
+                if error.kind() == ErrorKind::ExecutableFileBusy && Instant::now() < deadline => {}
+            result => return result,
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Executes an existing helper without rewriting its contents or skipping its shebang.
+pub(crate) fn runnable_output(command: &mut Command) -> std::io::Result<Output> {
+    retry_executable_busy(|| command.output())
+}
+
 /// Writes an executable script and returns once the kernel will actually run it.
 pub(crate) fn write_runnable(path: &Path, script: &str) {
     fs::write(path, guarded(script)).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-    let deadline = Instant::now() + GIVE_UP_AFTER;
-    loop {
-        let attempt = Command::new(path)
+    retry_executable_busy(|| {
+        Command::new(path)
             .arg(PROBE)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status();
-        match attempt {
-            // The exit status is the script's business: this only asks whether it ran.
-            Ok(_) => return,
-            Err(error)
-                if error.kind() == ErrorKind::ExecutableFileBusy && Instant::now() < deadline => {}
-            Err(error) => panic!("the fixture {} could not be run: {error}", path.display()),
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+            .status()
+    })
+    .unwrap_or_else(|error| panic!("the fixture {} could not be run: {error}", path.display()));
 }
 
 #[cfg(test)]
