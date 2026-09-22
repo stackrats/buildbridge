@@ -19,6 +19,7 @@ import BrandLogo from './ui/BrandLogo.vue';
 import Button from './ui/Button.vue';
 import Chip from './ui/Chip.vue';
 import Sparkline from './ui/Sparkline.vue';
+import StopAllMachinesButton from './StopAllMachinesButton.vue';
 
 const machines = useMachinesStore();
 const runner = useRunnerStore();
@@ -184,6 +185,7 @@ const runnerChip = computed(() => controlPlaneChip(runner.state.status, runner.s
                 </span>
             </Chip>
 
+            <StopAllMachinesButton v-if="machines.machines.value.length" compact />
             <Chip
                 v-if="inspectorAvailable"
                 tip="Open the web inspector for this desktop: its console, network requests and layout"

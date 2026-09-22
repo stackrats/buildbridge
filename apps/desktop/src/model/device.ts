@@ -6,6 +6,7 @@ import type {
     GuestDevice,
     HostUsbDevice,
     MachineView,
+    ProvisioningProfileSummary,
     SigningProvisioningResult,
 } from '../types/backend';
 
@@ -34,22 +35,47 @@ export interface DeviceReadiness {
     name: string;
 }
 
-/** A development identity is provisioned and one of its profiles lists this phone. */
+/** The Debug app's development profile, carrying the provisioned identity and this phone. */
+export function matchingDeviceDevelopmentProfile(
+    signing: SigningProvisioningResult | null,
+    udid: string,
+    debugBundleIdentifier: string | null | undefined,
+): ProvisioningProfileSummary | null {
+    const identity = signing?.developmentIdentity;
+    if (!signing || !identity || !debugBundleIdentifier?.trim() || !udid.trim()) {
+        return null;
+    }
+    const wanted = udid.toUpperCase();
+    return (
+        signing.profiles.find(
+            (profile) =>
+                profile.kind === 'development' &&
+                profile.teamIdentifier === signing.developmentTeam &&
+                profile.developerCertificateSha256.includes(identity.certificateSha256) &&
+                profileAllowsBundle(profile.applicationIdentifier, debugBundleIdentifier) &&
+                (profile.provisionedDeviceUdids ?? []).some(
+                    (listed) => listed.toUpperCase() === wanted,
+                ),
+        ) ?? null
+    );
+}
+
+function profileAllowsBundle(applicationIdentifier: string, bundleIdentifier: string): boolean {
+    const separator = applicationIdentifier.indexOf('.');
+    if (separator <= 0) return false;
+    const profileBundle = applicationIdentifier.slice(separator + 1);
+    if (profileBundle === bundleIdentifier || profileBundle === '*') return true;
+    if (!profileBundle.endsWith('.*')) return false;
+    const prefix = profileBundle.slice(0, -1);
+    return !prefix.includes('*') && bundleIdentifier.startsWith(prefix);
+}
+
 export function deviceSigningReady(
     signing: SigningProvisioningResult | null,
     udid: string,
+    debugBundleIdentifier: string | null | undefined,
 ): boolean {
-    if (!signing?.developmentIdentity) {
-        return false;
-    }
-    const wanted = udid.toUpperCase();
-    return signing.profiles.some(
-        (profile) =>
-            profile.kind === 'development' &&
-            (profile.provisionedDeviceUdids ?? []).some(
-                (listed) => listed.toUpperCase() === wanted,
-            ),
-    );
+    return matchingDeviceDevelopmentProfile(signing, udid, debugBundleIdentifier) !== null;
 }
 
 export function deviceReadiness(view: MachineView): DeviceReadiness {
@@ -66,7 +92,9 @@ export function deviceReadiness(view: MachineView): DeviceReadiness {
           null)
         : null;
     const signingReady =
-        device !== null && device.udid !== null && deviceSigningReady(signing, device.udid);
+        device !== null &&
+        device.udid !== null &&
+        deviceSigningReady(signing, device.udid, view.appleWorkspace?.debugBundleIdentifier);
     const canPrepareSigning = signingKit?.appStoreConnectConfigured ?? false;
     const name = device?.name ?? hostDevice?.product ?? 'the iPhone';
     const substate: DeviceSubstate =
@@ -126,9 +154,12 @@ export function deviceNextSummary(readiness: DeviceReadiness, view: MachineView)
         case 'trust':
             return `Unlock ${readiness.name} and tap Trust when it asks about this computer`;
         case 'signing':
+            if (!view.appleWorkspace?.debugBundleIdentifier && !readiness.canPrepareSigning) {
+                return 'Check again to read the Debug bundle identifier and verify the imported signing';
+            }
             return readiness.canPrepareSigning
                 ? `Register ${readiness.name} at Apple and provision a development identity`
-                : 'The attached credentials have no Team key to register the iPhone; add one to them';
+                : 'Import a development identity and profile for the Debug app and this phone, or add a Team key';
         case 'developer-mode':
             return `Turn on Developer Mode on ${readiness.name}, then refresh`;
         case 'ready':
@@ -220,8 +251,10 @@ export function deviceChecks(
             label: 'Signing',
             ok: readiness.signingReady,
             detail: readiness.signingReady
-                ? 'development profile lists this phone'
-                : 'register the phone at Apple',
+                ? 'development profile matches the Debug app and this phone'
+                : view.appleWorkspace?.debugBundleIdentifier
+                  ? 'prepare a development profile for the Debug app and this phone'
+                  : 'check again to read the Debug bundle identifier',
         },
         {
             label: 'Developer Mode',

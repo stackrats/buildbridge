@@ -420,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "buildbridge-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "buildbridge-engine",
  "buildbridge-machines",
@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "buildbridge-contract"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "buildbridge-desktop"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "buildbridge-engine",
  "buildbridge-machines",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "buildbridge-engine"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "buildbridge-contract",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "buildbridge-machines"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -483,7 +483,7 @@ dependencies = [
 
 [[package]]
 name = "buildbridge-runner"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "buildbridge-contract",
  "reqwest 0.12.28",

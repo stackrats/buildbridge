@@ -859,7 +859,7 @@ pub struct AppleArchiveResult {
 pub enum ProviderError {
     #[error("invalid machine configuration: {0}")]
     InvalidConfig(String),
-    #[error("the host is not ready for Docker-OSX: {0}")]
+    #[error("the host is not ready to start the machine: {0}")]
     Prerequisites(String),
     #[error("failed to run Docker: {0}")]
     DockerUnavailable(String),
@@ -1551,11 +1551,12 @@ mod tests {
             assert_eq!(mode & 0o777, 0o700);
         }
 
-        let output = Command::new(&script)
-            .arg("builder@127.0.0.1's password: ")
-            .env(GUEST_PASSWORD_ENV, "s3cret 'value'")
-            .output()
-            .expect("helper should run");
+        let output = crate::test_scripts::runnable_output(
+            Command::new(&script)
+                .arg("builder@127.0.0.1's password: ")
+                .env(GUEST_PASSWORD_ENV, "s3cret 'value'"),
+        )
+        .expect("helper should run");
         assert!(output.status.success());
         assert_eq!(output.stdout, b"s3cret 'value'\n");
 

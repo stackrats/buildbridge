@@ -26,6 +26,7 @@ import MachineHeader from './MachineHeader.vue';
 import MachineLoading from './MachineLoading.vue';
 import OptimizationsSection from './OptimizationsSection.vue';
 import StepDetail from './StepDetail.vue';
+import StopAllMachinesButton from '../StopAllMachinesButton.vue';
 
 const { machineId } = defineProps<{ machineId: string }>();
 const ui = useUi();
@@ -226,15 +227,21 @@ onBeforeUnmount(() => {
 
                     <!-- Only a failure earns a banner: what an operation achieved is on its row
                          and its panel, so a notice that repeated it would say nothing new. -->
+                    <!-- Keep the stop dialog mounted while its results update the warning. -->
                     <Callout
-                        v-if="session.error && flows.builds[machineId]?.status !== 'failed'"
+                        v-show="session.error && flows.builds[machineId]?.status !== 'failed'"
                         tone="danger"
                         class="mt-4"
                     >
                         <p>{{ session.error }}</p>
-                        <Button class="mt-2" size="sm" variant="ghost" @click="session.error = null"
-                            >Dismiss</Button
-                        >
+                        <div class="mt-2 flex flex-wrap items-center gap-2">
+                            <StopAllMachinesButton
+                                :visible="Boolean(session.error?.includes('memory'))"
+                            />
+                            <Button size="sm" variant="ghost" @click="session.error = null">
+                                Dismiss
+                            </Button>
+                        </div>
                     </Callout>
 
                     <div class="mt-5 space-y-5">

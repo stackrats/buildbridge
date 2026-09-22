@@ -512,16 +512,24 @@ pub(crate) async fn sync_apple_workspace_with_env(
     workspace.last_sync_file_count = Some(sync.source_file_count);
     workspace.last_sync_bytes = Some(sync.source_bytes);
     workspace.last_synced_at_epoch_seconds = Some(crate::machines::now_epoch_seconds());
-    workspace.last_build_succeeded = false;
-    workspace.last_xcode_version = None;
-    workspace.last_native_lock_updated = false;
-    workspace.last_build_target = None;
+    invalidate_apple_build(&mut workspace);
     workspace.last_source = Some(source);
     save_apple_workspace(&paths, &workspace)?;
     let view = build_machine_view(app, &paths).await?;
 
     Ok(SyncAppleWorkspaceResult { view, sync })
 }
+
+/// A new snapshot or framework preparation can change the Debug build settings, so its
+/// resolved identity expires along with the previous unsigned build's result.
+fn invalidate_apple_build(workspace: &mut StoredAppleWorkspace) {
+    workspace.last_build_succeeded = false;
+    workspace.last_xcode_version = None;
+    workspace.last_native_lock_updated = false;
+    workspace.last_build_target = None;
+    workspace.debug_bundle_identifier = None;
+}
+
 pub async fn run_apple_smoke_build(
     app: &Engine,
     machine_id: String,
@@ -555,10 +563,7 @@ pub async fn run_apple_smoke_build(
         drop(guard);
         return Err(error);
     }
-    workspace.last_build_succeeded = false;
-    workspace.last_xcode_version = None;
-    workspace.last_native_lock_updated = false;
-    workspace.last_build_target = None;
+    invalidate_apple_build(&mut workspace);
     if let Err(error) = save_apple_workspace(&paths, &workspace) {
         drop(guard);
         return Err(error);
@@ -771,4 +776,43 @@ pub async fn clear_apple_archive(app: &Engine, machine_id: String) -> Result<Mac
 
     drop(guard);
     build_machine_view(app, &paths).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synchronizing_or_preparing_a_build_invalidates_the_resolved_debug_identity() {
+        let mut workspace: StoredAppleWorkspace = serde_json::from_value(serde_json::json!({
+            "localPath": "/unused-project",
+            "name": "Example",
+            "scheme": "App",
+            "developmentTeam": "TEAM123456",
+            "bundleIdentifier": "com.example.app",
+            "debugBundleIdentifier": "com.example.app.old-debug",
+            "lastSnapshotSha256": "current-snapshot",
+            "lastBuildSucceeded": true,
+            "lastXcodeVersion": "Xcode 26",
+            "lastNativeLockUpdated": true,
+            "lastBuildTarget": "device_sdk"
+        }))
+        .unwrap();
+
+        invalidate_apple_build(&mut workspace);
+
+        assert!(workspace.debug_bundle_identifier.is_none());
+        assert!(!workspace.last_build_succeeded);
+        assert!(workspace.last_xcode_version.is_none());
+        assert!(!workspace.last_native_lock_updated);
+        assert!(workspace.last_build_target.is_none());
+        assert_eq!(
+            workspace.bundle_identifier.as_deref(),
+            Some("com.example.app")
+        );
+        assert_eq!(
+            workspace.last_snapshot_sha256.as_deref(),
+            Some("current-snapshot")
+        );
+    }
 }

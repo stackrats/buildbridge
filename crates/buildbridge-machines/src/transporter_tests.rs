@@ -263,29 +263,28 @@ fn guest_stops_transporter_and_cleans_key_when_the_operation_is_cancelled() {
         let entered = scope.clone();
         let worker = threads.spawn(|| {
             let _operation = enter_operation(entered);
-            fixture
-                .run("hang", &fixture.digest, Duration::from_secs(15))
-                .0
+            fixture.run("hang", &fixture.digest, Duration::from_secs(30))
         });
         let start = Instant::now();
+        let startup_timeout = Duration::from_secs(20);
         while !fixture.directory.join("report.json").exists()
-            && start.elapsed() < Duration::from_secs(5)
+            && !worker.is_finished()
+            && start.elapsed() < startup_timeout
         {
             thread::sleep(Duration::from_millis(50));
         }
-        assert!(
-            fixture.directory.join("report.json").exists(),
-            "mock Transporter did not start"
-        );
+        let ready = fixture.directory.join("report.json").exists();
+        let finished_before_cancellation = worker.is_finished();
+        // Cancel and join even when startup fails, so asserting readiness cannot leave the
+        // upload running until its separate timeout or hide the worker's actual failure.
         scope.cancel();
+        let (result, progress) = worker.join().expect("upload worker should not panic");
         assert!(
-            worker
-                .join()
-                .unwrap()
-                .unwrap_err()
-                .to_string()
-                .contains("stopped")
+            ready,
+            "mock Transporter did not start within {startup_timeout:?}; worker finished before cancellation: {finished_before_cancellation}; result: {result:?}; progress: {progress:?}"
         );
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("stopped"), "{error}");
     });
     fixture.assert_cleaned();
 }

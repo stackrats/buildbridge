@@ -81,6 +81,8 @@ export interface Backend {
     configureMachine(machineId: string, profile: T.MachineConfig): Promise<T.MachineView>;
     launchMachine(machineId: string): Promise<T.MachineView>;
     stopMachine(machineId: string): Promise<T.MachineView>;
+    /** Stops registered machines independently, retaining disks and reporting every failure. */
+    stopAllMachines(): Promise<T.StopAllMachinesResult>;
     configureGuestAccess(machineId: string, username: string): Promise<T.MachineView>;
     /**
      * Installs the access key over one password-authenticated SSH session to the pinned guest.
@@ -389,6 +391,7 @@ async function createTauriBackend(): Promise<Backend> {
             invoke('configure_machine', { machineId, profile }),
         launchMachine: (machineId) => invoke('launch_machine', { machineId }),
         stopMachine: (machineId) => invoke('stop_machine', { machineId }),
+        stopAllMachines: () => invoke('stop_all_machines'),
         configureGuestAccess: (machineId, username) =>
             invoke('configure_mac_guest_access', { machineId, input: { username } }),
         authorizeGuestKey: (machineId, username, password) =>

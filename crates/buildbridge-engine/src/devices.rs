@@ -73,6 +73,15 @@ pub async fn open_safari_web_inspector(
 pub async fn list_guest_devices(app: &Engine, machine_id: String) -> Result<MachineView, String> {
     let guest = guest_context(app, &machine_id).await?;
     let paths = guest.paths.clone();
+    let mut workspace = load_apple_workspace(&paths)?;
+    if let Some(workspace) = workspace.as_mut()
+        && workspace.debug_bundle_identifier.is_none()
+        && workspace.last_build_succeeded
+        && workspace.last_snapshot_sha256.is_some()
+    {
+        resolve_device_bundle_identifier(app, &paths, workspace, guest.ssh_port(), &guest.username)
+            .await?;
+    }
     let devices = run_machine_operation(app, &machine_id, "listing_devices", move || {
         buildbridge_machines::list_guest_devices(
             guest.ssh_port(),
@@ -133,6 +142,64 @@ pub struct DeviceSigningProgress {
     pub(crate) detail: String,
 }
 
+/// Resolve the synchronized project's Debug identity every time: a saved value can belong
+/// to an older snapshot, and a missing value does not mean Debug uses the release identity.
+async fn resolve_device_bundle_identifier(
+    app: &Engine,
+    paths: &MachinePaths,
+    workspace: &mut StoredAppleWorkspace,
+    ssh_port: u16,
+    username: &str,
+) -> Result<String, String> {
+    let machine_id = paths.id.clone();
+    let paths = paths.clone();
+    let mut resolved_workspace = workspace.clone();
+    let username = username.to_string();
+    let (resolved_workspace, identifier) =
+        run_machine_operation(app, &machine_id, "checking_device_signing", move || {
+            let identifier = buildbridge_machines::resolve_debug_bundle_identifier(
+                ssh_port,
+                &username,
+                &paths.guest_identity(),
+                &paths.known_hosts(),
+                &resolved_workspace.layout,
+            )
+            .map_err(|error| error.to_string())?;
+            record_device_bundle_identifier(&paths, &mut resolved_workspace, &identifier)?;
+            Ok((resolved_workspace, identifier))
+        })
+        .await?;
+    *workspace = resolved_workspace;
+    Ok(identifier)
+}
+
+fn record_device_bundle_identifier(
+    paths: &MachinePaths,
+    workspace: &mut StoredAppleWorkspace,
+    identifier: &str,
+) -> Result<(), String> {
+    apple_api::validate_bundle_identifier(identifier)?;
+    if workspace.debug_bundle_identifier.as_deref() != Some(identifier) {
+        workspace.debug_bundle_identifier = Some(identifier.to_string());
+        save_apple_workspace(paths, workspace)?;
+    }
+    Ok(())
+}
+
+fn device_profile_for_resolved_identifier(
+    signing: &SigningProvisioningResult,
+    identifier: &str,
+    udid: &str,
+) -> Result<buildbridge_machines::ProvisioningProfileSummary, String> {
+    buildbridge_machines::select_development_profile(signing, identifier, udid)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "Prepare signing for this iPhone first. No provisioned development profile covers the Debug identifier {identifier} and this iPhone."
+            )
+        })
+}
+
 /// Makes one phone buildable: a development identity in the kit (created at Apple if needed),
 /// the phone registered with the team, a development profile that lists it, and both
 /// identities provisioned into the guest keychain. Each step persists before the next, so a
@@ -189,28 +256,14 @@ pub async fn prepare_apple_device_signing(
         .find(&machine_id)?
         .config
         .clone();
-    let device_bundle_identifier = {
-        let identity_path = paths.guest_identity();
-        let known_hosts_path = paths.known_hosts();
-        let layout = workspace.layout.clone();
-        let ssh_port = profile.ssh_port;
-        let username = access.username.clone();
-        tokio::task::spawn_blocking(move || {
-            buildbridge_machines::resolve_debug_bundle_identifier(
-                ssh_port,
-                &username,
-                &identity_path,
-                &known_hosts_path,
-                &layout,
-            )
-            .map_err(|error| error.to_string())
-        })
-        .await
-        .map_err(|error| error.to_string())??
-    };
-    if device_bundle_identifier != bundle_identifier {
-        apple_api::validate_bundle_identifier(&device_bundle_identifier)?;
-    }
+    let device_bundle_identifier = resolve_device_bundle_identifier(
+        app,
+        &paths,
+        &mut workspace,
+        profile.ssh_port,
+        &access.username,
+    )
+    .await?;
 
     // Already prepared for this phone: nothing to do beyond confirming the registration.
     if kit.development_certificate_path.is_some()
@@ -227,7 +280,7 @@ pub async fn prepare_apple_device_signing(
             apple_api::register_device(&key_id, &issuer_id, &private_key, &udid, &device_name)
                 .await?;
         return Ok(PrepareDeviceSigningResult {
-            view: current,
+            view: build_machine_view(app, &paths).await?,
             certificate_created: false,
             device_already_registered: registered.already_registered,
             profile_created: false,
@@ -357,10 +410,6 @@ pub async fn prepare_apple_device_signing(
                     &ensured.id,
                 )
                 .await?;
-            }
-            if workspace.debug_bundle_identifier.as_deref() != Some(&device_bundle_identifier) {
-                workspace.debug_bundle_identifier = Some(device_bundle_identifier.clone());
-                save_apple_workspace(&paths, &workspace)?;
             }
         }
         report(
@@ -542,7 +591,7 @@ pub async fn run_apple_device_build(
         .clone();
     let access = load_mac_guest_access(&paths)?
         .ok_or_else(|| "Configure the macOS short username first.".to_string())?;
-    let workspace = load_apple_workspace(&paths)?
+    let mut workspace = load_apple_workspace(&paths)?
         .ok_or_else(|| "Approve and synchronize a local Apple project first.".to_string())?;
     if !workspace.last_build_succeeded || workspace.last_snapshot_sha256.is_none() {
         return Err("Complete the unsigned project test build first.".to_string());
@@ -563,16 +612,16 @@ pub async fn run_apple_device_build(
         .signing
         .clone()
         .ok_or_else(|| "Provision and verify signing in macOS first.".to_string())?;
-    let device_profile = buildbridge_machines::select_development_profile(
-        &signing,
-        workspace
-            .debug_bundle_identifier
-            .as_deref()
-            .unwrap_or(&signing.bundle_identifier),
-        &udid,
+    let device_bundle_identifier = resolve_device_bundle_identifier(
+        app,
+        &paths,
+        &mut workspace,
+        profile.ssh_port,
+        &access.username,
     )
-    .cloned()
-    .ok_or_else(|| "Prepare signing for this iPhone first.".to_string())?;
+    .await?;
+    let device_profile =
+        device_profile_for_resolved_identifier(&signing, &device_bundle_identifier, &udid)?;
     let identity = signing
         .development_identity
         .clone()
@@ -635,7 +684,7 @@ pub async fn run_apple_device_build(
             keychain_path: &signing.keychain_path,
             identity_sha1: &identity.identity_sha1,
             development_team: &signing.development_team,
-            bundle_identifier: &signing.bundle_identifier,
+            bundle_identifier: &device_bundle_identifier,
             profile: &device_profile,
         };
         buildbridge_machines::run_apple_device_build(
@@ -807,4 +856,148 @@ pub(crate) fn save_apple_device_run_error(paths: &MachinePaths, error: &str) -> 
 
 pub(crate) fn remove_apple_device_run_error(paths: &MachinePaths) -> Result<(), String> {
     remove_file_if_present(&paths.apple_device_run_error())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RELEASE_IDENTIFIER: &str = "com.example.app";
+    const DEBUG_IDENTIFIER: &str = "com.example.app.debug";
+    const UDID: &str = "00008110-000A12345678001E";
+
+    fn workspace(cached_identifier: Option<&str>) -> StoredAppleWorkspace {
+        serde_json::from_value(serde_json::json!({
+            "localPath": "/unused-project",
+            "name": "Example",
+            "scheme": "App",
+            "developmentTeam": "TEAM123456",
+            "bundleIdentifier": RELEASE_IDENTIFIER,
+            "debugBundleIdentifier": cached_identifier,
+            "lastSnapshotSha256": "snapshot",
+            "lastBuildSucceeded": true
+        }))
+        .unwrap()
+    }
+
+    fn test_paths() -> (PathBuf, MachinePaths) {
+        let directory = std::env::temp_dir().join(format!(
+            "buildbridge-device-signing-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let app = Engine::new(EngineDeps {
+            config_dir: directory.join("config"),
+            data_dir: directory.join("data"),
+            events: Arc::new(NoEvents),
+        });
+        let paths = MachinePaths::resolve(&app, "test-device-signing").unwrap();
+        (directory, paths)
+    }
+
+    fn signing_for(identifier: &str) -> SigningProvisioningResult {
+        serde_json::from_value(serde_json::json!({
+            "keychainPath": "/keychain",
+            "developmentTeam": "TEAM123456",
+            "bundleIdentifier": RELEASE_IDENTIFIER,
+            "developmentIdentity": {
+                "identityName": "Apple Development: Example",
+                "identitySha1": "development-identity",
+                "certificateSha256": "development-certificate",
+                "certificateExpiresAt": "2099-01-01T00:00:00Z"
+            },
+            "profiles": [{
+                "uuid": "11111111-2222-3333-4444-555555555555",
+                "teamIdentifier": "TEAM123456",
+                "applicationIdentifier": format!("TEAM123456.{identifier}"),
+                "expiresAt": "2099-01-01T00:00:00Z",
+                "developerCertificateSha256": ["development-certificate"],
+                "kind": "development",
+                "provisionedDeviceUdids": [UDID],
+                "getTaskAllow": true
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn missing_debug_profile_records_the_resolved_identity_without_release_fallback() {
+        let (directory, paths) = test_paths();
+        let mut workspace = workspace(None);
+        record_device_bundle_identifier(&paths, &mut workspace, DEBUG_IDENTIFIER).unwrap();
+
+        let error = device_profile_for_resolved_identifier(
+            &signing_for(RELEASE_IDENTIFIER),
+            DEBUG_IDENTIFIER,
+            UDID,
+        )
+        .unwrap_err();
+        assert!(error.contains("Prepare signing for this iPhone first"));
+        assert!(error.contains(DEBUG_IDENTIFIER));
+        assert_eq!(
+            load_apple_workspace(&paths)
+                .unwrap()
+                .unwrap()
+                .debug_bundle_identifier
+                .as_deref(),
+            Some(DEBUG_IDENTIFIER)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn matching_imported_profiles_keep_the_resolved_identity_without_apple_credentials() {
+        for cached_identifier in [None, Some("com.example.app.old-debug")] {
+            for resolved_identifier in [DEBUG_IDENTIFIER, RELEASE_IDENTIFIER] {
+                let (directory, paths) = test_paths();
+                let mut workspace = workspace(cached_identifier);
+                save_apple_workspace(&paths, &workspace).unwrap();
+                record_device_bundle_identifier(&paths, &mut workspace, resolved_identifier)
+                    .unwrap();
+
+                let profile = device_profile_for_resolved_identifier(
+                    &signing_for(resolved_identifier),
+                    resolved_identifier,
+                    UDID,
+                )
+                .unwrap();
+                assert_eq!(
+                    profile.application_identifier,
+                    format!("TEAM123456.{resolved_identifier}")
+                );
+                assert_eq!(
+                    load_apple_workspace(&paths)
+                        .unwrap()
+                        .unwrap()
+                        .debug_bundle_identifier
+                        .as_deref(),
+                    Some(resolved_identifier)
+                );
+                fs::remove_dir_all(directory).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn an_unresolved_debug_setting_is_rejected_instead_of_using_the_cached_identity() {
+        let (directory, paths) = test_paths();
+        let mut workspace = workspace(Some(RELEASE_IDENTIFIER));
+        save_apple_workspace(&paths, &workspace).unwrap();
+
+        for identifier in ["", "$(PRODUCT_BUNDLE_IDENTIFIER)", "com.example.*"] {
+            assert!(record_device_bundle_identifier(&paths, &mut workspace, identifier).is_err());
+        }
+        assert_eq!(
+            load_apple_workspace(&paths)
+                .unwrap()
+                .unwrap()
+                .debug_bundle_identifier
+                .as_deref(),
+            Some(RELEASE_IDENTIFIER)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
