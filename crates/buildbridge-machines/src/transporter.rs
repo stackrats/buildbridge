@@ -1,4 +1,4 @@
-//! Deliver the exact retained IPA through Transporter inside the pinned macOS guest.
+//! Install Transporter in the pinned macOS guest, and deliver the exact retained IPA through it.
 
 use super::*;
 use std::sync::mpsc;
@@ -8,6 +8,196 @@ const TRANSPORTER_PREFIX: &str = "__BUILDBRIDGE_TRANSPORTER__:";
 const TRANSPORTER_COMPLETED: &str =
     "Upload delivered. Apple must process the build before it appears in TestFlight.";
 const TRANSPORTER_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60 + 15);
+/// Apple's download of the current Transporter command-line package for macOS. The address
+/// carries no version and always serves the latest release. The desktop links the same address
+/// (`apple-upload.ts`) for reading the licence the package carries.
+const TRANSPORTER_PACKAGE_URL: &str = "https://itunesconnect.apple.com/WebObjects/iTunesConnect.woa/ra/resources/download/public/Transporter__OSX/bin/";
+/// The Developer ID team Apple signs that package with. A digest would go stale with every
+/// Transporter release, and Apple refuses uploads from releases it has retired, so the package
+/// is pinned by its signer instead.
+const TRANSPORTER_PACKAGE_TEAM: &str = "4U568XBT3J";
+const TRANSPORTER_INSTALL_PREFIX: &str = "__BUILDBRIDGE_TRANSPORTER_INSTALL__:";
+const TRANSPORTER_INSTALL_JOB: &str = "install-transporter";
+
+/// Whether an upload would find Transporter in the guest, by the upload helper's own search;
+/// `None` when the probe could not say. The helper runs through `/usr/bin/python3`, a shim
+/// that asks the guest's console to install the command line tools while no Xcode is
+/// selected, so the probe reports nothing until one is.
+pub(crate) fn guest_transporter_installed(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+) -> Option<bool> {
+    let probe = format!(
+        "{XCODE_SELECTED_GUARD}exec /usr/bin/python3 -c {} locate",
+        shell_single_quote(TRANSPORTER_HELPER)
+    );
+    match run_guest_command(ssh_port, username, identity_path, known_hosts_path, &probe)
+        .ok()?
+        .as_str()
+    {
+        "installed" => Some(true),
+        "missing" => Some(false),
+        _ => None,
+    }
+}
+
+/// Installs Apple's Transporter command-line tool for the guest user, under the buildbridge
+/// tools directory the upload searches. The guest downloads Apple's current package itself and
+/// unpacks it only after `pkgutil` confirms Apple's Developer ID signature, so neither the Mac
+/// App Store nor an administrator password is involved. An earlier install is replaced only
+/// once the new one has unpacked.
+pub fn install_guest_transporter<F>(
+    ssh_port: u16,
+    username: &str,
+    identity_path: &Path,
+    known_hosts_path: &Path,
+    mut on_progress: F,
+) -> Result<(), ProviderError>
+where
+    F: FnMut(String),
+{
+    validate_guest_operation(ssh_port, username, identity_path, known_hosts_path)?;
+    let toolchain = guest_toolchain(&format!("/Users/{username}"));
+    let tools = &toolchain.tools;
+    let script = crate::device_run::guest_job_script(
+        TRANSPORTER_INSTALL_JOB,
+        tools,
+        "''",
+        &transporter_install_body(tools),
+    );
+    let mut child = guest_ssh_command(ssh_port, username, identity_path, known_hosts_path)
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .tracked_spawn()
+        .map_err(|error| {
+            upload_error(format!("could not start the Transporter install: {error}"))
+        })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| upload_error("could not capture the Transporter install output"))?;
+    let mut phase = None;
+    let mut last_output = String::new();
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|error| {
+            upload_error(format!(
+                "could not read the Transporter install output: {error}"
+            ))
+        })?;
+        if let Some(value) = line.strip_prefix(TRANSPORTER_INSTALL_PREFIX) {
+            let (detail, _) = transporter_install_phase(value).ok_or_else(|| {
+                upload_error("the guest returned an unknown Transporter install phase")
+            })?;
+            phase = Some(value.to_string());
+            on_progress(detail.to_string());
+        } else if line == "__BUILDBRIDGE_REATTACHED__:yes" {
+            on_progress(
+                "Reattached to the Transporter install already running inside macOS.".to_string(),
+            );
+        } else {
+            let line = sanitize_build_log_line(&line);
+            if !line.is_empty() {
+                last_output = line;
+            }
+        }
+    }
+    let status = child.wait().map_err(|error| {
+        upload_error(format!("could not finish the Transporter install: {error}"))
+    })?;
+    // 255 is ssh losing the connection, when the job may still be running. Otherwise it has
+    // ended, and a refused or broken package must not stay behind in its staging directory.
+    if status.code() != Some(255) {
+        let cleanup =
+            format!("/bin/rm -rf '{tools}/jobs/{TRANSPORTER_INSTALL_JOB}' '{tools}/itms-staging'");
+        let _ = run_guest_command(
+            ssh_port,
+            username,
+            identity_path,
+            known_hosts_path,
+            &cleanup,
+        );
+    }
+    if status.success() && phase.as_deref() == Some("completed") {
+        return Ok(());
+    }
+    Err(upload_error(transporter_install_failure(
+        phase.as_deref(),
+        &last_output,
+    )))
+}
+
+/// What each phase of the guest install says while it runs, and what its failure means.
+fn transporter_install_phase(value: &str) -> Option<(&'static str, &'static str)> {
+    match value {
+        "downloading" => Some((
+            "Downloading Transporter from Apple into the macOS machine.",
+            "could not download Transporter from Apple; check the macOS machine's internet connection",
+        )),
+        "verifying" => Some((
+            "Checking Apple's signature on the Transporter package.",
+            "the downloaded Transporter package is not signed by Apple's Transporter team, so nothing was installed",
+        )),
+        "unpacking" => Some((
+            "Unpacking Transporter.",
+            "could not unpack Transporter; check the macOS machine's free storage",
+        )),
+        "completed" => Some((
+            "Transporter is installed in the macOS machine.",
+            "the Transporter install did not confirm that it finished",
+        )),
+        _ => None,
+    }
+}
+
+/// A failed download or unpack carries the last line the guest printed, such as curl's own
+/// error. A refused signature does not: `pkgutil`'s report is not something to act on.
+fn transporter_install_failure(phase: Option<&str>, last_output: &str) -> String {
+    let Some((phase, (_, failure))) =
+        phase.and_then(|phase| Some((phase, transporter_install_phase(phase)?)))
+    else {
+        return "the Transporter install ended before it started downloading".to_string();
+    };
+    if phase == "verifying" || last_output.is_empty() {
+        failure.to_string()
+    } else {
+        format!("{failure}: {last_output}")
+    }
+}
+
+/// The install itself, run by the guest job wrapper under `set -eu`. Every step is fixed text:
+/// the only value in it is the guest tools directory, built from a validated username.
+fn transporter_install_body(tools: &str) -> String {
+    format!(
+        r#"phase() {{ /usr/bin/printf '{TRANSPORTER_INSTALL_PREFIX}%s\n' "$1"; }}
+itms="{tools}/itms"
+staging="{tools}/itms-staging"
+/bin/rm -rf "$staging"
+/bin/mkdir -p "$staging/itms"
+phase downloading
+/usr/bin/curl --fail --location --show-error --silent --output "$staging/iTMSTransporter.pkg" '{TRANSPORTER_PACKAGE_URL}'
+phase verifying
+/usr/sbin/pkgutil --check-signature "$staging/iTMSTransporter.pkg" > "$staging/signature"
+/usr/bin/grep -Eqx ' *Status: signed by a developer certificate issued by Apple for distribution' "$staging/signature"
+/usr/bin/grep -Eqx ' *1\. Developer ID Installer: Apple Inc\. .*\({TRANSPORTER_PACKAGE_TEAM}\)' "$staging/signature"
+phase unpacking
+/usr/sbin/pkgutil --expand "$staging/iTMSTransporter.pkg" "$staging/expanded"
+/bin/rm -f "$staging/iTMSTransporter.pkg"
+# One component package holds the payload; two would make this a path no file has.
+payload=$(/usr/bin/find "$staging/expanded" -mindepth 2 -maxdepth 2 -type f -name Payload)
+/bin/test -f "$payload"
+/usr/bin/tar -xf "$payload" -C "$staging/itms"
+/bin/test -x "$staging/itms/bin/iTMSTransporter"
+# Apple's own installer clears the caches an earlier Transporter left behind; so does this.
+/bin/rm -rf "$itms" "$HOME/Library/Caches/com.apple.amp.itmstransporter" "$HOME/.itmstransporter"
+/bin/mv "$staging/itms" "$itms"
+/bin/rm -rf "$staging"
+phase completed"#
+    )
+}
 
 /// Uses an installed Transporter with a team App Store Connect API key. The key is
 /// carried through framed stdin and removed from the guest on completion, failure,

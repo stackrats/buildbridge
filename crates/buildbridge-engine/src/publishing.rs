@@ -86,6 +86,68 @@ pub async fn upload_apple_archive(
     result
 }
 
+/// Installs Apple's Transporter command-line tool in the running guest, for uploads to use.
+/// Returns the refreshed view, whose diagnostics then report Transporter as installed.
+pub async fn install_guest_transporter(
+    app: &Engine,
+    machine_id: String,
+) -> Result<MachineView, String> {
+    let paths = MachinePaths::resolve(app, &machine_id)?;
+    let profile = machines::load_registry(app)?
+        .find(&machine_id)?
+        .config
+        .clone();
+    if !profile.provider.is_macos() {
+        return Err("Transporter installs in a macOS machine.".to_string());
+    }
+
+    let guard = begin_machine_operation(app, &machine_id, "installing_transporter")?;
+    let access = load_mac_guest_access(&paths)?.ok_or_else(|| {
+        "Configure the macOS short username before installing Transporter.".to_string()
+    })?;
+    let current = build_machine_view(app, &paths).await?;
+    if current.runtime.state != ContainerState::Running {
+        return Err("Start the macOS machine before installing Transporter.".to_string());
+    }
+    if current.guest.ssh.trust != GuestTrustState::Trusted
+        || !current.guest.diagnostics.authenticated
+    {
+        return Err(
+            "Finish the pinned macOS guest connection before installing Transporter.".to_string(),
+        );
+    }
+    let identity_path = paths.guest_identity();
+    let known_hosts_path = paths.known_hosts();
+    let scope = guard.scope();
+    let cancel_probe = Arc::clone(&scope);
+    let event_app = app.clone();
+    let event_machine_id = machine_id.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        let _operation = buildbridge_machines::enter_operation(scope);
+        buildbridge_machines::install_guest_transporter(
+            profile.ssh_port,
+            &access.username,
+            &identity_path,
+            &known_hosts_path,
+            |detail| {
+                emit_machine_progress(
+                    &event_app,
+                    "machine-upload-progress",
+                    &event_machine_id,
+                    serde_json::json!({ "detail": detail }),
+                );
+            },
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string());
+    let result = finish_operation(&cancel_probe, joined);
+    drop(guard);
+    result?;
+    build_machine_view(app, &paths).await
+}
+
 fn reviewed_ipa_path(
     paths: &MachinePaths,
     archive: &AppleArchiveResult,

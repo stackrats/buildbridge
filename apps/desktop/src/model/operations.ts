@@ -23,6 +23,7 @@ export type OperationId =
     | 'clear-signing'
     | 'archive'
     | 'upload-archive'
+    | 'install-transporter'
     | 'upload-google-play'
     | 'android-run-device'
     | 'clear-android-device-run'
@@ -62,6 +63,7 @@ export const busyKeyStep: Record<string, string> = {
     adopting_lock: 'test-build',
     archiving: 'archive',
     uploading_archive: 'publish',
+    installing_transporter: 'publish',
     uploading_google_play: 'publish',
     uploading_artifacts: 'publish',
     configuring_google_play: 'publish',
@@ -101,6 +103,7 @@ export const busyKeyLabel: Record<string, string> = {
     adopting_lock: 'Adopting the guest Podfile.lock',
     archiving: 'Building the signed archive',
     uploading_archive: 'Uploading with Transporter',
+    installing_transporter: 'Installing Transporter',
     uploading_google_play: 'Uploading to Google Play',
     uploading_artifacts: 'Uploading artifacts to the dashboard',
     configuring_google_play: 'Saving Google Play credentials',
@@ -151,6 +154,7 @@ export const operationLabel: Record<OperationId, string> = {
     'clear-signing': 'Removing guest signing',
     archive: 'Building the signed archive',
     'upload-archive': 'Uploading with Transporter',
+    'install-transporter': 'Installing Transporter',
     'upload-google-play': 'Uploading to Google Play',
     'android-run-device': 'Running on the Android device',
     'clear-android-device-run': 'Clearing the last device run',
@@ -206,6 +210,7 @@ export const operationStep: Partial<Record<OperationId, string>> = {
     'clear-signing': 'provision',
     archive: 'archive',
     'upload-archive': 'publish',
+    'install-transporter': 'publish',
     'upload-google-play': 'publish',
     'android-run-device': 'run-device',
     'clear-android-device-run': 'run-device',

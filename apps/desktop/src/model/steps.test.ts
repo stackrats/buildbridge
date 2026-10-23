@@ -70,6 +70,7 @@ function baseView(overrides: Partial<MachineView> = {}): MachineView {
                 xcodePath: null,
                 xcodeSelected: false,
                 iosSimulatorRuntime: null,
+                transporterInstalled: null,
                 issue: null,
             },
             devices: [],
@@ -128,6 +129,7 @@ function readyView(): MachineView {
         xcodePath: '/Users/builder/Applications/Xcode.app',
         xcodeSelected: true,
         iosSimulatorRuntime: '26.5',
+        transporterInstalled: true,
         issue: null,
     };
     return view;
