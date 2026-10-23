@@ -985,6 +985,14 @@ async fn upload_apple_archive(
 }
 
 #[tauri::command]
+async fn install_guest_transporter(
+    desktop: State<'_, Desktop>,
+    machine_id: String,
+) -> Result<MachineView, String> {
+    buildbridge_engine::install_guest_transporter(&desktop.engine, machine_id).await
+}
+
+#[tauri::command]
 async fn reveal_apple_archive(
     desktop: State<'_, Desktop>,
     machine_id: String,
@@ -1273,6 +1281,7 @@ pub fn run() {
             adopt_guest_podfile_lock,
             run_apple_signed_archive,
             upload_apple_archive,
+            install_guest_transporter,
             reveal_apple_archive,
             clear_apple_archive,
             approve_android_workspace,

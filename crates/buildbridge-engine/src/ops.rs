@@ -143,7 +143,13 @@ pub async fn cancel_machine_operation(app: &Engine, machine_id: String) -> Resul
 
     if matches!(
         label.as_deref(),
-        Some("test_building" | "archiving" | "releasing" | "running_on_device")
+        Some(
+            "test_building"
+                | "archiving"
+                | "releasing"
+                | "running_on_device"
+                | "installing_transporter"
+        )
     ) {
         let paths = MachinePaths::resolve(app, &machine_id)?;
         let provider = machines::load_registry(app)

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Upload } from '@lucide/vue';
+import { Download, Upload } from '@lucide/vue';
 import { computed } from 'vue';
 
 import { appleUploadBlocker } from '../../model/apple-upload';
@@ -22,6 +22,11 @@ const uploading = computed(
     () =>
         session.operation === 'upload-archive' ||
         session.view?.busyOperation === 'uploading_archive',
+);
+const installing = computed(
+    () =>
+        session.operation === 'install-transporter' ||
+        session.view?.busyOperation === 'installing_transporter',
 );
 </script>
 
@@ -72,9 +77,20 @@ const uploading = computed(
                 "
                 >Set up guest access</Button
             >
+            <Button
+                v-else-if="blocker?.action === 'transporter' || installing"
+                variant="outline"
+                size="sm"
+                :disabled="installing"
+                @click="machines.installTransporter(session.id)"
+            >
+                <Spinner v-if="installing" />
+                <Download v-else class="h-3.5 w-3.5" />
+                {{ installing ? 'Installing Transporter' : 'Install Transporter' }}
+            </Button>
         </div>
         <p
-            v-if="blocker && !uploading && upload?.status !== 'uploaded'"
+            v-if="blocker && !uploading && !installing && upload?.status !== 'uploaded'"
             class="text-xs leading-5 text-zinc-500 dark:text-zinc-400"
         >
             {{ blocker.message }}
@@ -82,6 +98,10 @@ const uploading = computed(
         <div aria-live="polite">
             <Callout v-if="uploading" tone="info">
                 Transporter is delivering the IPA to Apple. You can switch pages while it runs.
+            </Callout>
+            <Callout v-else-if="installing" tone="info">
+                The macOS machine is downloading Apple's Transporter package and checking Apple's
+                signature before unpacking it. You can switch pages while it runs.
             </Callout>
             <Callout v-else-if="upload?.status === 'uploaded'" tone="ok">
                 Uploaded to App Store Connect. Apple still needs to process the build.

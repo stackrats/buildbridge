@@ -143,6 +143,8 @@ export interface Backend {
     ): Promise<T.RunAppleArchiveResult>;
     /** Delivers exactly the retained IPA the person reviewed to App Store Connect. */
     uploadAppleArchive(machineId: string, expectedSha256: string): Promise<void>;
+    /** Installs Apple's Transporter command-line tool in the running macOS guest for uploads. */
+    installGuestTransporter(machineId: string): Promise<T.MachineView>;
     revealArchive(machineId: string): Promise<void>;
     clearArchive(machineId: string): Promise<T.MachineView>;
 
@@ -422,6 +424,7 @@ async function createTauriBackend(): Promise<Backend> {
             invoke('run_apple_signed_archive', { machineId, envSetId, version }),
         uploadAppleArchive: (machineId, expectedSha256) =>
             invoke('upload_apple_archive', { machineId, expectedSha256 }),
+        installGuestTransporter: (machineId) => invoke('install_guest_transporter', { machineId }),
         revealArchive: (machineId) => invoke('reveal_apple_archive', { machineId }),
         clearArchive: (machineId) => invoke('clear_apple_archive', { machineId }),
         approveAndroidWorkspace: (machineId, path, module = null) =>

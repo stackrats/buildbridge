@@ -49,6 +49,8 @@ def find_transporter():
         candidates.append(directory + "/Transporter.app/Contents/itms/bin/iTMSTransporter")
         candidates.append(directory + "/Xcode.app/Contents/SharedFrameworks/ContentDeliveryServices.framework/Versions/A/itms/bin/iTMSTransporter")
         candidates.append(directory + "/Xcode.app/Contents/Applications/Application Loader.app/Contents/itms/bin/iTMSTransporter")
+    # Where buildbridge's Install Transporter unpacks Apple's signed command-line package.
+    candidates.append(os.path.expanduser("~/.buildbridge/tools/itms/bin/iTMSTransporter"))
     candidates.append("/usr/local/itms/bin/iTMSTransporter")
     try:
         developer = subprocess.check_output(
@@ -62,7 +64,7 @@ def find_transporter():
     for candidate in candidates:
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
-    raise UploadError("Transporter is not installed in the macOS machine. Install Apple's Transporter app from the Mac App Store in that machine, then retry.")
+    raise UploadError("Transporter is not installed in the macOS machine. Use Install Transporter in buildbridge, then retry.")
 
 
 def stop_process(process):
@@ -216,5 +218,17 @@ def main():
     return 0
 
 
+def locate():
+    # The readiness probe: whether an upload would find Transporter, decided by the same
+    # search the upload uses, so the two can never disagree.
+    try:
+        find_transporter()
+    except UploadError:
+        print("missing")
+    else:
+        print("installed")
+    return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(locate() if sys.argv[1:] == ["locate"] else main())

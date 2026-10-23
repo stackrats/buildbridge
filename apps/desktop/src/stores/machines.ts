@@ -1602,6 +1602,24 @@ export function useMachinesStore() {
             }
             return result !== null;
         },
+        installTransporter: async (id: string): Promise<boolean> => {
+            const target = session(id);
+            const result = await runOperation(
+                id,
+                'install-transporter',
+                () => useBackend().installGuestTransporter(id),
+                {
+                    started: "Installing Apple's Transporter in the macOS machine",
+                    finished: 'Transporter installed. The retained IPA can be uploaded.',
+                },
+            );
+            // The install is the answer to an upload that found no Transporter; that failure
+            // no longer describes the machine.
+            if (result !== null && target.archiveUpload?.status === 'failed') {
+                target.archiveUpload = null;
+            }
+            return result !== null;
+        },
         revealArchive: async (id: string) => {
             const target = session(id);
             try {

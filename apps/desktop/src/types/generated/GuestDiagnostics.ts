@@ -4,4 +4,9 @@ export type GuestDiagnostics = { authenticated: boolean, macosVersion: string | 
 /**
  * The iOS Simulator runtime version the guest holds, when Xcode is ready and one is installed.
  */
-iosSimulatorRuntime: string | null, issue: string | null, };
+iosSimulatorRuntime: string | null, 
+/**
+ * Whether an upload would find Transporter, once Xcode is ready; `None` before then, or
+ * when the probe could not tell.
+ */
+transporterInstalled: boolean | null, issue: string | null, };

@@ -78,6 +78,13 @@ describe('Transporter upload readiness', () => {
             'guest',
         ],
         [
+            'guest without Transporter',
+            (view) => {
+                view.guest.diagnostics.transporterInstalled = false;
+            },
+            'transporter',
+        ],
+        [
             'another process building',
             (view) => {
                 view.busyOperation = 'archiving';
@@ -90,6 +97,12 @@ describe('Transporter upload readiness', () => {
         const blocker = appleUploadBlocker(view);
         expect(blocker?.message).toBeTruthy();
         expect(blocker?.action).toBe(action);
+    });
+
+    it('lets the upload report a Transporter the probe could not see either way', async () => {
+        const view = await createMockBackend().getMachine('default');
+        view.guest.diagnostics.transporterInstalled = null;
+        expect(appleUploadBlocker(view)).toBeNull();
     });
 
     it('blocks a local operation and Android machines', async () => {
