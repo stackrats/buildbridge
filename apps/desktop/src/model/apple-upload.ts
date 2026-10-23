@@ -51,6 +51,13 @@ export function appleUploadBlocker(
     return null;
 }
 
+/**
+ * Apple's download of its current Transporter package, the one the guest installs (see
+ * `transporter.rs`). Its licence ships inside the package, so this is where to read it.
+ */
+export const TRANSPORTER_PACKAGE_URL =
+    'https://itunesconnect.apple.com/WebObjects/iTunesConnect.woa/ra/resources/download/public/Transporter__OSX/bin/';
+
 /** A result belongs to one IPA for this app session, never to every build of the machine. */
 export interface AppleArchiveUpload {
     sha256: string;

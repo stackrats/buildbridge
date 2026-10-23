@@ -9,7 +9,8 @@ const TRANSPORTER_COMPLETED: &str =
     "Upload delivered. Apple must process the build before it appears in TestFlight.";
 const TRANSPORTER_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60 + 15);
 /// Apple's download of the current Transporter command-line package for macOS. The address
-/// carries no version and always serves the latest release.
+/// carries no version and always serves the latest release. The desktop links the same address
+/// (`apple-upload.ts`) for reading the licence the package carries.
 const TRANSPORTER_PACKAGE_URL: &str = "https://itunesconnect.apple.com/WebObjects/iTunesConnect.woa/ra/resources/download/public/Transporter__OSX/bin/";
 /// The Developer ID team Apple signs that package with. A digest would go stale with every
 /// Transporter release, and Apple refuses uploads from releases it has retired, so the package

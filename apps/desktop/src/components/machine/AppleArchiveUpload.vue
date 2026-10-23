@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { Download, Upload } from '@lucide/vue';
+import { Download, ExternalLink, Upload } from '@lucide/vue';
 import { computed } from 'vue';
 
-import { appleUploadBlocker } from '../../model/apple-upload';
+import { useBackend } from '../../lib/backend';
+import { appleUploadBlocker, TRANSPORTER_PACKAGE_URL } from '../../model/apple-upload';
 import { useMachinesStore, type MachineSession } from '../../stores/machines';
 import { useUi } from '../../stores/ui';
 import Button from '../ui/Button.vue';
@@ -28,6 +29,9 @@ const installing = computed(
         session.operation === 'install-transporter' ||
         session.view?.busyOperation === 'installing_transporter',
 );
+function openTransporterPackage(): void {
+    void useBackend().openUrl(TRANSPORTER_PACKAGE_URL);
+}
 </script>
 
 <template>
@@ -94,6 +98,22 @@ const installing = computed(
             class="text-xs leading-5 text-zinc-500 dark:text-zinc-400"
         >
             {{ blocker.message }}
+        </p>
+        <p
+            v-if="blocker?.action === 'transporter' && !installing"
+            class="text-xs leading-5 text-zinc-500 dark:text-zinc-400"
+        >
+            Installing accepts Apple's Transporter licence, which Apple's own installer would show
+            first. To read it beforehand,
+            <button
+                type="button"
+                class="inline-flex items-center gap-1 text-zinc-500 underline decoration-zinc-300 underline-offset-2 hover:text-zinc-800 dark:text-zinc-400 dark:decoration-zinc-600 dark:hover:text-zinc-100"
+                @click="openTransporterPackage"
+            >
+                download Apple's package
+                <ExternalLink class="h-3 w-3" aria-hidden="true" />
+            </button>
+            and open it on a Mac; Installer shows the licence before it installs anything.
         </p>
         <div aria-live="polite">
             <Callout v-if="uploading" tone="info">
