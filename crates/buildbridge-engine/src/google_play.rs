@@ -79,8 +79,18 @@ fn parse_account(encoded: &[u8]) -> Result<ServiceAccount, String> {
     if encoded.len() > MAX_CREDENTIAL_BYTES {
         return Err("The service-account JSON file is too large.".into());
     }
-    let account: ServiceAccount = serde_json::from_slice(encoded)
-        .map_err(|_| "Choose a Google service-account JSON key file.".to_string())?;
+    let account: ServiceAccount = serde_json::from_slice(encoded).map_err(|_| {
+        // The Firebase file an Android app ships is the Google JSON most often picked instead.
+        let firebase = serde_json::from_slice::<Value>(encoded).is_ok_and(|value| {
+            value.get("project_info").is_some() && value.get("client").is_some()
+        });
+        if firebase {
+            "This is the app's Firebase configuration (google-services.json), which holds no credentials. Import a service-account JSON key, created under the service account's Keys in Google Cloud."
+        } else {
+            "Choose a Google service-account JSON key file."
+        }
+        .to_string()
+    })?;
     let safe = |value: &str, max: usize| {
         !value.is_empty()
             && value.len() <= max
@@ -554,6 +564,17 @@ impl PlayClient {
             scope,
         )
         .await?;
+        // The token endpoint answers a deleted, disabled or mistimed key with 400 invalid_grant,
+        // which would otherwise read as Google Play rejecting the upload.
+        if matches!(
+            response.status(),
+            StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED
+        ) {
+            return Err(format!(
+                "Google rejected the service-account key. Check that it is still active under the service account's Keys in Google Cloud, and that the host clock is correct. (HTTP {})",
+                response.status().as_u16()
+            ));
+        }
         let value = response_json(response, scope).await?;
         let token = value["access_token"]
             .as_str()
@@ -658,7 +679,7 @@ impl PlayClient {
             scope,
         )
         .await?;
-        check_status(started.status())?;
+        let started = check_response(started, scope).await?;
         let session = started
             .headers()
             .get(reqwest::header::LOCATION)
@@ -694,12 +715,7 @@ impl PlayClient {
         .await?;
         verify_draft_track(&updated, &track_name, &next_releases, &release.version_code)?;
         check_cancelled(scope)?;
-        // Do not interrupt a commit once sent: its outcome matters even if Stop is clicked.
-        // Never retry a commit automatically, or fall back to submitting/cancelling reviews.
-        let committed = self.http.post(format!("{edit_url}:commit")).bearer_auth(token)
-            .query(&[("changesNotSentForReview", "true"), ("changesInReviewBehavior", "ERROR_IF_IN_REVIEW")])
-            .send().await.map_err(|_| "Google did not confirm the draft commit. Check Play Console before uploading again.".to_string())?;
-        check_status(committed.status())?;
+        self.commit(token, edit_url).await?;
         progress("Uploaded to an internal-testing draft. Review it in Google Play Console.".into());
         Ok(GooglePlayUploadResult {
             package_name: release.application_id.clone(),
@@ -708,6 +724,52 @@ impl PlayClient {
             status: "draft".into(),
             sha256: aab.sha256.clone(),
         })
+    }
+
+    /// Commits the edit. Google accepts `changesNotSentForReview` only for an app whose last
+    /// update it rejected, and refuses it with 400 for an app in good standing, so the commit
+    /// goes without it and, only after that definite refusal, once more with it. A review
+    /// already in progress fails the commit rather than being cancelled.
+    async fn commit(&self, token: &str, edit_url: &str) -> Result<(), String> {
+        // Do not interrupt a commit once sent: its outcome matters even if Stop is clicked, so
+        // a refusal is read through to its reason under a scope of its own. A commit whose
+        // outcome is unknown is never sent again.
+        let scope = OperationScope::new();
+        let first = self.send_commit(token, edit_url, false).await?;
+        if first.status() != StatusCode::BAD_REQUEST {
+            return check_response(first, &scope).await.map(drop);
+        }
+        let reason = read_body(first, &scope)
+            .await
+            .ok()
+            .and_then(|body| refusal_reason(&body));
+        if reason.as_deref() == Some(IN_REVIEW) {
+            return Err(refusal(StatusCode::BAD_REQUEST, reason.as_deref()));
+        }
+        let held = self.send_commit(token, edit_url, true).await?;
+        check_response(held, &scope).await.map(drop)
+    }
+
+    async fn send_commit(
+        &self,
+        token: &str,
+        edit_url: &str,
+        hold_from_review: bool,
+    ) -> Result<Response, String> {
+        let mut query = vec![("changesInReviewBehavior", "ERROR_IF_IN_REVIEW")];
+        if hold_from_review {
+            query.insert(0, ("changesNotSentForReview", "true"));
+        }
+        self.http
+            .post(format!("{edit_url}:commit"))
+            .bearer_auth(token)
+            .query(&query)
+            .send()
+            .await
+            .map_err(|_| {
+                "Google did not confirm the draft commit. Check Play Console before uploading again."
+                    .to_string()
+            })
     }
 
     async fn version_codes(
@@ -882,9 +944,11 @@ impl PlayClient {
                 }
                 return response_json(response, scope).await;
             }
-            if response.status() != StatusCode::PERMANENT_REDIRECT {
-                check_status(response.status())?;
-            }
+            let response = if response.status() == StatusCode::PERMANENT_REDIRECT {
+                response
+            } else {
+                check_response(response, scope).await?
+            };
             let next = acknowledged_bytes(&response)?;
             if next < offset || next > end || next >= bytes {
                 return Err("Google returned an invalid upload byte range.".into());
@@ -1035,8 +1099,12 @@ async fn request(builder: RequestBuilder, scope: &OperationScope) -> Result<Resp
         .map_err(|_| "Could not reach Google Play. Check the host connection and try again.".into())
 }
 
-async fn response_json(mut response: Response, scope: &OperationScope) -> Result<Value, String> {
-    check_status(response.status())?;
+async fn response_json(response: Response, scope: &OperationScope) -> Result<Value, String> {
+    let body = read_body(check_response(response, scope).await?, scope).await?;
+    serde_json::from_slice(&body).map_err(|_| "Google returned an unreadable response.".into())
+}
+
+async fn read_body(mut response: Response, scope: &OperationScope) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
     while let Some(chunk) = cancellable(response.chunk(), scope)
         .await?
@@ -1047,23 +1115,74 @@ async fn response_json(mut response: Response, scope: &OperationScope) -> Result
         }
         body.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&body).map_err(|_| "Google returned an unreadable response.".into())
+    Ok(body)
 }
 
-fn check_status(status: StatusCode) -> Result<(), String> {
+/// Passes a successful response through and turns a refusal into fixed guidance. Of the error
+/// body, only Google's reason code is read.
+async fn check_response(response: Response, scope: &OperationScope) -> Result<Response, String> {
+    let status = response.status();
     if status.is_success() {
-        return Ok(());
+        return Ok(response);
     }
+    let body = read_body(response, scope).await;
+    check_cancelled(scope)?;
+    let reason = body.ok().and_then(|body| refusal_reason(&body));
+    Err(refusal(status, reason.as_deref()))
+}
+
+const API_DISABLED: [&str; 2] = ["SERVICE_DISABLED", "accessNotConfigured"];
+const NO_ACCESS: [&str; 2] = ["forbidden", "permissionDenied"];
+const IN_REVIEW: &str = "CHANGES_ALREADY_IN_REVIEW";
+
+/// Google's machine-readable reason for a refusal, from `ErrorInfo` details and then the legacy
+/// `errors` list, preferring one with a known fix. Only an identifier-shaped code is kept, so no
+/// other text from the body, which can carry keys, tokens or URLs, reaches a message.
+fn refusal_reason(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let error = &value["error"];
+    let details = error["details"].as_array().into_iter().flatten();
+    let errors = error["errors"].as_array().into_iter().flatten();
+    let codes: Vec<&str> = details
+        .chain(errors)
+        .filter_map(|entry| entry["reason"].as_str())
+        .filter(|code| {
+            !code.is_empty()
+                && code.len() <= 64
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+        .collect();
+    codes
+        .iter()
+        .find(|code| API_DISABLED.contains(code) || NO_ACCESS.contains(code) || **code == IN_REVIEW)
+        .or(codes.first())
+        .map(|code| code.to_string())
+}
+
+fn refusal(status: StatusCode, reason: Option<&str>) -> String {
     // Never echo remote error bodies or reqwest errors: both may contain keys, tokens or URLs.
     let guidance = match status {
         StatusCode::UNAUTHORIZED => {
             "Google rejected the service-account credentials. Check the key and host clock."
         }
-        StatusCode::FORBIDDEN => {
-            "Google Play denied access. Enable the Google Play Android Developer API and grant this service account access to this app and testing releases in Play Console."
-        }
+        StatusCode::FORBIDDEN => match reason {
+            Some(code) if API_DISABLED.contains(&code) => {
+                "The Google Play Android Developer API is disabled in the service account's Cloud project. Enable it in Google Cloud, wait a few minutes, then retry."
+            }
+            Some(code) if NO_ACCESS.contains(&code) => {
+                "Google Play refused this service account. In Play Console Users and permissions, grant it this app with Release apps to testing tracks; access granted recently can take some hours to apply. Google gives the same refusal for a bundle signed with a key other than the app's upload key, shown under App integrity."
+            }
+            _ => {
+                "Google Play denied access. Enable the Google Play Android Developer API, grant this service account this app with Release apps to testing tracks in Play Console, and sign the bundle with the app's upload key, shown under App integrity."
+            }
+        },
         StatusCode::NOT_FOUND => {
             "Google Play could not find the app or edit. Create the app and complete its initial Play Console setup first."
+        }
+        StatusCode::BAD_REQUEST if reason == Some(IN_REVIEW) => {
+            "Google Play already has changes in review for this app. Wait for the review to finish, or cancel it in Play Console, then upload again."
         }
         StatusCode::BAD_REQUEST => {
             "Google Play rejected the upload or draft. Check Play Console for the upload key, version code, app setup, and any release already in review."
@@ -1076,7 +1195,10 @@ fn check_status(status: StatusCode) -> Result<(), String> {
         }
         _ => "Google Play could not complete the upload. Check Play Console and try again.",
     };
-    Err(format!("{guidance} (HTTP {})", status.as_u16()))
+    match reason {
+        Some(code) => format!("{guidance} (HTTP {}: {code})", status.as_u16()),
+        None => format!("{guidance} (HTTP {})", status.as_u16()),
+    }
 }
 
 #[cfg(test)]

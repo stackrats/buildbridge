@@ -149,6 +149,8 @@ interface MockMachine {
     xcodeVersion: string | null;
     xcodeSelected: boolean;
     iosSimulatorRuntime: string | null;
+    /** A fresh guest has no Transporter until Install Transporter runs. */
+    transporterInstalled: boolean;
     workspace: T.StoredAppleWorkspace | null;
     /** What the approved project's own files declare; a build that sets one writes it here. */
     projectVersion: T.ProjectVersion | null;
@@ -209,6 +211,7 @@ function readyMachine(): MockMachine {
         xcodeVersion: '26.6',
         xcodeSelected: true,
         iosSimulatorRuntime: '26.5',
+        transporterInstalled: true,
         workspace: {
             localPath: '/home/you/projects/example-app',
             name: 'com.example.app',
@@ -328,6 +331,7 @@ function freshMachine(): MockMachine {
         xcodeVersion: null,
         xcodeSelected: false,
         iosSimulatorRuntime: null,
+        transporterInstalled: false,
         workspace: null,
         projectVersion: null,
         signing: null,
@@ -705,6 +709,10 @@ export function createMockBackend(): Backend {
                     iosSimulatorRuntime:
                         trust === 'trusted' && machine.authenticated && machine.xcodeSelected
                             ? machine.iosSimulatorRuntime
+                            : null,
+                    transporterInstalled:
+                        trust === 'trusted' && machine.authenticated && machine.xcodeSelected
+                            ? machine.transporterInstalled
                             : null,
                     issue:
                         trust === 'trusted' && machine.username && !machine.authenticated
@@ -1596,8 +1604,31 @@ export function createMockBackend(): Backend {
                     'Start the macOS machine and authorize trusted guest access first.',
                 );
             }
+            if (!machine.transporterInstalled) {
+                throw new Error(
+                    'macOS guest bridge failed: Transporter is not installed in the macOS machine. Use Install Transporter in buildbridge, then retry.',
+                );
+            }
             await busy(machine, 'uploading_archive', async () => {
                 await sleep(1500);
+            });
+        },
+        async installGuestTransporter(machineId) {
+            const machine = find(machineId);
+            const current = view(machine);
+            if (
+                current.runtime.state !== 'running' ||
+                current.guest.ssh.trust !== 'trusted' ||
+                !current.guest.diagnostics.authenticated
+            ) {
+                throw new Error(
+                    'Finish the pinned macOS guest connection before installing Transporter.',
+                );
+            }
+            return busy(machine, 'installing_transporter', async () => {
+                await sleep(2000);
+                machine.transporterInstalled = true;
+                return view(machine);
             });
         },
         async cancelMachineOperation(machineId) {

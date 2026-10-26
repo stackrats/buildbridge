@@ -3,7 +3,7 @@ import { isAndroid } from './providers';
 
 export interface AppleUploadBlocker {
     message: string;
-    action: 'start' | 'credentials' | 'guest' | null;
+    action: 'start' | 'credentials' | 'guest' | 'transporter' | null;
 }
 
 /** Upload uses the retained IPA and a Team API key; it does not need signing provisioned again. */
@@ -40,8 +40,23 @@ export function appleUploadBlocker(
             action: 'guest',
         };
     }
+    // Unknown until Xcode is ready; only a probe that found nothing blocks the upload.
+    if (view.guest.diagnostics.transporterInstalled === false) {
+        return {
+            message:
+                "Transporter is not installed in this macOS machine. Install Transporter downloads Apple's signed command-line package, about 150 MB, into it.",
+            action: 'transporter',
+        };
+    }
     return null;
 }
+
+/**
+ * Apple's download of its current Transporter package, the one the guest installs (see
+ * `transporter.rs`). Its licence ships inside the package, so this is where to read it.
+ */
+export const TRANSPORTER_PACKAGE_URL =
+    'https://itunesconnect.apple.com/WebObjects/iTunesConnect.woa/ra/resources/download/public/Transporter__OSX/bin/';
 
 /** A result belongs to one IPA for this app session, never to every build of the machine. */
 export interface AppleArchiveUpload {

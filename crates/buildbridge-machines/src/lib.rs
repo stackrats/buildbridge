@@ -76,7 +76,7 @@ pub use signing::*;
 pub use smoke_build::*;
 pub use ssh::*;
 pub use templates::*;
-pub use transporter::upload_apple_ipa;
+pub use transporter::{install_guest_transporter, upload_apple_ipa};
 pub use usage::*;
 pub use versions::*;
 pub use workspace::*;
@@ -487,6 +487,9 @@ pub struct GuestDiagnostics {
     pub xcode_selected: bool,
     /// The iOS Simulator runtime version the guest holds, when Xcode is ready and one is installed.
     pub ios_simulator_runtime: Option<String>,
+    /// Whether an upload would find Transporter, once Xcode is ready; `None` before then, or
+    /// when the probe could not tell.
+    pub transporter_installed: Option<bool>,
     pub issue: Option<String>,
 }
 
@@ -1049,6 +1052,7 @@ pub fn guest_diagnostics(
     );
 
     let mut ios_simulator_runtime = None;
+    let mut transporter_installed = None;
     let (xcode_version, xcode_path, xcode_selected, issue) = match selected_xcode {
         Ok(version) => {
             let selected_path = run_guest_command(
@@ -1077,6 +1081,12 @@ pub fn guest_diagnostics(
                 )
                 .ok()
                 .and_then(|output| parse_simulator_runtime(&output));
+                transporter_installed = transporter::guest_transporter_installed(
+                    ssh_port,
+                    username,
+                    identity_path,
+                    known_hosts_path,
+                );
             }
 
             (
@@ -1130,6 +1140,7 @@ pub fn guest_diagnostics(
         xcode_path,
         xcode_selected,
         ios_simulator_runtime,
+        transporter_installed,
         issue,
     }
 }

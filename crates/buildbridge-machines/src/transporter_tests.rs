@@ -343,7 +343,7 @@ fn missing_transporter_reports_the_required_guest_installation() {
         &mut |_| {},
     );
     let error = result.unwrap_err().to_string();
-    assert!(error.contains("Install Apple's Transporter app"), "{error}");
+    assert!(error.contains("Use Install Transporter"), "{error}");
     assert!(!fixture.directory.join("report.json").exists());
 }
 
@@ -391,4 +391,204 @@ fn only_bounded_helper_progress_lines_reach_the_host() {
         0,
         "an unbounded line abandons the stream instead of forwarding a fragment"
     );
+}
+
+/// The readiness probe runs the upload's own search, so it finds buildbridge's install and
+/// reports nothing else as installed.
+#[test]
+fn the_readiness_probe_shares_the_upload_search() {
+    let home = crate::test_scripts::fixture_dir("transporter-locate");
+    let locate = |prelude: &str| {
+        let output = Command::new("/usr/bin/python3")
+            .args(["-c", &format!("{prelude}\n{TRANSPORTER_HELPER}"), "locate"])
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    // Never the developer's own Transporter, even on a Mac that has one.
+    assert_eq!(
+        locate("import os\nos.path.isfile = lambda _: False"),
+        "missing"
+    );
+    let installed = home.join(".buildbridge/tools/itms/bin");
+    fs::create_dir_all(&installed).unwrap();
+    crate::test_scripts::write_runnable(&installed.join("iTMSTransporter"), "#!/bin/sh\n");
+    assert_eq!(locate(""), "installed");
+    let _ = fs::remove_dir_all(&home);
+}
+
+const FAKE_CURL: &str = r#"#!/bin/sh
+output=''
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output) output=$2; shift 2 ;;
+        *) shift ;;
+    esac
+done
+if [ "$FIXTURE_MODE" = offline ]; then
+    printf 'curl: (6) Could not resolve host: itunesconnect.apple.com\n' >&2
+    exit 6
+fi
+printf 'package\n' > "$output"
+"#;
+
+/// Answers as `pkgutil` does: the signature report, then a flat package expanded into its
+/// component directories, each with a gzip payload.
+const FAKE_PKGUTIL: &str = r#"#!/bin/sh
+case "$1" in
+    --check-signature)
+        status='signed by a developer certificate issued by Apple for distribution'
+        leaf='Developer ID Installer: Apple Inc. - MZCD Automation (4U568XBT3J)'
+        case "$FIXTURE_MODE" in
+            unsigned) printf 'Package "iTMSTransporter.pkg":\n   Status: no signature\n'; exit 1 ;;
+            untrusted) status='signed by untrusted certificate' ;;
+            other_team) leaf='Developer ID Installer: Apple Inc. - Someone Else (ABCDE12345)' ;;
+        esac
+        printf 'Package "iTMSTransporter.pkg":\n   Status: %s\n   Notarization: trusted by the Apple notary service\n   Certificate Chain:\n    1. %s\n       Expires: 2029-10-18 17:06:11 +0000\n       ------------------------------------------------------------------------\n    2. Developer ID Certification Authority\n    3. Apple Root CA\n\n' "$status" "$leaf"
+        ;;
+    --expand)
+        mkdir -p "$3/payload/bin"
+        printf '#!/bin/sh\nexit 0\n' > "$3/payload/bin/iTMSTransporter"
+        chmod 755 "$3/payload/bin/iTMSTransporter"
+        for component in iTMSTransporter-9.9.0.1.pkg $( [ "$FIXTURE_MODE" = two_components ] && echo Extra.pkg ); do
+            mkdir -p "$3/$component"
+            tar -czf "$3/$component/Payload" -C "$3/payload" bin
+        done
+        rm -rf "$3/payload"
+        ;;
+esac
+"#;
+
+/// The install body against stand-ins for curl and pkgutil: only a package whose signature
+/// names Apple's Transporter team is unpacked, it replaces the earlier install and its caches,
+/// and every refusal leaves the earlier install exactly as it was.
+#[test]
+fn transporter_installs_only_a_package_signed_by_apples_transporter_team() {
+    let root = crate::test_scripts::fixture_dir("transporter-install");
+    let tools = root.join(".buildbridge/tools");
+    let fake_curl = root.join("curl");
+    let fake_pkgutil = root.join("pkgutil");
+    crate::test_scripts::write_runnable(&fake_curl, FAKE_CURL);
+    crate::test_scripts::write_runnable(&fake_pkgutil, FAKE_PKGUTIL);
+    let body = transporter_install_body(tools.to_str().unwrap());
+    assert!(
+        body.contains(&format!("'{TRANSPORTER_PACKAGE_URL}'")),
+        "{body}"
+    );
+    let body = body
+        .replace("/usr/bin/curl", fake_curl.to_str().unwrap())
+        .replace("/usr/sbin/pkgutil", fake_pkgutil.to_str().unwrap());
+    let earlier = tools.join("itms/bin/iTMSTransporter");
+    // The body runs inside the guest job wrapper, under the guest's login shell: zsh on any
+    // macOS since Catalina. Every shell this host has stands in for it.
+    let shells = ["/bin/sh", "/bin/bash", "/bin/zsh"]
+        .into_iter()
+        .filter(|shell| Path::new(shell).is_file())
+        .collect::<Vec<_>>();
+    let run = |shell: &str, mode: &str| {
+        let _ = fs::remove_dir_all(&tools);
+        fs::create_dir_all(earlier.parent().unwrap()).unwrap();
+        fs::write(&earlier, "earlier\n").unwrap();
+        fs::create_dir_all(root.join(".itmstransporter")).unwrap();
+        let output = Command::new(shell)
+            .args(["-c", &format!("exec 2>&1\nset -eu\n{body}")])
+            .env("HOME", &root)
+            .env("FIXTURE_MODE", mode)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let phases = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix(TRANSPORTER_INSTALL_PREFIX))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        (output.status.code(), stdout, phases)
+    };
+
+    for shell in shells {
+        let (status, stdout, phases) = run(shell, "signed");
+        assert_eq!(status, Some(0), "{shell}: {stdout}");
+        assert_eq!(
+            phases,
+            ["downloading", "verifying", "unpacking", "completed"],
+            "{shell}"
+        );
+        assert_eq!(fs::read_to_string(&earlier).unwrap(), "#!/bin/sh\nexit 0\n");
+        assert!(!tools.join("itms-staging").exists(), "{shell}");
+        assert!(!root.join(".itmstransporter").exists(), "{shell}");
+
+        for mode in ["unsigned", "untrusted", "other_team"] {
+            let (status, stdout, phases) = run(shell, mode);
+            assert_ne!(status, Some(0), "{shell}: {mode}: {stdout}");
+            assert_eq!(
+                phases.last().map(String::as_str),
+                Some("verifying"),
+                "{shell}: {mode}"
+            );
+            assert_eq!(
+                fs::read_to_string(&earlier).unwrap(),
+                "earlier\n",
+                "{shell}: {mode}"
+            );
+            assert!(root.join(".itmstransporter").exists(), "{shell}: {mode}");
+        }
+
+        let (status, stdout, phases) = run(shell, "offline");
+        assert_eq!(status, Some(6), "{shell}: {stdout}");
+        assert_eq!(phases, ["downloading"], "{shell}");
+        assert!(stdout.contains("Could not resolve host"), "{stdout}");
+        assert_eq!(
+            fs::read_to_string(&earlier).unwrap(),
+            "earlier\n",
+            "{shell}"
+        );
+
+        let (status, stdout, phases) = run(shell, "two_components");
+        assert_ne!(status, Some(0), "{shell}: {stdout}");
+        assert_eq!(
+            phases.last().map(String::as_str),
+            Some("unpacking"),
+            "{shell}"
+        );
+        assert_eq!(
+            fs::read_to_string(&earlier).unwrap(),
+            "earlier\n",
+            "{shell}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_failed_install_says_which_step_failed_and_only_passes_on_actionable_output() {
+    let offline = transporter_install_failure(
+        Some("downloading"),
+        "curl: (6) Could not resolve host: itunesconnect.apple.com",
+    );
+    assert!(
+        offline.starts_with("could not download Transporter from Apple"),
+        "{offline}"
+    );
+    assert!(
+        offline.ends_with(": curl: (6) Could not resolve host: itunesconnect.apple.com"),
+        "{offline}"
+    );
+
+    let refused = transporter_install_failure(Some("verifying"), "Status: no signature");
+    assert!(
+        refused.contains("not signed by Apple's Transporter team"),
+        "{refused}"
+    );
+    assert!(!refused.contains("Status"), "{refused}");
+
+    let unpacking = transporter_install_failure(Some("unpacking"), "");
+    assert_eq!(
+        unpacking,
+        "could not unpack Transporter; check the macOS machine's free storage"
+    );
+    assert!(transporter_install_failure(None, "ssh: connect").contains("before it started"));
+    assert!(transporter_install_phase("anything else").is_none());
 }

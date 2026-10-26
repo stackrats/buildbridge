@@ -7,6 +7,7 @@ const backend = vi.hoisted(() => ({
     getMachine: vi.fn(),
     listMachines: vi.fn(),
     uploadAppleArchive: vi.fn<(machineId: string, expectedSha256: string) => Promise<void>>(),
+    installGuestTransporter: vi.fn<(machineId: string) => Promise<MachineView>>(),
     clearArchive: vi.fn(),
     cancelMachineOperation: vi.fn(),
 }));
@@ -89,6 +90,12 @@ describe('Transporter upload state', () => {
             },
         ],
         [
+            'guest without Transporter',
+            (view) => {
+                view.guest.diagnostics.transporterInstalled = false;
+            },
+        ],
+        [
             'busy backend',
             (view) => {
                 view.busyOperation = 'archiving';
@@ -117,6 +124,38 @@ describe('Transporter upload state', () => {
         expect(await store.uploadAppleArchive('default')).toBe(true);
         expect(session.archiveUpload?.status).toBe('uploaded');
         expect(session.archiveUpload?.error).toBeNull();
+    });
+
+    it('installs Transporter without uploading and retires the failure that asked for it', async () => {
+        const { store, session, view } = await fixture();
+        backend.uploadAppleArchive.mockRejectedValueOnce(
+            new Error('Transporter is not installed in the macOS machine.'),
+        );
+        expect(await store.uploadAppleArchive('default')).toBe(false);
+        expect(session.archiveUpload?.status).toBe('failed');
+
+        const installed = structuredClone(view);
+        installed.guest.diagnostics.transporterInstalled = true;
+        backend.installGuestTransporter.mockResolvedValueOnce(installed);
+        expect(await store.installTransporter('default')).toBe(true);
+        expect(backend.installGuestTransporter).toHaveBeenCalledWith('default');
+        expect(backend.uploadAppleArchive).toHaveBeenCalledTimes(1);
+        expect(session.archiveUpload).toBeNull();
+        expect(session.view?.guest.diagnostics.transporterInstalled).toBe(true);
+    });
+
+    it('keeps the upload failure when the install fails', async () => {
+        const { store, session } = await fixture();
+        backend.uploadAppleArchive.mockRejectedValueOnce(
+            new Error('Transporter is not installed in the macOS machine.'),
+        );
+        await store.uploadAppleArchive('default');
+        backend.installGuestTransporter.mockRejectedValueOnce(
+            new Error('could not download Transporter from Apple'),
+        );
+        expect(await store.installTransporter('default')).toBe(false);
+        expect(session.archiveUpload?.status).toBe('failed');
+        expect(session.lastFailure?.operation).toBe('install-transporter');
     });
 
     it('does not mark cancellation as successful delivery', async () => {
