@@ -344,7 +344,7 @@ pub async fn reveal_android_debug_apk(app: &Engine, machine_id: String) -> Resul
         .and_then(|build| build.apk)
         .ok_or_else(|| "No debug APK is retained for this machine.".to_string())?;
     let directory = validated_android_artifact_directory(&paths, &apk.path, "debug-")?;
-    reveal_directory(&directory, "the debug APK")
+    reveal_directory(&directory, "the debug APK").await
 }
 
 pub async fn reveal_android_release(app: &Engine, machine_id: String) -> Result<(), String> {
@@ -352,7 +352,7 @@ pub async fn reveal_android_release(app: &Engine, machine_id: String) -> Result<
     let stored = load_android_release(&paths)?
         .ok_or_else(|| "No retained signed release is available.".to_string())?;
     let directory = validated_android_release_directory(&paths, &stored.result)?;
-    reveal_directory(&directory, "the signed artifacts")
+    reveal_directory(&directory, "the signed artifacts").await
 }
 
 pub async fn clear_android_release(

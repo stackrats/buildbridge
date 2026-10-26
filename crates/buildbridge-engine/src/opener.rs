@@ -206,9 +206,88 @@ pub async fn open_url(app: &Engine, url: String) -> Result<(), String> {
 }
 
 /// Shows a folder in the desktop's file manager.
-pub(crate) fn reveal_directory(directory: &Path, what: &str) -> Result<(), String> {
-    let argv = vec![OPENER.to_string(), directory.to_string_lossy().into_owned()];
-    spawn_detached(&argv).map_err(|error| format!("Could not reveal {what}: {error}"))
+pub(crate) async fn reveal_directory(directory: &Path, what: &str) -> Result<(), String> {
+    let directory = directory.to_path_buf();
+    tokio::task::spawn_blocking(move || reveal(&directory))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("Could not reveal {what}: {error}"))
+}
+
+fn reveal(directory: &Path) -> std::io::Result<()> {
+    // `xdg-open` hands a folder to whatever claims `inode/directory`, and editors such as VS
+    // Code claim it too, so ask the file manager itself over the freedesktop FileManager1
+    // interface. The first D-Bus client installed decides: if the bus has no file manager to
+    // answer, the folder goes to `xdg-open` after all.
+    #[cfg(target_os = "linux")]
+    {
+        for argv in file_manager_argvs(&file_uri(directory)) {
+            let (program, arguments) = argv.split_first().expect("fixed argv");
+            let status = Command::new(program)
+                .args(arguments)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            match status {
+                Ok(status) if status.success() => return Ok(()),
+                Ok(_) => break,
+                Err(_) => continue,
+            }
+        }
+    }
+    spawn_detached(&[OPENER.to_string(), directory.to_string_lossy().into_owned()])
+}
+
+/// FileManager1's `ShowFolders` through `dbus-send`, then `busctl` for a system without the
+/// reference tools. Both wait for the reply, and both give up after ten seconds.
+#[cfg(target_os = "linux")]
+fn file_manager_argvs(uri: &str) -> [Vec<String>; 2] {
+    let argv = |parts: &[&str]| parts.iter().map(|part| part.to_string()).collect();
+    [
+        argv(&[
+            "dbus-send",
+            "--session",
+            "--print-reply",
+            "--reply-timeout=10000",
+            "--dest=org.freedesktop.FileManager1",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1.ShowFolders",
+            &format!("array:string:{uri}"),
+            "string:",
+        ]),
+        argv(&[
+            "busctl",
+            "--user",
+            "--timeout=10",
+            "call",
+            "org.freedesktop.FileManager1",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1",
+            "ShowFolders",
+            "ass",
+            "1",
+            uri,
+            "",
+        ]),
+    ]
+}
+
+/// A `file://` URI with every byte outside the unreserved set and `/` percent-encoded, which
+/// also keeps commas out of `dbus-send`'s comma-separated array syntax.
+#[cfg(target_os = "linux")]
+fn file_uri(path: &Path) -> String {
+    use std::fmt::Write as _;
+    use std::os::unix::ffi::OsStrExt;
+    let mut uri = String::from("file://");
+    for &byte in path.as_os_str().as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~') {
+            uri.push(byte as char);
+        } else {
+            let _ = write!(uri, "%{byte:02X}");
+        }
+    }
+    uri
 }
 
 #[cfg(test)]
@@ -260,6 +339,19 @@ mod tests {
         assert!(error.contains("no-such-browser-here"), "{error}");
         assert!(error.contains("blank"), "{error}");
         assert!(resolve_browser("   ").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_goes_to_the_file_manager_as_one_encoded_uri() {
+        let uri = file_uri(Path::new("/home/a b/c,d'e/ü~x.y-z_"));
+        assert_eq!(uri, "file:///home/a%20b/c%2Cd%27e/%C3%BC~x.y-z_");
+        let [dbus_send, busctl] = file_manager_argvs(&uri);
+        assert_eq!(dbus_send[0], "dbus-send");
+        assert_eq!(dbus_send[7], format!("array:string:{uri}"));
+        assert!(!dbus_send[7].contains(','));
+        assert_eq!(busctl[0], "busctl");
+        assert_eq!(busctl[8..], ["ass", "1", uri.as_str(), ""]);
     }
 
     #[cfg(unix)]

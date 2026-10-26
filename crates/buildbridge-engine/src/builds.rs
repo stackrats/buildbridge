@@ -761,7 +761,7 @@ pub async fn reveal_apple_archive(app: &Engine, machine_id: String) -> Result<()
     let stored = load_apple_archive(&paths)?
         .ok_or_else(|| "No retained signed archive is available.".to_string())?;
     let directory = validated_apple_archive_directory(&paths, &stored.result)?;
-    reveal_directory(&directory, "the signed artifacts")
+    reveal_directory(&directory, "the signed artifacts").await
 }
 pub async fn clear_apple_archive(app: &Engine, machine_id: String) -> Result<MachineView, String> {
     let paths = MachinePaths::resolve(app, &machine_id)?;

@@ -769,10 +769,7 @@ pub async fn reveal_native_mac_artifacts(app: &Engine, path: String) -> Result<(
     {
         return Err("Choose a retained native Mac build artifact.".to_string());
     }
-    let directory = parent.to_path_buf();
-    tokio::task::spawn_blocking(move || reveal_directory(&directory, "native Mac build artifacts"))
-        .await
-        .map_err(|e| e.to_string())?
+    reveal_directory(parent, "native Mac build artifacts").await
 }
 
 const LOGIN_MARKER: &str = "<!-- Managed by buildbridge: open the desktop at login. -->";

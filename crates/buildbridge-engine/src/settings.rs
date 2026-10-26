@@ -122,7 +122,7 @@ pub async fn reveal_storage_directory(
         StorageDirectory::Data => (app.data_dir(), "the data directory"),
     };
     fs::create_dir_all(&path).map_err(|error| format!("Could not create {what}: {error}"))?;
-    crate::opener::reveal_directory(&path, what)
+    crate::opener::reveal_directory(&path, what).await
 }
 
 #[cfg(test)]
