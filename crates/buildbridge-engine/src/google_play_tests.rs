@@ -270,9 +270,11 @@ async fn uploads_exact_bytes_and_commits_only_an_internal_draft_preserving_exist
         updated["releases"][1],
         json!({"versionCodes": ["42"], "status": "draft"})
     );
-    assert!(requests[5].path.ends_with(
-        ":commit?changesNotSentForReview=true&changesInReviewBehavior=ERROR_IF_IN_REVIEW"
-    ));
+    assert!(
+        requests[5]
+            .path
+            .ends_with(":commit?changesInReviewBehavior=ERROR_IF_IN_REVIEW")
+    );
     assert!(requests[5].body.is_empty());
     assert!(
         requests
@@ -280,6 +282,96 @@ async fn uploads_exact_bytes_and_commits_only_an_internal_draft_preserving_exist
             .all(|request| request.headers["authorization"] == format!("Bearer {TOKEN}"))
     );
     assert!(requests.iter().all(|request| !request.path.contains(TOKEN)));
+}
+
+#[tokio::test]
+async fn a_refused_commit_is_held_from_review_once_and_a_review_in_progress_is_never_touched() {
+    let commits = |requests: &[RecordedRequest]| -> Vec<String> {
+        requests
+            .iter()
+            .filter(|request| request.path.contains(":commit"))
+            .map(|request| request.path.rsplit(":commit").next().unwrap().to_string())
+            .collect()
+    };
+    let plain = "?changesInReviewBehavior=ERROR_IF_IN_REVIEW";
+    let held = "?changesNotSentForReview=true&changesInReviewBehavior=ERROR_IF_IN_REVIEW";
+    let refused = json!({"error": {"code": 400, "status": "INVALID_ARGUMENT",
+        "message": format!("Changes cannot be sent for review automatically. {TOKEN}")}});
+    let in_review = json!({"error": {"code": 400, "status": "FAILED_PRECONDITION",
+        "details": [{"reason": "CHANGES_ALREADY_IN_REVIEW"}]}});
+
+    // An app whose last update Google rejected: the held commit goes through.
+    let fixture = Fixture::new();
+    let first = refused.clone();
+    let server = Server::start(move |origin, index, request| match index {
+        5 => Reply::json(400, first.clone()),
+        _ => success_reply(origin, index, request),
+    });
+    let result = server
+        .client()
+        .upload(
+            TOKEN,
+            &fixture.release,
+            fixture.file(),
+            &OperationScope::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.status, "draft");
+    let requests = server.requests();
+    assert_eq!(commits(&requests), [plain, held]);
+    assert!(requests.iter().all(|request| request.method != "DELETE"));
+
+    // Changes already in review: no second commit, the edit is cleaned up, and the review stays.
+    let fixture = Fixture::new();
+    let first = in_review.clone();
+    let server = Server::start(move |origin, index, request| match index {
+        5 => Reply::json(400, first.clone()),
+        _ => success_reply(origin, index, request),
+    });
+    let error = server
+        .client()
+        .upload(
+            TOKEN,
+            &fixture.release,
+            fixture.file(),
+            &OperationScope::new(),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("already has changes in review"), "{error}");
+    assert!(
+        error.ends_with("(HTTP 400: CHANGES_ALREADY_IN_REVIEW)"),
+        "{error}"
+    );
+    let requests = server.requests();
+    assert_eq!(commits(&requests), [plain]);
+    assert_eq!(requests.last().unwrap().method, "DELETE");
+
+    // Refused both ways: two commits at most, the second's refusal reported, no text echoed.
+    let fixture = Fixture::new();
+    let server = Server::start(move |origin, index, request| match index {
+        5 | 6 => Reply::json(400, refused.clone()),
+        _ => success_reply(origin, index, request),
+    });
+    let error = server
+        .client()
+        .upload(
+            TOKEN,
+            &fixture.release,
+            fixture.file(),
+            &OperationScope::new(),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+    assert!(error.ends_with("(HTTP 400)"), "{error}");
+    assert!(!error.contains(TOKEN));
+    let requests = server.requests();
+    assert_eq!(commits(&requests), [plain, held]);
+    assert_eq!(requests.last().unwrap().method, "DELETE");
 }
 
 #[tokio::test]
@@ -944,14 +1036,153 @@ fn http_failures_give_fixed_guidance_with_the_status_and_never_the_body() {
         (500, "could not complete"),
         (503, "could not complete"),
     ] {
-        let error = check_status(StatusCode::from_u16(status).unwrap()).unwrap_err();
+        let error = refusal(StatusCode::from_u16(status).unwrap(), None);
         assert!(error.contains(needle), "{status}: {error}");
         assert!(error.ends_with(&format!("(HTTP {status})")), "{error}");
     }
-    for status in [200, 201, 204] {
-        assert!(check_status(StatusCode::from_u16(status).unwrap()).is_ok());
+}
+
+#[test]
+fn a_refusal_reason_comes_only_from_googles_reason_codes() {
+    let disabled = json!({"error": {"code": 403, "status": "PERMISSION_DENIED",
+        "message": "Google Play Android Developer API has not been used in project 123 before or it is disabled.",
+        "errors": [{"domain": "usageLimits", "reason": "accessNotConfigured"}],
+        "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "SERVICE_DISABLED",
+            "domain": "googleapis.com", "metadata": {"service": "androidpublisher.googleapis.com"}}]}});
+    let reason = |body: Value| refusal_reason(&serde_json::to_vec(&body).unwrap());
+    assert_eq!(reason(disabled).as_deref(), Some("SERVICE_DISABLED"));
+    assert_eq!(
+        reason(json!({"error": {"errors": [{"reason": "accessNotConfigured"}]}})).as_deref(),
+        Some("accessNotConfigured")
+    );
+    for code in ["forbidden", "permissionDenied"] {
+        assert_eq!(
+            reason(json!({"error": {"code": 403, "status": "PERMISSION_DENIED",
+                "message": "The caller does not have permission",
+                "errors": [{"domain": "global", "reason": code}]}}))
+            .as_deref(),
+            Some(code)
+        );
     }
-    assert!(check_status(StatusCode::PERMANENT_REDIRECT).is_err());
+    // An unknown code does not hide a known one behind it, but is kept when it is all there is.
+    assert_eq!(
+        reason(json!({"error": {"details": [{"reason": "SOMETHING_NEW"}],
+            "errors": [{"reason": "forbidden"}]}}))
+        .as_deref(),
+        Some("forbidden")
+    );
+    assert_eq!(
+        reason(
+            json!({"error": {"details": [{"reason": "ya29.token-secret"}],
+            "errors": [{"reason": "projectNotLinked"}]}})
+        )
+        .as_deref(),
+        Some("projectNotLinked")
+    );
+    for body in [
+        json!({"error": {"message": "SERVICE_DISABLED forbidden"}}),
+        json!({"error": {"status": "PERMISSION_DENIED"}}),
+        json!({"error": {"errors": [{"reason": 403}]}}),
+        json!({"error": {"errors": [{"reason": ""}]}}),
+        json!({"error": {"errors": [{"reason": "https://evil.example/"}]}}),
+        json!({"error": {"errors": [{"reason": "x".repeat(65)}]}}),
+        json!({"error": "invalid_grant"}),
+        json!([]),
+    ] {
+        assert_eq!(reason(body.clone()), None, "{body}");
+    }
+    assert_eq!(refusal_reason(b"<html>Forbidden</html>"), None);
+    assert!(
+        refusal(StatusCode::FORBIDDEN, Some("SERVICE_DISABLED"))
+            .contains("Developer API is disabled")
+    );
+    assert!(
+        refusal(StatusCode::FORBIDDEN, Some("permissionDenied"))
+            .contains("refused this service account")
+    );
+    assert!(
+        refusal(StatusCode::FORBIDDEN, Some("projectNotLinked"))
+            .ends_with("under App integrity. (HTTP 403: projectNotLinked)")
+    );
+}
+
+#[tokio::test]
+async fn a_refused_edit_names_the_fix_google_gives_and_none_of_its_text() {
+    for (code, needle) in [
+        ("SERVICE_DISABLED", "Developer API is disabled"),
+        ("forbidden", "refused this service account"),
+        (
+            "unrecognised",
+            "and sign the bundle with the app's upload key",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let server = Server::start(move |_, _, _| {
+            Reply::json(
+                403,
+                json!({"error": {"message": format!("{TOKEN} PRIVATE KEY session-secret"),
+                    "details": [{"reason": code}]}}),
+            )
+        });
+        let error = server
+            .client()
+            .upload(
+                TOKEN,
+                &fixture.release,
+                fixture.file(),
+                &OperationScope::new(),
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains(needle), "{code}: {error}");
+        assert!(error.ends_with(&format!("(HTTP 403: {code})")), "{error}");
+        assert!(!error.contains(TOKEN));
+        assert!(!error.contains("PRIVATE KEY"));
+        assert!(!error.contains("session-secret"));
+        // The edit was never created, so there is nothing to delete.
+        assert_eq!(server.requests().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_refused_key_is_reported_as_the_key_and_not_as_the_upload() {
+    for status in [400, 401] {
+        let server = Server::start(move |_, _, _| {
+            Reply::json(
+                status,
+                json!({"error": "invalid_grant", "error_description": "Invalid JWT Signature."}),
+            )
+        });
+        let error = server
+            .client()
+            .authenticate(&test_account(), &OperationScope::new())
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("rejected the service-account key"),
+            "{error}"
+        );
+        assert!(error.ends_with(&format!("(HTTP {status})")), "{error}");
+        assert!(!error.contains("Invalid JWT"));
+    }
+}
+
+#[test]
+fn a_firebase_configuration_is_named_rather_than_refused_as_any_other_file() {
+    let firebase = json!({"project_info": {"project_number": "123", "project_id": "example"},
+        "client": [{"api_key": [{"current_key": "AIza-SECRET"}]}], "configuration_version": "1"});
+    let error = parse_account(&serde_json::to_vec(&firebase).unwrap())
+        .err()
+        .unwrap();
+    assert!(error.contains("google-services.json"), "{error}");
+    assert!(!error.contains("SECRET"));
+    for other in [json!({"project_info": {}}), json!({"installed": {}})] {
+        let error = parse_account(&serde_json::to_vec(&other).unwrap())
+            .err()
+            .unwrap();
+        assert_eq!(error, "Choose a Google service-account JSON key file.");
+    }
 }
 
 #[test]

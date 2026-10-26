@@ -208,11 +208,7 @@ async function setupHelp(): Promise<void> {
                 v-else-if="upload?.status === 'failed'"
                 tone="danger"
                 title="Upload did not finish"
-                ><p>{{ upload.error }}</p>
-                <p class="mt-1">
-                    Check Play Console before retrying; Google may already have received this
-                    version.
-                </p></Callout
+                ><p>{{ upload.error }}</p></Callout
             >
         </div>
         <details>
