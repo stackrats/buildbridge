@@ -849,9 +849,11 @@ pub(crate) fn save_apple_device_run_error(paths: &MachinePaths, error: &str) -> 
     let error = error
         .chars()
         .filter(|character| !character.is_control() || *character == '\n')
-        .take(8_000)
         .collect::<String>();
-    write_restricted_file(&paths.apple_device_run_error(), error.as_bytes())
+    write_restricted_file(
+        &paths.apple_device_run_error(),
+        retained_error(&error).as_bytes(),
+    )
 }
 
 pub(crate) fn remove_apple_device_run_error(paths: &MachinePaths) -> Result<(), String> {

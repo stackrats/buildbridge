@@ -205,9 +205,11 @@ fn save_android_device_run_error(paths: &MachinePaths, error: &str) -> Result<()
     let error = error
         .chars()
         .filter(|character| !character.is_control() || *character == '\n')
-        .take(8_000)
         .collect::<String>();
-    write_restricted_file(&paths.android_device_run_error(), error.as_bytes())
+    write_restricted_file(
+        &paths.android_device_run_error(),
+        retained_error(&error).as_bytes(),
+    )
 }
 
 fn remove_android_device_run_error(paths: &MachinePaths) -> Result<(), String> {
