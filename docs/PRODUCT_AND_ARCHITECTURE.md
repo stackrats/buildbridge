@@ -1512,6 +1512,19 @@ The following decisions should be treated as settled until this document is deli
     no `xcodebuild` behind it, and a clean run afterwards both exported and repaired a default
     that an earlier interrupted run had left pointing at buildbridge's keychain.
 
+    A headless export also needs the machine to stay awake (2026-10-29). The guest idles to
+    sleep after ten minutes without keyboard or pointer use, an SSH command does not count as
+    use, and buildbridge's keychain is created to lock when the machine sleeps. Xcode holds its
+    own assertion against idle sleep only while it builds, so on a guest nobody had touched
+    since it started, an archive whose build outlasted the interval put the machine to sleep the
+    second Xcode let go, and the export that followed found the keychain locked: securityd asked
+    for its password, could not over SSH, and `codesign` reported `errSecInternalComponent` on
+    the first framework it re-signed. The signing helper now holds a
+    `PreventUserIdleSystemSleep` assertion of its own for as long as any of its modes runs, from
+    before the keychain is unlocked until after it is locked again. Lock-on-sleep stays: the
+    assertion stops only idle sleep, so a machine that is put to sleep still locks the keychain,
+    and buildbridge never relies on it staying open across a sleep.
+
 65. Finding a machine in the sidebar (2026-09-08). A host that builds for several teams ends up
     with more machines than fit the eye, so the machine list takes a filter: one field under the
     heading, matching the machine's name, the platform it builds for, its identifier, and

@@ -2097,6 +2097,26 @@ mod tests {
     }
 
     #[test]
+    fn signing_helper_keeps_the_guest_awake_while_it_runs() {
+        let helper_source = String::from_utf8_lossy(SIGNING_HELPER_SOURCE);
+        assert!(helper_source.contains("kIOPMAssertPreventUserIdleSystemSleep"));
+        assert!(helper_source.contains("IOPMAssertionRelease"));
+        // The assertion is taken before any mode runs, so it covers every unlock.
+        let main = &helper_source[helper_source
+            .find("int main(")
+            .expect("the helper should have a main")..];
+        let awake = main
+            .find("keep_awake()")
+            .expect("main should keep the guest awake");
+        let mode = main.find("run_mode(").expect("main should run the mode");
+        assert!(awake < mode);
+
+        let compile = signing_helper_compile_command("/tmp/helper.c", "/tmp/helper");
+        assert!(compile.contains("-framework IOKit"));
+        assert!(compile.contains("-framework Security"));
+    }
+
+    #[test]
     fn signing_target_rejects_shell_or_wildcard_values() {
         assert!(validate_signing_target("TEAM123456", "com.example.app").is_ok());
         assert!(validate_signing_target("$(command)", "com.example.app").is_err());

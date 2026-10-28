@@ -1,4 +1,5 @@
 #include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/pwr_mgt/IOPMLib.h>
 #include <Security/Security.h>
 
 #include <arpa/inet.h>
@@ -289,6 +290,35 @@ static void catch_interruptions(void) {
     for (size_t index = 0; index < sizeof(signals) / sizeof(*signals); index++) {
         sigaction(signals[index], &action, NULL);
     }
+}
+
+/*
+ * A guest nobody is using sleeps once it has been idle for its sleep interval, and an SSH
+ * command does not count as use. The signing keychain locks when the machine sleeps, so a
+ * sleep while it is unlocked leaves the next signature to a locked keychain, which `codesign`
+ * reports as errSecInternalComponent because it cannot ask for the password over SSH. Xcode
+ * keeps the machine awake only while it builds: the moment an archive's build ends on a guest
+ * idle for longer than the interval, the machine goes to sleep, and the export that starts a
+ * second later signs with its keychain locked.
+ *
+ * So the helper keeps the machine from idling to sleep for as long as it runs. Losing the
+ * assertion is not fatal, since the operation still succeeds when the machine stays awake on
+ * its own; it is noted so a later errSecInternalComponent can be traced to it. powerd drops
+ * the assertion with the process, so one killed outright does not hold the machine awake.
+ */
+static IOPMAssertionID keep_awake(void) {
+    IOPMAssertionID assertion = kIOPMNullAssertionID;
+    IOReturn status = IOPMAssertionCreateWithName(
+        kIOPMAssertPreventUserIdleSystemSleep,
+        kIOPMAssertionLevelOn,
+        CFSTR("buildbridge signing"),
+        &assertion
+    );
+    if (status != kIOReturnSuccess) {
+        fprintf(stderr, "prevent_idle_sleep:%d\n", (int)status);
+        return kIOPMNullAssertionID;
+    }
+    return assertion;
 }
 
 static int run_tool(const char *path, char *const arguments[]) {
@@ -770,9 +800,7 @@ cleanup:
     return result;
 }
 
-int main(int argc, char **argv) {
-    /* Every mode puts something back on the way out, so none of them may die on a signal. */
-    catch_interruptions();
+static int run_mode(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--probe") == 0) {
         return run_code_signing_probe(argc, argv);
     }
@@ -1009,5 +1037,16 @@ cleanup:
     if (xcodebuild != NULL) CFRelease(xcodebuild);
     if (codesign != NULL) CFRelease(codesign);
     if (keychain != NULL) CFRelease(keychain);
+    return result;
+}
+
+int main(int argc, char **argv) {
+    /* Every mode puts something back on the way out, so none of them may die on a signal. */
+    catch_interruptions();
+    /* Every mode holds the keychain unlocked while it works, so none of them may let the
+     * machine sleep under it. */
+    IOPMAssertionID assertion = keep_awake();
+    int result = run_mode(argc, argv);
+    if (assertion != kIOPMNullAssertionID) IOPMAssertionRelease(assertion);
     return result;
 }
