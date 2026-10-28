@@ -145,13 +145,47 @@ pub(crate) fn remove_android_release_record(paths: &MachinePaths) -> Result<(), 
     remove_file_if_present(&paths.android_release_record())
 }
 
+/// The most of a failure's text that its retained record keeps.
+const RETAINED_ERROR_CHARS: usize = 8_000;
+/// The most of a failure's opening line that a shortened record keeps.
+const RETAINED_SUMMARY_CHARS: usize = 600;
+
+/// Fits a failure's text into its retained record. A guest failure is a one-line summary of
+/// what failed and then the output that led to it, which ends with the failing command, so a
+/// failure too long to keep whole keeps its summary and its end and drops the middle. Keeping
+/// the start instead once lost an export's error behind the archive's own signing lines.
+pub(crate) fn retained_error(error: &str) -> String {
+    let length = error.chars().count();
+    if length <= RETAINED_ERROR_CHARS {
+        return error.to_string();
+    }
+    let summary = error
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(RETAINED_SUMMARY_CHARS)
+        .collect::<String>();
+    let gap = "\n…\n";
+    let room = RETAINED_ERROR_CHARS - summary.chars().count() - gap.chars().count();
+    let end = error.chars().skip(length - room).collect::<String>();
+    // The end starts at a whole line when the cut leaves one to start at.
+    let end = match end.split_once('\n') {
+        Some((_, rest)) if !rest.is_empty() => rest.to_string(),
+        _ => end,
+    };
+    format!("{summary}{gap}{end}")
+}
+
 pub(crate) fn save_android_release_error(paths: &MachinePaths, error: &str) -> Result<(), String> {
     let error = error
         .chars()
         .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
-        .take(8_000)
         .collect::<String>();
-    write_restricted_file(&paths.android_release_error(), error.as_bytes())
+    write_restricted_file(
+        &paths.android_release_error(),
+        retained_error(&error).as_bytes(),
+    )
 }
 
 pub(crate) fn remove_android_release_error(paths: &MachinePaths) -> Result<(), String> {
@@ -163,6 +197,52 @@ fn require_android_release_artifact(result: &AndroidReleaseResult) -> Result<(),
         return Err("The retained Android release has no artifacts.".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod retained_error_tests {
+    use super::*;
+
+    #[test]
+    fn a_short_failure_is_kept_whole() {
+        let error = "the signed archive failed during Exporting:\n** EXPORT FAILED **";
+        assert_eq!(retained_error(error), error);
+    }
+
+    #[test]
+    fn a_long_failure_keeps_its_summary_and_its_end() {
+        // The shape of the export that failed behind a long archive: the summary, every
+        // routine signing line the archive printed, then the export's own failure.
+        let summary = "macOS guest bridge failed: the signed archive failed during Exporting the App Store Connect IPA:";
+        let signing = (0..40)
+            .map(|index| {
+                format!(
+                    "/usr/bin/codesign --force --sign 9795EB4F --keychain /Users/guest/Library/Keychains/buildbridge-signing.keychain-db '/Users/guest/Library/Caches/archive/App.app/Frameworks/Framework{index}.framework' {}",
+                    "-".repeat(200)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let failure = "error: exportArchive codesign command failed (Capacitor.framework: errSecInternalComponent)\n** EXPORT FAILED **\nxcode_export_failed";
+        let error = format!("{summary}\n{signing}\n{failure}");
+        assert!(error.chars().count() > RETAINED_ERROR_CHARS);
+
+        let retained = retained_error(&error);
+        assert!(retained.chars().count() <= RETAINED_ERROR_CHARS);
+        assert!(retained.starts_with(&format!("{summary}\n…\n/usr/bin/codesign ")));
+        assert!(retained.contains("errSecInternalComponent"));
+        assert!(retained.ends_with("xcode_export_failed"));
+    }
+
+    #[test]
+    fn a_long_single_line_failure_keeps_both_of_its_ends() {
+        let error = format!("start {} end", "x".repeat(RETAINED_ERROR_CHARS * 2));
+
+        let retained = retained_error(&error);
+        assert!(retained.chars().count() <= RETAINED_ERROR_CHARS);
+        assert!(retained.starts_with("start "));
+        assert!(retained.ends_with(" end"));
+    }
 }
 
 #[cfg(test)]
@@ -536,9 +616,11 @@ pub(crate) fn save_apple_archive_error(paths: &MachinePaths, error: &str) -> Res
     let error = error
         .chars()
         .filter(|character| !character.is_control() || *character == '\n')
-        .take(8_000)
         .collect::<String>();
-    write_restricted_file(&paths.apple_archive_error(), error.as_bytes())
+    write_restricted_file(
+        &paths.apple_archive_error(),
+        retained_error(&error).as_bytes(),
+    )
 }
 
 pub(crate) fn remove_apple_archive_error(paths: &MachinePaths) -> Result<(), String> {

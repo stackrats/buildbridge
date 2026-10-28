@@ -22,20 +22,25 @@ pub(crate) fn install_signing_helper(
         helper_source,
         "signing helper",
     )?;
-    let compile = format!(
-        "set -eu; /usr/bin/xcrun --sdk macosx clang -std=c11 -O2 -Wno-deprecated-declarations {} -framework Security -framework CoreFoundation -o {}; /bin/chmod 700 {}",
-        shell_single_quote(helper_source),
-        shell_single_quote(helper_binary),
-        shell_single_quote(helper_binary),
-    );
     run_guest_command(
         ssh_port,
         username,
         identity_path,
         known_hosts_path,
-        &compile,
+        &signing_helper_compile_command(helper_source, helper_binary),
     )
     .map(|_| ())
+}
+
+/// IOKit is linked for the power assertion that keeps the guest from idling to sleep, and so
+/// locking the keychain, while the helper runs.
+pub(crate) fn signing_helper_compile_command(helper_source: &str, helper_binary: &str) -> String {
+    format!(
+        "set -eu; /usr/bin/xcrun --sdk macosx clang -std=c11 -O2 -Wno-deprecated-declarations {} -framework Security -framework CoreFoundation -framework IOKit -o {}; /bin/chmod 700 {}",
+        shell_single_quote(helper_source),
+        shell_single_quote(helper_binary),
+        shell_single_quote(helper_binary),
+    )
 }
 
 /// What one identity import needs beyond the identity itself: the guest helper, the keychain,
